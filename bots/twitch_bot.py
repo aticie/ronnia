@@ -1,12 +1,17 @@
 import os
 from threading import Thread
 from abc import ABC
+from typing import AnyStr, Tuple, Union
+import logging
 
 from twitchio.ext import commands
 from twitchio import Message
-import aiohttp
 
-from irc_bot import IrcBot
+from helpers.beatmap_link_parser import parse_beatmap_link
+from helpers.osu_api_helper import OsuApiHelper
+from bots.irc_bot import IrcBot
+
+logger = logging.getLogger('ronnia')
 
 
 class TwitchBot(commands.Bot, ABC):
@@ -21,19 +26,18 @@ class TwitchBot(commands.Bot, ABC):
             'initial_channels': initial_channels
         }
         super().__init__(**args)
-        self._osu_api_key = os.getenv('OSU_API_KEY')
 
+        self.osu_api = OsuApiHelper()
         self.irc_bot = IrcBot("#osu", "heyronii", "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
         p = Thread(target=self.irc_bot.start)
         p.start()
         self.channel_mappings = channel_mappings
 
     async def event_message(self, message: Message):
-        print(f"Received message: {message.content}")
-        link, beatmap_id = self._check_message_contains_beatmap_link(message)
+        logger.info(f"Received message: {message.content}")
+        link, api_params = self._check_message_contains_beatmap_link(message)
         if link:
-            beatmap_info = await self._get_beatmap_info(beatmap_id)
-
+            beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             await self._send_twitch_message(message, beatmap_info)
             await self._send_irc_message(message, beatmap_info)
             await self.handle_commands(message)
@@ -54,27 +58,19 @@ class TwitchBot(commands.Bot, ABC):
         await message.channel.send(f"{bmap_info_text} - Yayıncıya ilettim!")
         return
 
-    def _check_message_contains_beatmap_link(self, message: Message):
-        print("Checking if message contains beatmap link")
+    @staticmethod
+    def _check_message_contains_beatmap_link(message: Message) -> Tuple[Union[AnyStr, None], Union[dict, None]]:
+        logger.debug("Checking if message contains beatmap link")
         content = message.content
 
         for candidate_link in content.split(' '):
-            beatmap_id = self._parse_beatmap_link(candidate_link)
-            if beatmap_id:
-                print(f"Found beatmap id: {beatmap_id}")
-                return candidate_link, beatmap_id
+            result = parse_beatmap_link(candidate_link)
+            if result:
+                logger.debug(f"Found beatmap id: {result}")
+                return candidate_link, result
         else:
-            print("Couldn't find beatmap in message")
+            logger.debug("Couldn't find beatmap in message")
             return None, None
-
-    async def _get_beatmap_info(self, beatmap_id):
-        params = {"k": self._osu_api_key,
-                  "b": beatmap_id}
-        async with aiohttp.ClientSession() as session:
-            async with session.get('http://osu.ppy.sh/api/get_beatmaps', params=params) as response:
-                r = await response.json()
-
-        return r[0]
 
     @staticmethod
     def _prepare_irc_message(author, beatmap_info):
@@ -115,4 +111,4 @@ class TwitchBot(commands.Bot, ABC):
             return None
 
     async def event_ready(self):
-        print(f'Ready | {self.nick}')
+        logger.info(f'Ready | {self.nick}')
