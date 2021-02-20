@@ -1,6 +1,9 @@
 import os
+import logging
 
 import aiohttp
+
+logger = logging.getLogger('ronnia')
 
 
 class OsuApiHelper:
@@ -14,8 +17,11 @@ class OsuApiHelper:
         async with aiohttp.ClientSession() as session:
             async with session.get('http://osu.ppy.sh/api/get_beatmaps', params=merged_params) as response:
                 r = await response.json()
-
-        return r[0]
+        try:
+            return r[0]
+        except IndexError:
+            logger.debug(f'Couldn\'t find beatmap! Api returned: \n {r}')
+            return None
 
 
 if __name__ == '__main__':

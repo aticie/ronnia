@@ -76,13 +76,11 @@ def parse_beatmap_link(beatmap_link: str):
     result = parse_single_beatmap(beatmap_link)
 
     if result:
-        return {'m': result[0],
-                'b': result[1]}
+        return {'b': result[1]}
     else:
         result = parse_beatmapset(beatmap_link)
         if result:
-            return {'m': result[0],
-                    's': result[1]}
+            return {'s': result[1]}
         else:
             return None
 

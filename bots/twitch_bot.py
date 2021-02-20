@@ -38,9 +38,10 @@ class TwitchBot(commands.Bot, ABC):
         link, api_params = self._check_message_contains_beatmap_link(message)
         if link:
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
-            await self._send_twitch_message(message, beatmap_info)
-            await self._send_irc_message(message, beatmap_info)
-            await self.handle_commands(message)
+            if beatmap_info:
+                await self._send_twitch_message(message, beatmap_info)
+                await self._send_irc_message(message, beatmap_info)
+                await self.handle_commands(message)
 
     async def _send_irc_message(self, message, beatmap_info):
         irc_message = self._prepare_irc_message(message.author.name, beatmap_info)
