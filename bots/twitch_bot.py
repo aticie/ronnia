@@ -35,16 +35,16 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_message(self, message: Message):
         logger.info(f"Received message: {message.content}")
-        link, api_params = self._check_message_contains_beatmap_link(message)
-        if link:
+        given_mods, api_params = self._check_message_contains_beatmap_link(message)
+        if given_mods:
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
                 await self._send_twitch_message(message, beatmap_info)
-                await self._send_irc_message(message, beatmap_info)
+                await self._send_irc_message(message, beatmap_info, given_mods)
                 await self.handle_commands(message)
 
-    async def _send_irc_message(self, message, beatmap_info):
-        irc_message = self._prepare_irc_message(message.author.name, beatmap_info)
+    async def _send_irc_message(self, message, beatmap_info, given_mods):
+        irc_message = self._prepare_irc_message(message.author.name, beatmap_info, given_mods)
 
         irc_target_channel = self.channel_mappings[message.channel.name]
         self.irc_bot.send_message(irc_target_channel, irc_message)
@@ -65,16 +65,16 @@ class TwitchBot(commands.Bot, ABC):
         content = message.content
 
         for candidate_link in content.split(' '):
-            result = parse_beatmap_link(candidate_link)
+            result, mods = parse_beatmap_link(candidate_link, content)
             if result:
                 logger.debug(f"Found beatmap id: {result}")
-                return candidate_link, result
+                return mods, result
         else:
             logger.debug("Couldn't find beatmap in message")
             return None, None
 
     @staticmethod
-    def _prepare_irc_message(author, beatmap_info):
+    def _prepare_irc_message(author, beatmap_info, given_mods):
 
         artist = beatmap_info['artist']
         title = beatmap_info['title']
@@ -82,7 +82,7 @@ class TwitchBot(commands.Bot, ABC):
         bpm = beatmap_info['bpm']
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
-        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*)"
+        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) +{given_mods}"
         return f"{author} -> {beatmap_info}"
 
     @staticmethod

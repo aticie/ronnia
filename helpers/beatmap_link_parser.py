@@ -6,6 +6,45 @@ legacy_mode_converter = {'osu': '0',
                          'fruits': '2',
                          'mania': '3'}
 
+mod_bit_shift_dict = {
+    "NF": 0,
+    "EZ": 1,
+    "HD": 3,
+    "HR": 4,
+    "SD": 5,
+    "DT": 6,
+    "HT": 8,
+    "NC": 9,
+    "FL": 10,
+    "SO": 12,
+    "PF": 14,
+}
+
+
+def get_mod_from_text(content, candidate_link):
+    pattern = r'^\+([A-Za-z]+)'
+    text = content.split(candidate_link)[-1].strip()
+    match = re.search(pattern, text)
+
+    if match:
+        mods = match.group(1)
+        if len(mods) % 2 == 1:
+            mods = mods[:-1]
+        mods = mods.upper()
+
+        mods_as_list = [mods[i:i + 2] for i in range(0, len(mods), 2)]
+        mods_as_int = 0
+
+        mods_as_text = ""
+        for mod in mods_as_list:
+            if mod in mod_bit_shift_dict:
+                mods_as_int |= 1 << mod_bit_shift_dict[mod]
+                mods_as_text += mod
+
+        return mods_as_int, mods_as_text
+
+    return None, None
+
 
 def extract_url_headers(headers_string, desired_keys):
     headers = {head.split('=')[0]: head.split('=')[1] for head in headers_string.split('&')}
@@ -20,9 +59,6 @@ def extract_url_headers(headers_string, desired_keys):
 
 
 def parse_beatmapset(map_link: str):
-    # pattern_old = r"https?:\/\/osu.ppy.sh\/s"
-    # pattern_new = r"https?:\/\/osu.ppy.sh\/beatmapsets\/1341551"
-
     patterns = {'official': r"https?:\/\/osu.ppy.sh\/beatmapsets\/([0-9]+).+",
                 'old': r"https?:\/\/(osu|old).ppy.sh\/s\/([0-9]+)",
                 'old_alternate': r"https?:\/\/(osu|old).ppy.sh\/p\/beatmap\?(.+)"
@@ -72,17 +108,20 @@ def parse_single_beatmap(map_link: str) -> Union[Sequence[AnyStr], None]:
     return None
 
 
-def parse_beatmap_link(beatmap_link: str):
+def parse_beatmap_link(beatmap_link: str, content: str):
+    beatmap_link = beatmap_link.split('+')[0]
     result = parse_single_beatmap(beatmap_link)
 
     if result:
-        return {'b': result[1]}
+        mods_as_int, mods_as_text = get_mod_from_text(content, beatmap_link)
+        return {'b': result[1]}, mods_as_text  # 'mods': mods_as_int}, mods_as_text
     else:
         result = parse_beatmapset(beatmap_link)
         if result:
-            return {'s': result[1]}
+            mods_as_int, mods_as_text = get_mod_from_text(content, beatmap_link)
+            return {'s': result[1]}, mods_as_text  # 'mods': mods_as_int}, mods_as_text
         else:
-            return None
+            return None, None
 
 
 if __name__ == '__main__':
@@ -97,4 +136,3 @@ if __name__ == '__main__':
 
     for bmap_link in test_beatmap_links:
         print(parse_beatmap_link(bmap_link))
-
