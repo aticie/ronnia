@@ -36,7 +36,7 @@ class TwitchBot(commands.Bot, ABC):
     async def event_message(self, message: Message):
         logger.info(f"Received message: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
-        if given_mods:
+        if given_mods is not None:
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
                 await self._send_twitch_message(message, beatmap_info)

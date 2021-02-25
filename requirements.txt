@@ -1,0 +1,3 @@
+twitchio>=1.2.0
+irc>=19.0.0
+aiohttp>=3.7.0
