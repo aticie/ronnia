@@ -28,6 +28,7 @@ The reason I'm not letting everyone set-up the bot by themselves is that I don't
 and my osu! account might get silenced. For now, I'm testing the stress by allowing channels in a slow manner.
 
 ## Cool Gifs 😎
+![Just send a beatmap link](cool_gifs/usage.gif)
 
 ## Setup 📦
 
