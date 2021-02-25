@@ -6,6 +6,7 @@ import irc.bot
 
 logger = logging.getLogger('ronnia')
 
+
 class IrcBot(irc.bot.SingleServerIRCBot):
     def __init__(self, channel, nickname, server, port=6667, password=None):
         irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname)
@@ -16,7 +17,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         c.join(self.channel)
 
     def send_message(self, target, cmd):
-        logger.debug(f"Sending irc message: {cmd}")
+        logger.info(f"Sending irc message: {cmd}")
         with self.message_lock:
             c = self.connection
             c.privmsg(target, cmd)
