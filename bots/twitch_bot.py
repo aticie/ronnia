@@ -56,7 +56,7 @@ class TwitchBot(commands.Bot, ABC):
         title = beatmap_info['title']
         version = beatmap_info['version']
         bmap_info_text = f"{artist} - {title} [{version}]"
-        await message.channel.send(f"{bmap_info_text} - Yayıncıya ilettim!")
+        await message.channel.send(f"{bmap_info_text} - Request sent!")
         return
 
     @staticmethod
