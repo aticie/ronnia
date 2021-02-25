@@ -13,10 +13,10 @@ a bot account on osu!. The only criteria I haven't met is the 6 months criteria.
 
 ## Usage✍️
 
-The bot right now is still in very early stages. You may encounter many bugs as I add new features. (Use at your own
+The bot right now is still in the very early stages. You may encounter many bugs as I add new features. (Use at your own
 risk!)
 
-Currently I'm manually adding channels that want to use the bot. To enable it on your Twitch channel, send me a pm on:
+Currently, I'm manually adding channels that want to use the bot. To enable it on your Twitch channel, send me a pm on:
 
 - Discord: `heyronii#9925`
 - osu!: https://osu.ppy.sh/users/5642779
@@ -25,7 +25,7 @@ Currently I'm manually adding channels that want to use the bot. To enable it on
 and I will set it up for you!
 
 The reason I'm not letting everyone set-up the bot by themselves is that I don't know if it might get too many requests
-and my osu! account might get silenced. For now, I'm testing the stress by allowing channels in a slow manner.
+and my osu! account might get silenced. For now, I'm examining the memory usage and its behaviour under heavy load by allowing channels gradually.
 
 ## Cool Gifs 😎
 ![Just send a beatmap link](cool_gifs/usage.gif)
