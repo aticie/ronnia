@@ -82,7 +82,7 @@ class TwitchBot(commands.Bot, ABC):
         bpm = beatmap_info['bpm']
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
-        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) +{given_mods}"
+        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) {given_mods}"
         return f"{author} -> {beatmap_info}"
 
     @staticmethod

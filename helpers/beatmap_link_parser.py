@@ -35,7 +35,7 @@ def get_mod_from_text(content, candidate_link):
         mods_as_list = [mods[i:i + 2] for i in range(0, len(mods), 2)]
         mods_as_int = 0
 
-        mods_as_text = ""
+        mods_as_text = "+"
         for mod in mods_as_list:
             if mod in mod_bit_shift_dict:
                 mods_as_int |= 1 << mod_bit_shift_dict[mod]
@@ -43,7 +43,7 @@ def get_mod_from_text(content, candidate_link):
 
         return mods_as_int, mods_as_text
 
-    return None, None
+    return 0, ""
 
 
 def extract_url_headers(headers_string, desired_keys):
