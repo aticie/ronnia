@@ -62,7 +62,7 @@ class TwitchBot(commands.Bot, ABC):
                 await self._send_irc_message(message, beatmap_info, given_mods)
 
     async def check_request_criteria(self, message: Message):
-        test_status = self.users_db.get_test_status(message.author.name)
+        test_status = self.users_db.get_test_status(message.channel.name)
         self.check_if_author_is_broadcaster(message, test_status)
         await self.check_if_streaming_osu(message.channel, test_status)
 

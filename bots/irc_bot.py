@@ -1,7 +1,6 @@
 import logging
 import time
 import asyncio
-from queue import Queue
 from threading import Lock
 
 import irc.bot

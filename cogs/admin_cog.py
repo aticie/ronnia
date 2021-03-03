@@ -14,7 +14,7 @@ class AdminCog:
     def __init__(self, bot: TwitchBot):
         self.bot = bot
 
-    @commands.command(aliases=["adduser"])
+    @commands.command(name="adduser")
     async def add_user_to_db(self, ctx: Context, *args):
         if ctx.author.name != os.getenv('BOT_NICK'):
             return
@@ -26,7 +26,7 @@ class AdminCog:
         await self.bot.join_channels([twitch_username])
         logger.info(f'Adding {twitch_username} - {osu_username} to user database!')
 
-    @commands.command(aliases=["rmuser"])
+    @commands.command(name="rmuser")
     async def remove_user_from_db(self, ctx: Context, *args):
         if ctx.author.name != os.getenv('BOT_NICK'):
             return
