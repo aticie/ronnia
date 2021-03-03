@@ -27,7 +27,7 @@ class UserDatabase(BaseDatabase):
         self.sql_string_get_setting = f"SELECT value FROM user_settings " \
                                       f"INNER JOIN settings ON user_settings.key=settings.key " \
                                       f"INNER JOIN users ON users.user_id=user_settings.user_id " \
-                                      f"WHERE user_settings.key=?1 AND twitch_username=?2"
+                                      f"WHERE user_settings.key=? AND users.twitch_username=?"
 
         self.sql_string_insert_setting = f"INSERT INTO user_settings (key, value, user_id) " \
                                          f"VALUES (?1, ?2, ?3);"
@@ -71,12 +71,26 @@ class UserDatabase(BaseDatabase):
         :param osu_username:
         :return:
         """
-        result = self.c.execute(f"SELECT * FROM users WHERE osu_username=?", (osu_username,))
+        result = self.c.execute(f"SELECT * FROM users WHERE twitch_username=?",
+                                (twitch_username,))
         user = result.fetchone()
         if user is None:
-            self.c.execute(f"INSERT OR IGNORE INTO users (twitch_username, osu_username, enabled) VALUES (?, ?, ?)",
+            self.c.execute(f"INSERT INTO users (twitch_username, osu_username, enabled) VALUES (?, ?, ?)",
                            (twitch_username, osu_username, True))
-            self.conn.commit()
+        else:
+            self.c.execute(f"UPDATE users SET osu_username=? WHERE twitch_username=?",
+                           (osu_username, twitch_username))
+        self.conn.commit()
+
+    def remove_user(self, twitch_username: str) -> None:
+        """
+        Removes a user from database
+        :param twitch_username:
+        :param osu_username:
+        :return:
+        """
+        self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
+        self.conn.commit()
 
     def get_user_from_osu_username(self, osu_username: str) -> str:
         """
@@ -205,6 +219,11 @@ class UserDatabase(BaseDatabase):
             self.c.execute(self.sql_string_update_setting, (setting_key, new_value, user_id))
         self.conn.commit()
         return new_value
+
+    def get_all_users(self):
+        result = self.c.execute("SELECT * FROM users;")
+        value = result.fetchall()
+        return value
 
 
 class BeatmapDatabase(BaseDatabase):

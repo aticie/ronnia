@@ -13,19 +13,20 @@ logger = logging.getLogger('ronnia')
 
 
 class IrcBot(irc.bot.SingleServerIRCBot):
-    def __init__(self, channel, nickname, server, port=6667, password=None, shared_message_queue=None):
+    def __init__(self, channel, nickname, server, port=6667, password=None):
         irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname)
         self.channel = channel
         self.users_db = UserDatabase()
         self.users_db.initialize()
 
-        self.shared_message_queue: Queue = shared_message_queue
         self.message_lock = Lock()
 
         self._commands = {'disable': self.disable_requests_on_channel,
                           'echo': self.toggle_notifications,
                           'enable': self.enable_requests_on_channel,
-                          'register': self.register_bot_on_channel}
+                          'register': self.register_bot_on_channel,
+                          'help': self.show_help_message
+                          }
 
     def on_welcome(self, c: ServerConnection, e: Event):
         c.join(self.channel)
@@ -49,71 +50,92 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         # Make command lowercase
         cmd = cmd.lower()
         cmd = cmd[1:]
+        cmd = cmd.split(' ')[0]
 
         # Check if the user is registered
         existing_user = self.users_db.get_user_from_osu_username(e.target)
-        if existing_user is not None and cmd != 'register':
-            await self.send_message(f'Sorry, you are not registered to this bot. '
-                                    f'I\'m not allowing automatic registrations as of yet. '
-                                    f'You can dm me on discord about it (heyronii#9925). '
-                                    f'For more info, type !help')
+        if existing_user is None and cmd == 'register':
+            await self.send_message(e.target,
+                                    f'Hello! Thanks for your interest in this bot! '
+                                    f'But, registering for the bot automatically is not supported currently. '
+                                    f'I\'m hosting this bot with the free tier compute engine... '
+                                    f'So, if it gets too many requests it might blow up! '
+                                    f'That\'s why I\'m manually allowing requests right now. '
+                                    f'(Check out the project page if you haven\'t already.)'
+                                    f'[https://github.com/aticie/ronnia] '
+                                    f'Contact me on discord and I can enable it for you! heyronii#9925')
             return
+        elif existing_user is None:
+            await self.send_message(e.target, f'Sorry, you are not registered...')
         else:
             # Check if command is valid
             try:
-                await self._commands[cmd](e)
+                await self._commands[cmd](e, user_details=existing_user)
             except KeyError:
                 await self.send_message(e.target, f'Sorry, I couldn\'t understand what {cmd} means')
                 pass
 
-    async def disable_requests_on_channel(self, event: Event):
+    async def disable_requests_on_channel(self, event: Event, user_details: tuple):
         """
         Disables requests on twitch channel
-        :param event: Required parameter for event target (osu! username)
+        :param event: Event of the current message
+        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
-        logger.debug(f'Disable requests on channel: {event.target}')
-        self.shared_message_queue.put(('disable', event.target))
-        await self.send_message(event.target,
-                                f'I\'ve disabled requests for now. '
-                                f'If you want to re-enable requests, type !enable anytime.')
+        _, osu_username, twitch_username, enabled = user_details
+        logger.debug(f'Disable requests on channel: {osu_username}')
+        if enabled:
+            self.users_db.disable_channel(twitch_username)
+            await self.send_message(event.target,
+                                    f'I\'ve disabled requests for now. '
+                                    f'If you want to re-enable requests, type !enable anytime.')
+        else:
+            await self.send_message(event.target,
+                                    f'Your requests are already disabled. If you want to enable them, type !enable.')
 
-        pass
-
-    async def register_bot_on_channel(self, event: Event):
+    async def register_bot_on_channel(self, event: Event, user_details: tuple):
         """
         Registers bot on twitch channel
-        :param event: Required parameter for event target (osu! username)
+        :param event: Event of the current message
+        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
 
-        Currently not supported...
+        Currently not supported... TODO: Register user -> ask twitch
         """
-        logger.debug(f'Register bot on channel: {event.target}')
-        await self.send_message(event.target,
-                                f'Hello! Thanks for your interest in this bot! '
-                                f'But, registering for the bot automatically is not supported currently. '
-                                f'I\'m hosting this bot with the free tier compute engine... '
-                                f'So, if it gets too many requests it might blow up! '
-                                f'That\'s why I\'m manually allowing requests right now. '
-                                f'(Check out the project page if you haven\'t already.)'
-                                f'[https://github.com/aticie/ronnia] '
-                                f'Contact me on discord and I can enable it for you! heyronii#9925')
-        pass
+        logger.debug(f'Register bot on channel: {user_details}')
 
-    async def enable_requests_on_channel(self, event: Event):
+    async def enable_requests_on_channel(self, event: Event, user_details: tuple):
         """
         Enables requests on twitch channel
-        :param event: Required parameter for event target (osu! username)
+        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
-        logger.debug(f'Enable requests on channel: {event.target}')
-        self.shared_message_queue.put(('enable', event.target))
-        await self.send_message(event.target,
-                                f'I\'ve enabled requests. Have fun!')
+        _, osu_username, twitch_username, enabled = user_details
+        logger.debug(f'Enable requests on channel: {osu_username}')
+        if enabled:
+            self.users_db.enable_channel(twitch_username)
+            await self.send_message(event.target,
+                                    f'I\'ve enabled requests. Have fun!')
+        else:
+            await self.send_message(event.target,
+                                    f'Your requests are already enabled. If you want to disable them, type !disable.')
 
-    async def toggle_notifications(self, event: Event):
+    async def toggle_notifications(self, event: Event, user_details: tuple):
         """
         Toggles echo notifications on twitch channel when requesting beatmaps
-        :param event: Required parameter for event target (osu! username)
+        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
+        _, osu_username, twitch_username, enabled = user_details
         logger.debug(f'Toggle notifications on channel: {event.target}')
-        self.shared_message_queue.put(('echo', event.target))
+        self.users_db.toggle_echo(twitch_username)
         await self.send_message(event.target, f'I\'ve toggled echo. Check out your twitch chat!')
         pass
+
+    async def show_help_message(self, event: Event, user_details: tuple):
+        """
+        Shows help message to user
+        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
+        :return:
+        """
+        logger.debug(f'Showing help message on channel: {event.target}')
+        await self.send_message(event.target,
+                                f'Check out the (project page)[https://github.com/aticie/ronnia] for more information. '
+                                f'List of available commands are (listed here)'
+                                f'[https://github.com/aticie/ronnia/wiki/Commands].')

@@ -45,7 +45,8 @@ To host the bot, clone this repository. Create a .env file at the root folder wi
 
 ```
 TMI_TOKEN=**** (Get your credentials from here https://twitchapps.com/tmi/)
-CLIENT_ID=**** 
+CLIENT_ID=**** (Get these from https://dev.twitch.tv/console)
+CLIENT_SECRET=****
 BOT_NICK=heyronii (Change this to your Twitch username)
 BOT_PREFIX=! (Currently unused, might change in future)
 IRC_PASSWORD=**** (Get yours from here: https://osu.ppy.sh/p/irc)

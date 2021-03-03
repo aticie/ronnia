@@ -20,56 +20,55 @@ logger = logging.getLogger('ronnia')
 class TwitchBot(commands.Bot, ABC):
     PER_REQUEST_COOLDOWN = 30  # each request has 30 seconds cooldown
 
-    def __init__(self, channel_mappings: dict):
-        initial_channels = [c for c, _ in channel_mappings.items()]
+    def __init__(self):
+        self.users_db = UserDatabase()
+        self.users_db.initialize()
+
+        self.channel_mappings = {user[1]: user[2] for user in self.users_db.get_all_users()}
+        self.initial_channels = [twitch for osu, twitch in self.channel_mappings.items()]
+
         args = {
             'irc_token': os.getenv('TMI_TOKEN'),
             'client_id': os.getenv('CLIENT_ID'),
             'client_secret': os.getenv('CLIENT_SECRET'),
             'nick': os.getenv('BOT_NICK'),
             'prefix': os.getenv('BOT_PREFIX'),
-            'initial_channels': initial_channels
+            'initial_channels': self.initial_channels
         }
         super().__init__(**args)
 
         self.osu_api = OsuApiHelper()
-        self.shared_message_queue = Queue()
-        self.users_db = UserDatabase()
-        self.users_db.initialize()
         self.user_last_request = {}
-        self.irc_bot = IrcBot("#osu", "heyronii", "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"),
-                              shared_message_queue=self.shared_message_queue)
+        self.irc_bot = IrcBot("#osu", os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
 
         p = Thread(target=self.irc_bot.start)
         p.start()
 
-        msg_handler_thread = Thread(target=self._handle_shared_messages)
-        msg_handler_thread.start()
-
-        self.channel_mappings = channel_mappings
-
     async def event_message(self, message: Message):
-        await self.check_all_criteria(message)
+        await self.handle_commands(message)
+        await self.handle_request(message)
+
+    async def handle_request(self, message):
+        self.check_channel_enabled(message.channel.name)
         logger.debug(f"Received message from {message.channel} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
-            await self._check_user_cooldown(message.author)
+            self._check_user_cooldown(message.author)
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
+                await self.check_request_criteria(message)
                 if self.users_db.get_echo_status(twitch_username=message.channel.name):
                     await self._send_twitch_message(message, beatmap_info)
                 await self._send_irc_message(message, beatmap_info, given_mods)
 
-        await self.handle_commands(message)
-
-    async def check_all_criteria(self, message: Message):
-        self.check_channel_enabled(message.channel.name)
-        self.check_if_author_is_broadcaster(message)
-        # await self.check_if_streaming_osu(message.channel)
-
-    def check_if_author_is_broadcaster(self, message: Message):
+    async def check_request_criteria(self, message: Message):
         test_status = self.users_db.get_test_status(message.author.name)
-        if test_status:
+        self.check_if_author_is_broadcaster(message, test_status)
+        await self.check_if_streaming_osu(message.channel, test_status)
+
+    @staticmethod
+    def check_if_author_is_broadcaster(message: Message, test_status: bool = False):
+        if test_status is True:
             return False
 
         if message.author.name == message.channel.name:
@@ -78,13 +77,29 @@ class TwitchBot(commands.Bot, ABC):
 
         return False
 
-    @staticmethod
-    async def check_if_streaming_osu(channel: Channel):
+    async def global_before_hook(self, ctx):
         """
-        Checks if stream is on and they're playing osu!, otherwise ignores channel.
-        :param channel:
+        Global hook that runs before every command.
+        :param ctx: Message context
         :return:
         """
+        user = self.users_db.get_user_from_twitch_username(ctx.author.name)
+        if user is None:
+            raise Exception('User does not exist')
+
+        if ctx.message.channel.name != ctx.author.name:
+            raise Exception('Message is not in channel')
+
+    @staticmethod
+    async def check_if_streaming_osu(channel: Channel, test_status: bool = False):
+        """
+        Checks if stream is on and they're playing osu!, otherwise ignores channel.
+        :param channel: Channel of the message
+        :param test_status: Flag for if account set for test.
+        :return:
+        """
+        if test_status is True:
+            return
 
         stream = await channel.get_stream()
         if stream is None:
@@ -99,7 +114,7 @@ class TwitchBot(commands.Bot, ABC):
         if not enabled:
             raise Exception('Channel not open for requests')
 
-    async def _check_user_cooldown(self, author: User):
+    def _check_user_cooldown(self, author: User):
         """
         Check if user is on cooldown, raise an exception if the user is on request cooldown.
         :param author: Twitch user object
@@ -108,7 +123,7 @@ class TwitchBot(commands.Bot, ABC):
         author_id = author.id
         time_right_now = datetime.datetime.now()
 
-        await self._prune_cooldowns(time_right_now)
+        self._prune_cooldowns(time_right_now)
 
         if author_id not in self.user_last_request:
             self.user_last_request[author_id] = time_right_now
@@ -121,7 +136,7 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    async def _prune_cooldowns(self, time_right_now: datetime.datetime):
+    def _prune_cooldowns(self, time_right_now: datetime.datetime):
         """
         Prunes cooldowned users list so it doesn't get too cluttered.
         :param time_right_now:
@@ -203,14 +218,9 @@ class TwitchBot(commands.Bot, ABC):
         beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) {given_mods}"
         return f"{author} -> {beatmap_info}"
 
-    def _handle_shared_messages(self):
-        while True:
-            msg, osu_channel = self.shared_message_queue.get()
-            logger.debug(f'Twitch bot received {msg} from {osu_channel}')
-
     async def event_ready(self):
         logger.info(f'Ready | {self.nick}')
 
-        initial_extensions = ['cogs.request_cog']
+        initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)

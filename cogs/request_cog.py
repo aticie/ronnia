@@ -1,12 +1,30 @@
 from twitchio.ext import commands
 from bots.twitch_bot import TwitchBot
 
+
 @commands.cog()
-class ExampleCog:
+class RequestCog:
     def __init__(self, bot: TwitchBot):
         self.bot = bot
 
     @commands.command(aliases=["disable"])
-    async def autocog_test(self, ctx):
-        self.bot.users_db
-        await ctx.send("Disabled requests!")
+    async def disable_channel(self, ctx):
+        self.bot.users_db.disable_channel(ctx.author.name)
+        await ctx.send("Disabled requests! If you want to enable requests, type !enable.")
+
+    @commands.command(aliases=["enable"])
+    async def enable_channel(self, ctx):
+        self.bot.users_db.enable_channel(ctx.author.name)
+        await ctx.send("Enabled requests! If you want to disable requests, type !disable.")
+
+    @commands.command(aliases=["echo"])
+    async def enable_channel(self, ctx):
+        new_echo_status = self.bot.users_db.toggle_echo(ctx.author.name)
+        if new_echo_status is False:
+            await ctx.send("Disabled feedback message after requests!")
+        else:
+            await ctx.send("Enabled feedback message after requests!")
+
+    @commands.command(aliases=["help"])
+    async def show_help_message(self, ctx):
+        await ctx.send(f'Check out the project page for more information. https://github.com/aticie/ronnia')
