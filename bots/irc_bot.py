@@ -21,6 +21,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
 
         self._commands = {'disable': self.disable_requests_on_channel,
                           'echo': self.toggle_notifications,
+                          'feedback': self.toggle_notifications,
                           'enable': self.enable_requests_on_channel,
                           'register': self.register_bot_on_channel,
                           'help': self.show_help_message
@@ -122,8 +123,13 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         _, osu_username, twitch_username, enabled = user_details
         logger.debug(f'Toggle notifications on channel: {event.source.nick}')
-        self.users_db.toggle_echo(twitch_username)
-        self.send_message(event.source.nick, f'I\'ve toggled echo. Check out your twitch chat!')
+        new_echo_status = self.users_db.toggle_echo(twitch_username)
+        if new_echo_status is True:
+            self.send_message(event.source.nick, f'I\'ve enabled the beatmap request '
+                                                 f'information feedback on your twitch chat!')
+        else:
+            self.send_message(event.source.nick, f'I\'ve disabled the beatmap request '
+                                                 f'information feedback on your channel.')
         pass
 
     def show_help_message(self, event: Event, user_details: tuple):
