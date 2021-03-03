@@ -13,8 +13,7 @@ a bot account on osu!. The only criteria I haven't met is the 6 months criteria.
 
 ## Usage✍️
 
-The bot right now is still in the very early stages. You may encounter many bugs as I add new features. (Use at your own
-risk!)
+[Check out the commands that you can use!](https://github.com/aticie/ronnia/wiki/Commands)
 
 Currently, I'm manually adding channels that want to use the bot. To enable it on your Twitch channel, send me a pm on:
 
