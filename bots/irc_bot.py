@@ -27,6 +27,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           'help': self.show_help_message
                           }
 
+        self.loop = asyncio.get_event_loop()
+
     def on_welcome(self, c: ServerConnection, e: Event):
         c.join(self.channel)
 
@@ -38,7 +40,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
             time.sleep(2)
 
     def on_privmsg(self, c: ServerConnection, e: Event):
-        asyncio.run(self.do_command(e))
+        self.loop.run_until_complete(self.do_command(e))
 
     async def do_command(self, e: Event):
         # Check if command starts with !
