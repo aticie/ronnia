@@ -24,6 +24,16 @@ class UserDatabase(BaseDatabase):
     def __init__(self):
         super().__init__('users.db')
 
+        self.sql_string_get_setting = f"SELECT value FROM user_settings " \
+                                      f"INNER JOIN settings ON user_settings.key=settings.key " \
+                                      f"INNER JOIN users ON users.user_id=user_settings.user_id " \
+                                      f"WHERE user_settings.key=?1 AND twitch_username=?2"
+
+        self.sql_string_insert_setting = f"INSERT INTO user_settings (key, value, user_id) " \
+                                         f"VALUES (?1, ?2, ?3);"
+
+        self.sql_string_update_setting = f"UPDATE user_settings SET value=?2 WHERE key=?1 AND user_id=?3"
+
     def initialize(self):
         super().initialize()
         self.c.execute(
@@ -34,8 +44,7 @@ class UserDatabase(BaseDatabase):
         )
 
         self.c.execute(
-            f"CREATE TABLE IF NOT EXISTS user_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            f"key text, "
+            f"CREATE TABLE IF NOT EXISTS user_settings (key text, "
             f"value INTEGER, "
             f"user_id INTEGER);"
         )
@@ -53,6 +62,7 @@ class UserDatabase(BaseDatabase):
         self.define_setting('enable', 1, 'Setting to enable beatmap requests channel-wide.')
         self.define_setting('sub-only', 0, 'Setting for sub-only requests mode.')
         self.define_setting('cp-only', 0, 'Setting for channel points only requests mode.')
+        self.define_setting('test', 0, 'Enables test mode on the channel.')
 
     def add_user(self, twitch_username: str, osu_username: str) -> None:
         """
@@ -61,18 +71,30 @@ class UserDatabase(BaseDatabase):
         :param osu_username:
         :return:
         """
-        self.c.execute(f"INSERT OR IGNORE INTO users (twitch_username, osu_username, enabled) VALUES (?, ?, ?)",
-                       (twitch_username, osu_username, True))
-        self.conn.commit()
+        result = self.c.execute(f"SELECT * FROM users WHERE osu_username=?", (osu_username,))
+        user = result.fetchone()
+        if user is None:
+            self.c.execute(f"INSERT OR IGNORE INTO users (twitch_username, osu_username, enabled) VALUES (?, ?, ?)",
+                           (twitch_username, osu_username, True))
+            self.conn.commit()
 
-    def get_user(self, osu_username: str) -> str:
+    def get_user_from_osu_username(self, osu_username: str) -> str:
         """
-        Gets the twitch username of user from database
+        Gets the user details from database using osu username
         :param osu_username:
         :return: twitch username associated with osu username
         """
-        result = self.c.execute(f"SELECT twitch_username from users WHERE osu_username=?", (osu_username,))
-        return result.fetchone()[0]
+        result = self.c.execute(f"SELECT * from users WHERE osu_username=?", (osu_username,))
+        return result.fetchone()
+
+    def get_user_from_twitch_username(self, twitch_username: str) -> str:
+        """
+        Gets the user details from database using Twitch username
+        :param twitch_username:
+        :return: twitch username associated with osu username
+        """
+        result = self.c.execute(f"SELECT * from users WHERE twitch_username=?", (twitch_username,))
+        return result.fetchone()
 
     def define_setting(self, key: str, default_value: int, description: str) -> None:
         """
@@ -82,9 +104,12 @@ class UserDatabase(BaseDatabase):
         :param description:
         :return:
         """
-        self.c.execute(f"INSERT OR IGNORE INTO settings (key, default_value, description) VALUES (?, ?, ?)",
-                       (key, default_value, description))
-        self.conn.commit()
+        result = self.c.execute(f"SELECT * FROM settings WHERE key=?", (key,))
+        setting = result.fetchone()
+        if setting is None:
+            self.c.execute(f"INSERT INTO settings (key, default_value, description) VALUES (?, ?, ?)",
+                           (key, default_value, description))
+            self.conn.commit()
         return
 
     def get_echo_status(self, twitch_username: str) -> bool:
@@ -94,66 +119,29 @@ class UserDatabase(BaseDatabase):
         :param twitch_username: Must be given if osu username is not given.
         :return: User's echo setting status
         """
-        result = self.c.execute(
-            f"SELECT value FROM user_settings "
-            f"JOIN settings USING (key, key) "
-            f"JOIN users USING (user_id, user_id) "
-            f"WHERE key=? AND osu_username=?",
-            ('echo', twitch_username))
+        return self.get_setting('echo', twitch_username)
 
-        return bool(result.fetchone()[0])
-
-    def toggle_echo(self, osu_username: str, twitch_username: str = None):
+    def toggle_echo(self, twitch_username: str = None):
         """
-        "SELECT * from user_settings
-        JOIN settings USING ("key","key")
-        JOIN users USING ("user_id", "user_id")
-        WHERE key="echo" AND user_id=1;"
-        :param osu_username:
+        Toggles echo status of the user
         :param twitch_username:
         :return:
         """
         # Get current echo status
-        sql_string = f"SELECT value, user_id from user_settings " \
-                     f"JOIN settings USING (key, key) " \
-                     f"JOIN users USING (user_id, user_id) " \
-                     f"WHERE key=?"
-        if osu_username is not None:
-            sql_string += f"AND osu_username=?;"
-            c = self.c.execute(sql_string,
-                               ('echo', osu_username,))
-        else:
-            sql_string += f"AND twitch_username=?;"
-            c = self.c.execute(sql_string,
-                               ('echo', twitch_username,))
-        result = c.fetchone()
-
-        # Handle case when user has no default setting
-        if result is None:
-
-            inner_sql = f'SELECT user_id FROM users WHERE '
-            if osu_username is not None:
-                inner_sql += 'osu_username=?'
-                cursor = self.c.execute(inner_sql, (osu_username,))
-            else:
-                inner_sql += 'twitch_username=?'
-                cursor = self.c.execute(inner_sql, (twitch_username,))
-
-            user_id = cursor.fetchone()[0]
-            self.c.execute(f"INSERT INTO user_settings (key, value, user_id) VALUES (?,?,?)", ('echo', False, user_id))
-            self.conn.commit()
-            return False
-
-        # When user has the setting -> update it
-        else:
-            value, user_id = result
-            new_value = not bool(value)
-            self.c.execute(f"UPDATE user_settings SET value=? WHERE user_id=? AND key=?", (new_value, user_id, 'echo'))
-            self.conn.commit()
-
-            return new_value
+        cur_value = self.get_setting('echo', twitch_username)
+        # Toggle it
+        new_value = not cur_value
+        # Set new echo status
+        self.set_setting('echo', twitch_username, new_value)
+        # Return new echo status
+        return new_value
 
     def get_enabled_status(self, twitch_username: str):
+        """
+        Returns if the channel has enabled requests or not
+        :param twitch_username: Twitch username of the requested user
+        :return: Channel enabled status
+        """
         result = self.c.execute(
             f"SELECT enabled FROM users "
             f"WHERE twitch_username=?",
@@ -161,13 +149,62 @@ class UserDatabase(BaseDatabase):
 
         return bool(result.fetchone()[0])
 
-    def disable_channel(self, osu_username):
-        self.c.execute(f"UPDATE users SET enabled=? WHERE osu_username=?", (False, osu_username,))
+    def disable_channel(self, twitch_username: str):
+        self.c.execute(f"UPDATE users SET enabled=? WHERE twitch_username=?", (False, twitch_username,))
         self.conn.commit()
 
-    def enable_channel(self, osu_username):
-        self.c.execute(f"UPDATE users SET enabled=? WHERE osu_username=?", (True, osu_username,))
+    def enable_channel(self, twitch_username: str):
+        self.c.execute(f"UPDATE users SET enabled=? WHERE twitch_username=?", (True, twitch_username,))
         self.conn.commit()
+
+    def get_test_status(self, twitch_username: str):
+        """
+        Gets the user's setting for test mode
+        :param twitch_username: Twitch username
+        :return:
+        """
+        return self.get_setting('test', twitch_username)
+
+    def handle_none_type_setting(self, value: str, setting_key: str):
+        """
+        If a setting is none, gets the default value for that setting from the database
+        :param value: Current value of the key - could be None or a tuple
+        :param setting_key: Requested setting key
+        :return: Default or current value of the setting
+        """
+        if value is None:
+            r = self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
+            value = r.fetchone()
+        return bool(value[0])
+
+    def get_setting(self, setting_key: str, twitch_username: str):
+        """
+        Get the setting's current value for user
+        :param setting_key: Key of the setting
+        :param twitch_username: Twitch username
+        :return:
+        """
+        result = self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username))
+        value = result.fetchone()
+        return self.handle_none_type_setting(value, setting_key)
+
+    def set_setting(self, setting_key, twitch_username, new_value):
+        """
+        Set a new value for a setting of user
+        :param setting_key: Setting key
+        :param twitch_username: Twitch username
+        :param new_value: New value of the desired setting
+        :return:
+        """
+        user_id, osu_username, twitch_username, _ = self.get_user_from_twitch_username(twitch_username)
+        result = self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username))
+        value = result.fetchone()
+        if value is None:
+            self.c.execute(self.sql_string_insert_setting, (setting_key, new_value, user_id))
+        else:
+            self.c.execute(self.sql_string_update_setting, (setting_key, new_value, user_id))
+        self.conn.commit()
+        return new_value
 
 
 class BeatmapDatabase(BaseDatabase):
@@ -192,29 +229,28 @@ if __name__ == '__main__':
     test_db = UserDatabase()
     test_db.initialize()
 
-    osu_username = 'heyronii'
+    twitch_username = 'heyronii'
 
-    twitch_user = test_db.get_user(osu_username)
-    echo_status = test_db.get_echo_status(twitch_user)
-    enabled_status = test_db.get_enabled_status(twitch_username=twitch_user)
+    test_db.add_user('heyronii', 'heyronii')
 
-    print(f'{twitch_user} - Echo: {test_db.get_echo_status(twitch_user)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_user)}')
+    print(
+        f'{twitch_username} - Echo: {test_db.get_echo_status(twitch_username)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_username)}')
     print(f'Disabled requests')
-    test_db.disable_channel(osu_username)
-    print(f'{twitch_user} - Echo: {test_db.get_echo_status(twitch_user)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_user)}')
+    test_db.disable_channel(twitch_username)
+    print(
+        f'{twitch_username} - Echo: {test_db.get_echo_status(twitch_username)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_username)}')
     print(f'Enabled requests')
-    test_db.enable_channel(osu_username)
-    print(f'{twitch_user} - Echo: {test_db.get_echo_status(twitch_user)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_user)}')
+    test_db.enable_channel(twitch_username)
+    print(
+        f'{twitch_username} - Echo: {test_db.get_echo_status(twitch_username)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_username)}')
     print(f'Enabled requests')
-    test_db.enable_channel(osu_username)
-    print(f'{twitch_user} - Echo: {test_db.get_echo_status(twitch_user)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_user)}')
+    test_db.enable_channel(twitch_username)
+    print(
+        f'{twitch_username} - Echo: {test_db.get_echo_status(twitch_username)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_username)}')
     for _ in range(3):
         print(f'Toggling echo')
-        test_db.toggle_echo(osu_username)
-        print(f'{twitch_user} - Echo: {test_db.get_echo_status(twitch_user)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_user)}')
+        test_db.toggle_echo(twitch_username)
+        print(
+            f'{twitch_username} - Echo: {test_db.get_echo_status(twitch_username)} - Enabled: {test_db.get_enabled_status(twitch_username=twitch_username)}')
 
     print(f'Testing done in {time.time() - start}')
-    # test_db.define_setting('echo', 1, 'Setting for the feedback message sent to twitch channel on beatmap request.')
-    # test_db.define_setting('enable', 1, 'Setting to enable beatmap requests channel-wide.')
-    # test_db.define_setting('sub-only', 0, 'Setting for sub-only requests mode.')
-    # test_db.define_setting('cp-only', 0, 'Setting for channel points only requests mode.')

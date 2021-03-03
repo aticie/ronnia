@@ -51,7 +51,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         cmd = cmd[1:]
 
         # Check if the user is registered
-        existing_user = self.users_db.get_user(e.target)
+        existing_user = self.users_db.get_user_from_osu_username(e.target)
         if existing_user is not None and cmd != 'register':
             await self.send_message(f'Sorry, you are not registered to this bot. '
                                     f'I\'m not allowing automatic registrations as of yet. '
