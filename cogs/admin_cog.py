@@ -20,7 +20,7 @@ class AdminCog:
             return
 
         twitch_username = args[0]
-        osu_username = args[1]
+        osu_username = args[1].lower()
 
         self.bot.users_db.add_user(osu_username=osu_username, twitch_username=twitch_username)
         await self.bot.join_channels([twitch_username])
