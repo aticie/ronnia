@@ -30,7 +30,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
     def on_welcome(self, c: ServerConnection, e: Event):
         c.join(self.channel)
 
-    async def send_message(self, target: str, cmd: str):
+    def send_message(self, target: str, cmd: str):
         logger.debug(f"Sending irc message: {cmd}")
         self.connection.privmsg(target, cmd)
 
