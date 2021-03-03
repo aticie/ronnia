@@ -35,6 +35,8 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_message(self, message: Message):
         logger.info(f"Received message from {message.channel} - {message.author.name}: {message.content}")
+        if self.check_if_author_is_broadcaster(message):
+            return
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
@@ -49,6 +51,15 @@ class TwitchBot(commands.Bot, ABC):
         irc_target_channel = self.channel_mappings[message.channel.name]
         self.irc_bot.send_message(irc_target_channel, irc_message)
         return
+
+    @staticmethod
+    def check_if_author_is_broadcaster(message: Message):
+
+        if message.author.name == message.channel.name:
+            logger.debug('Not listening to broadcaster messages')
+            return True
+
+        return False
 
     @staticmethod
     async def _send_twitch_message(message, beatmap_info):
