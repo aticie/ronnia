@@ -75,11 +75,11 @@ class UserDatabase(BaseDatabase):
                                 (twitch_username,))
         user = result.fetchone()
         if user is None:
-            self.c.execute(f"INSERT INTO users (twitch_username, osu_username, enabled) VALUES (?, ?, ?)",
+            self.c.execute(f"INSERT INTO users (twitch_username, osu_username, enabled) VALUES (?1, ?2, ?3)",
                            (twitch_username, osu_username, True))
         else:
-            self.c.execute(f"UPDATE users SET osu_username=? WHERE twitch_username=?",
-                           (osu_username, twitch_username))
+            self.c.execute(f"UPDATE users SET osu_username=?2 WHERE twitch_username=?1",
+                           (twitch_username, osu_username))
         self.conn.commit()
 
     def remove_user(self, twitch_username: str) -> None:
