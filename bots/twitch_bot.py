@@ -24,8 +24,8 @@ class TwitchBot(commands.Bot, ABC):
         self.users_db = UserDatabase()
         self.users_db.initialize()
 
-        self.channel_mappings = {user[1]: user[2] for user in self.users_db.get_all_users()}
-        self.initial_channels = [twitch for osu, twitch in self.channel_mappings.items()]
+        self.channel_mappings = {user[2]: user[1] for user in self.users_db.get_all_users()}
+        self.initial_channels = [twitch for twitch, osu in self.channel_mappings.items()]
 
         args = {
             'irc_token': os.getenv('TMI_TOKEN'),
