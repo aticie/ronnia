@@ -29,7 +29,7 @@ if __name__ == "__main__":
 
         users_db = UserDatabase()
         users_db.initialize()
-        for osu, twitch in channel_mappings.items():
+        for twitch, osu in channel_mappings.items():
             users_db.add_user(osu_username=osu, twitch_username=twitch)
 
         logger.info('Migration Complete!')
