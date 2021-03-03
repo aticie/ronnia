@@ -16,7 +16,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
     def __init__(self, channel, nickname, server, port=6667, password=None, shared_message_queue=None):
         irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname)
         self.channel = channel
-        self.users_db = UserDatabase('users.db')
+        self.users_db = UserDatabase()
         self.users_db.initialize()
 
         self.shared_message_queue: Queue = shared_message_queue
@@ -55,15 +55,16 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         if existing_user is not None and cmd != 'register':
             await self.send_message(f'Sorry, you are not registered to this bot. '
                                     f'I\'m not allowing automatic registrations as of yet. '
-                                    f'For more info, type !register')
+                                    f'You can dm me on discord about it (heyronii#9925). '
+                                    f'For more info, type !help')
             return
-
-        # Check if command is valid
-        try:
-            await self._commands[cmd](e)
-        except KeyError:
-            await self.send_message(e.target, f'Sorry, I couldn\'t understand what {cmd} means')
-            pass
+        else:
+            # Check if command is valid
+            try:
+                await self._commands[cmd](e)
+            except KeyError:
+                await self.send_message(e.target, f'Sorry, I couldn\'t understand what {cmd} means')
+                pass
 
     async def disable_requests_on_channel(self, event: Event):
         """
