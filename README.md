@@ -47,6 +47,15 @@ and my osu! account might get silenced. For now, I'm examining the memory usage 
 ## Cool Gifs 😎
 ![Just send a beatmap link](cool_gifs/usage.gif)
 
+## Features on the Roadmap 🏗️
+
+- Priority requests with channel points. (or an option to only allow channel point requests)
+- Priority requests for people that are loyal to streamer. (subs, vips, mods)
+- Star rating limit for requests. (Min:5 - Max:10 stars)
+- Accept beatmaps with only selected ranked status. (Graveyard, Loved, Approved ...)
+- 
+- Other game modes than standard.
+
 ## Setup 📦
 
 ### Requirements
@@ -67,6 +76,7 @@ CLIENT_ID=**** (Get these from https://dev.twitch.tv/console)
 CLIENT_SECRET=****
 BOT_NICK=heyronii (Change this to your Twitch username)
 BOT_PREFIX=! (Currently unused, might change in future)
+OSU_USERNAME=heyronii (Change this to your osu! username)
 IRC_PASSWORD=**** (Get yours from here: https://osu.ppy.sh/p/irc)
 OSU_API_KEY=**** (Get yours from here: https://osu.ppy.sh/p/api)
 ```
