@@ -4,6 +4,7 @@ import logging
 
 from dotenv import load_dotenv
 from bots.twitch_bot import TwitchBot
+from helpers.database_helper import UserDatabase
 
 load_dotenv()
 
@@ -21,8 +22,18 @@ logger.addHandler(ch)
 
 if __name__ == "__main__":
     # channels is a dict of twitch_channel: osu_nickname
-    with open("channels.json") as f:
-        channel_mappings = json.load(f)
+    if os.getenv('MIGRATE_USERS', None):
+        logger.info('Migrating users to database!')
+        with open("channels.json") as f:
+            channel_mappings = json.load(f)
 
-    bot = TwitchBot(channel_mappings)
+        users_db = UserDatabase()
+        users_db.initialize()
+        for twitch, osu in channel_mappings.items():
+            osu_in_db = osu.lower()
+            users_db.add_user(osu_username=osu_in_db, twitch_username=twitch)
+
+        logger.info('Migration Complete!')
+
+    bot = TwitchBot()
     bot.run()
