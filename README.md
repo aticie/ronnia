@@ -52,6 +52,7 @@ and my osu! account might get silenced. For now, I'm examining the memory usage 
 - Priority requests with channel points. (or an option to only allow channel point requests)
 - Priority requests for people that are loyal to streamer. (subs, vips, mods)
 - Recommend popular beatmaps requested in other streams. (ex: top5 most requested beatmaps of this week)
+- Dockerize the bot.
 - Star rating limit for requests. (Min:5 - Max:10 stars)
 - Accept beatmaps with only selected ranked status. (Graveyard, Loved, Approved ...)
 - Other game modes than standard.
@@ -81,12 +82,19 @@ IRC_PASSWORD=**** (Get yours from here: https://osu.ppy.sh/p/irc)
 OSU_API_KEY=**** (Get yours from here: https://osu.ppy.sh/p/api)
 ```
 
-Finally, edit the channels.json file for the people you are serving. It should be json parseable.
+Add yourself to database by doing:
 
+```python
+from utils.database_helper import UserDatabase
+
+twitch_username = heyronii  # Change this line to your username
+osu_username = heyronii  # Change this line as well
+
+users_db = UserDatabase()
+users_db.initialize()
+users_db.add_user(twitch_username, osu_username)
 ```
-{ 
-  "twitch_username": "osu_username",
-  "second_twitch_username": "second_osu_username",
-  ...
-}
-```
+
+And then, the bot will be listening to messages on your channel. You can add other users by:
+
+`!adduser <twitch_username> <osu_username>`
