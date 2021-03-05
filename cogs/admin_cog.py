@@ -35,3 +35,12 @@ class AdminCog:
 
         self.bot.users_db.remove_user(twitch_username=twitch_username)
         await self.bot.part_channels([twitch_username])
+
+    @commands.command(name="test")
+    async def toggle_test_for_user(self, ctx: Context, *args):
+        if ctx.author.name != os.getenv('BOT_NICK'):
+            return
+
+        twitch_username = args[0]
+        new_value = self.bot.users_db.toggle_setting('test', twitch_username)
+        await ctx.send(f'Setting test to {new_value} for {twitch_username}.')

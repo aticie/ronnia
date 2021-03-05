@@ -46,9 +46,11 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_message(self, message: Message):
         await self.handle_commands(message)
-
-        self.check_channel_enabled(message.channel.name)
-        await self.handle_request(message)
+        try:
+            self.check_channel_enabled(message.channel.name)
+            await self.handle_request(message)
+        except AssertionError as e:
+            logger.debug(f'Check unsuccessful: {e}')
 
     async def handle_request(self, message):
         logger.debug(f"Received message from {message.channel} - {message.author.name}: {message.content}")
@@ -70,12 +72,11 @@ class TwitchBot(commands.Bot, ABC):
     @staticmethod
     def check_if_author_is_broadcaster(message: Message, test_status: bool = False):
         if test_status is True:
-            return False
+            return
 
-        if message.author.name == message.channel.name:
-            raise Exception('Author is broadcaster and not in test mode.')
+        assert message.author.name != message.channel.name, 'Author is broadcaster and not in test mode.'
 
-        return False
+        return
 
     async def global_before_hook(self, ctx):
         """
@@ -84,11 +85,8 @@ class TwitchBot(commands.Bot, ABC):
         :return:
         """
         user = self.users_db.get_user_from_twitch_username(ctx.author.name)
-        if user is None:
-            raise Exception('User does not exist')
-
-        if ctx.message.channel.name != ctx.author.name:
-            raise Exception('Message is not in channel')
+        assert user is not None, 'User does not exist'
+        assert ctx.message.channel.name == ctx.author.name, 'Message is not in author\'s channel'
 
     @staticmethod
     async def check_if_streaming_osu(channel: Channel, test_status: bool = False):
@@ -102,17 +100,14 @@ class TwitchBot(commands.Bot, ABC):
             return
 
         stream = await channel.get_stream()
-        if stream is None:
-            raise Exception('Stream is not on.')
-        if stream.get('game_name') != 'osu!':
-            raise Exception('Stream is not playing osu!')
+        assert stream is not None, 'Stream is not on.'
+        assert stream.get('game_name') == 'osu!', 'Stream is not playing osu!'
 
         return
 
     def check_channel_enabled(self, channel_name):
         enabled = self.users_db.get_enabled_status(twitch_username=channel_name)
-        if not enabled:
-            raise Exception('Channel not open for requests')
+        assert enabled, 'Channel not open for requests'
 
     def _check_user_cooldown(self, author: User):
         """
@@ -129,10 +124,8 @@ class TwitchBot(commands.Bot, ABC):
             self.user_last_request[author_id] = time_right_now
         else:
             last_message_time = self.user_last_request[author_id]
-            if (time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN:
-                self.user_last_request[author_id] = time_right_now
-            else:
-                raise Exception(f'Cooldown for user {author.name}')
+            assert (time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, f'{author.name} is on cooldown.'
+            self.user_last_request[author_id] = time_right_now
 
         return
 
@@ -160,10 +153,10 @@ class TwitchBot(commands.Bot, ABC):
         :param given_mods: String of mods if they are requested, empty string instead
         :return:
         """
-        irc_message = await self._prepare_irc_message(message.author.name, beatmap_info, given_mods)
+        irc_message = self._prepare_irc_message(message.author.name, beatmap_info, given_mods)
 
         irc_target_channel = self.channel_mappings[message.channel.name]
-        await self.irc_bot.send_message(irc_target_channel, irc_message)
+        self.irc_bot.send_message(irc_target_channel, irc_message)
         return
 
     @staticmethod
@@ -201,7 +194,7 @@ class TwitchBot(commands.Bot, ABC):
             return None, None
 
     @staticmethod
-    async def _prepare_irc_message(author: str, beatmap_info: dict, given_mods: str):
+    def _prepare_irc_message(author: str, beatmap_info: dict, given_mods: str):
         """
         Prepare beatmap request message to send to osu!irc.
         :param author: Message author name

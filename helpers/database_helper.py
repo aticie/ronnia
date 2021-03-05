@@ -135,20 +135,29 @@ class UserDatabase(BaseDatabase):
         """
         return self.get_setting('echo', twitch_username)
 
+    def toggle_setting(self, setting_key: str, twitch_username: str):
+        """
+        Toggles setting of given user
+        :param setting_key: Key of the setting
+        :param twitch_username: Twitch username
+        :return:
+        """
+        # Get current status of setting
+        cur_value = self.get_setting(setting_key, twitch_username)
+        # Toggle it
+        new_value = not cur_value
+        # Set new value to setting
+        self.set_setting(setting_key, twitch_username, new_value)
+        # Return new value
+        return new_value
+
     def toggle_echo(self, twitch_username: str = None):
         """
         Toggles echo status of the user
         :param twitch_username:
         :return:
         """
-        # Get current echo status
-        cur_value = self.get_setting('echo', twitch_username)
-        # Toggle it
-        new_value = not cur_value
-        # Set new echo status
-        self.set_setting('echo', twitch_username, new_value)
-        # Return new echo status
-        return new_value
+        return self.toggle_setting('echo', twitch_username)
 
     def get_enabled_status(self, twitch_username: str):
         """
