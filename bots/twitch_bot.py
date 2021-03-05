@@ -46,10 +46,11 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_message(self, message: Message):
         await self.handle_commands(message)
+
+        self.check_channel_enabled(message.channel.name)
         await self.handle_request(message)
 
     async def handle_request(self, message):
-        self.check_channel_enabled(message.channel.name)
         logger.debug(f"Received message from {message.channel} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
@@ -72,8 +73,7 @@ class TwitchBot(commands.Bot, ABC):
             return False
 
         if message.author.name == message.channel.name:
-            logger.debug('Not listening to broadcaster messages')
-            return True
+            raise Exception('Author is broadcaster and not in test mode.')
 
         return False
 
