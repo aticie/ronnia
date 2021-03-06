@@ -24,7 +24,9 @@ class AdminCog:
 
         self.bot.users_db.add_user(osu_username=osu_username, twitch_username=twitch_username)
         await self.bot.join_channels([twitch_username])
+        self.bot.channel_mappings[twitch_username] = osu_username
         logger.info(f'Adding {twitch_username} - {osu_username} to user database!')
+        await ctx.send(f'Added {twitch_username} -> {osu_username}.')
 
     @commands.command(name="rmuser")
     async def remove_user_from_db(self, ctx: Context, *args):
@@ -34,7 +36,9 @@ class AdminCog:
         twitch_username = args[0]
 
         self.bot.users_db.remove_user(twitch_username=twitch_username)
+        self.bot.channel_mappings.pop(twitch_username)
         await self.bot.part_channels([twitch_username])
+        await ctx.send(f'Removed {twitch_username}.')
 
     @commands.command(name="test")
     async def toggle_test_for_user(self, ctx: Context, *args):
