@@ -1,5 +1,4 @@
 import logging
-import time
 from threading import Lock
 
 import irc.bot
@@ -32,7 +31,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         c.join(self.channel)
 
     def send_message(self, target: str, cmd: str):
-        logger.debug(f"Sending irc message: {cmd}")
+        logger.info(f"Sending request in-game: {cmd}")
         self.connection.privmsg(target, cmd)
 
     def on_privmsg(self, c: ServerConnection, e: Event):

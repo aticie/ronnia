@@ -23,8 +23,8 @@ class AdminCog:
         osu_username = args[1].lower()
 
         self.bot.users_db.add_user(osu_username=osu_username, twitch_username=twitch_username)
-        await self.bot.join_channels([twitch_username])
         self.bot.channel_mappings[twitch_username] = osu_username
+        await self.bot.join_channels([twitch_username])
         logger.info(f'Adding {twitch_username} - {osu_username} to user database!')
         await ctx.send(f'Added {twitch_username} -> {osu_username}.')
 
@@ -39,6 +39,7 @@ class AdminCog:
         self.bot.channel_mappings.pop(twitch_username)
         await self.bot.part_channels([twitch_username])
         await ctx.send(f'Removed {twitch_username}.')
+        logger.info(f'Removed {twitch_username}!')
 
     @commands.command(name="test")
     async def toggle_test_for_user(self, ctx: Context, *args):
@@ -48,3 +49,4 @@ class AdminCog:
         twitch_username = args[0]
         new_value = self.bot.users_db.toggle_setting('test', twitch_username)
         await ctx.send(f'Setting test to {new_value} for {twitch_username}.')
+        logger.info(f'Setting test to {new_value} for {twitch_username}.')

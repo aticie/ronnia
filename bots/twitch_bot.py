@@ -1,5 +1,4 @@
 import os
-from queue import Queue
 from threading import Thread
 from abc import ABC
 from typing import AnyStr, Tuple, Union
@@ -53,7 +52,7 @@ class TwitchBot(commands.Bot, ABC):
             logger.debug(f'Check unsuccessful: {e}')
 
     async def handle_request(self, message):
-        logger.debug(f"Received message from {message.channel} - {message.author.name}: {message.content}")
+        logger.info(f"{message.channel} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
             self._check_user_cooldown(message.author)
@@ -68,6 +67,9 @@ class TwitchBot(commands.Bot, ABC):
         test_status = self.users_db.get_test_status(message.channel.name)
         self.check_if_author_is_broadcaster(message, test_status)
         await self.check_if_streaming_osu(message.channel, test_status)
+
+    async def event_command_error(self, ctx, error):
+        pass
 
     @staticmethod
     def check_if_author_is_broadcaster(message: Message, test_status: bool = False):
