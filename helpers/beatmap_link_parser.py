@@ -59,7 +59,7 @@ def extract_url_headers(headers_string, desired_keys):
 
 
 def parse_beatmapset(map_link: str):
-    patterns = {'official': r"https?:\/\/osu.ppy.sh\/beatmapsets\/([0-9]+).+",
+    patterns = {'official': r"https?:\/\/osu.ppy.sh\/beatmapsets\/([0-9]+)",
                 'old': r"https?:\/\/(osu|old).ppy.sh\/s\/([0-9]+)",
                 'old_alternate': r"https?:\/\/(osu|old).ppy.sh\/p\/beatmap\?(.+)"
                 }
@@ -132,7 +132,8 @@ if __name__ == '__main__':
                           'https://osu.ppy.sh/s/1341551',
                           'https://old.ppy.sh/p/beatmap?b=1955170&m=3',
                           'https://old.ppy.sh/p/beatmap?s=1955170&m=2',
+                          'https://osu.ppy.sh/beatmapsets/1222983',
                           'https://www.xspdf.com/resolution/30209565.html']
 
     for bmap_link in test_beatmap_links:
-        print(parse_beatmap_link(bmap_link))
+        print(parse_beatmap_link(bmap_link, bmap_link))
