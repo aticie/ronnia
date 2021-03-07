@@ -82,14 +82,10 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         _, osu_username, twitch_username, enabled = user_details
         logger.debug(f'Disable requests on channel: {osu_username}')
-        if enabled:
-            self.users_db.disable_channel(twitch_username)
-            self.send_message(event.source.nick,
-                              f'I\'ve disabled requests for now. '
-                              f'If you want to re-enable requests, type !enable anytime.')
-        else:
-            self.send_message(event.source.nick,
-                              f'Your requests are already disabled. If you want to enable them, type !enable.')
+        self.users_db.disable_channel(twitch_username)
+        self.send_message(event.source.nick,
+                          f'I\'ve disabled requests for now. '
+                          f'If you want to re-enable requests, type !enable anytime.')
 
     def register_bot_on_channel(self, event: Event, user_details: tuple):
         """
@@ -107,14 +103,11 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
         _, osu_username, twitch_username, enabled = user_details
-        logger.debug(f'Enable requests on channel: {osu_username}')
-        if enabled:
-            self.users_db.enable_channel(twitch_username)
-            self.send_message(event.source.nick,
-                              f'I\'ve enabled requests. Have fun!')
-        else:
-            self.send_message(event.source.nick,
-                              f'Your requests are already enabled. If you want to disable them, type !disable.')
+        logger.debug(f'Enable requests on channel - Current user details: {user_details}')
+        self.users_db.enable_channel(twitch_username)
+        self.send_message(event.source.nick,
+                          f'I\'ve enabled requests. Have fun!')
+        logger.debug(f'I\'ve enabled requests. Have fun!')
 
     def toggle_notifications(self, event: Event, user_details: tuple):
         """
