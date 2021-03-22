@@ -89,12 +89,23 @@ from utils.database_helper import UserDatabase
 
 twitch_username = heyronii  # Change this line to your username
 osu_username = heyronii  # Change this line as well
+twitch_user_id = # You need to find your twitch user id from twitch api (somehow)
+osu_user_id = # osu.ppy.sh/u/{this_id_goes_here}
 
 users_db = UserDatabase()
 users_db.initialize()
-users_db.add_user(twitch_username, osu_username)
+users_db.add_user(twitch_username, osu_username, twitch_user_id, osu_user_id)
 ```
 
 And then, the bot will be listening to messages on your channel. You can add other users by:
 
 `!adduser <twitch_username> <osu_username>`
+
+### Docker 🐳
+To use docker either build dockerfile and supply a .env file for running:
+
+`docker build -t ronnia-bot .`and `docker run --name ronnia --env-file .env ronnia-bot`
+
+Or use the docker-compose with the given template. 
+
+`docker-compose up -d`
