@@ -244,7 +244,8 @@ class UserDatabase(BaseDatabase):
         :param new_value: New value of the desired setting
         :return:
         """
-        user_id, osu_username, twitch_username, _ = self.get_user_from_twitch_username(twitch_username)
+        user_details = self.get_user_from_twitch_username(twitch_username)
+        user_id = user_details['user_id']
         result = self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username))
         value = result.fetchone()
         if value is None:
