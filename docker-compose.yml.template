@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  ronnia-bot:
+    build: .
+    image: ronnia-bot:latest
+    restart: always
+    volumes:
+      - your_host_machine_db_folder_path:/mount
+    environment:
+      TMI_TOKEN: your_twitch_tmi_token_here
+      CLIENT_ID: your_twitch_client_id_here
+      CLIENT_SECRET: your_twitch_client_secret_here
+      BOT_NICK: your_twitch_username_here
+      BOT_PREFIX: !
+      OSU_USERNAME: your_osu_username_here
+      IRC_PASSWORD: your_irc_password_here
+      OSU_API_KEY: your_api_key_here
+      LOG_LEVEL: debug
+      DB_DIR: /mount
