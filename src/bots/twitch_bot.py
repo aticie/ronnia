@@ -24,15 +24,14 @@ class TwitchBot(commands.Bot, ABC):
         self.users_db.initialize()
 
         self.channel_mappings = {user[2]: user[1] for user in self.users_db.get_all_users()}
-        self.initial_channels = [twitch for twitch, osu in self.channel_mappings.items()]
+        self.initial_channel_ids = [twitch for twitch, osu in self.channel_mappings.items()]
 
         args = {
             'irc_token': os.getenv('TMI_TOKEN'),
             'client_id': os.getenv('CLIENT_ID'),
             'client_secret': os.getenv('CLIENT_SECRET'),
             'nick': os.getenv('BOT_NICK'),
-            'prefix': os.getenv('BOT_PREFIX'),
-            'initial_channels': self.initial_channels
+            'prefix': os.getenv('BOT_PREFIX')
         }
         super().__init__(**args)
 
@@ -58,6 +57,7 @@ class TwitchBot(commands.Bot, ABC):
             self._check_user_cooldown(message.author)
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
+                await self._update_channel(message)
                 await self.check_request_criteria(message)
                 if self.users_db.get_echo_status(twitch_username=message.channel.name):
                     await self._send_twitch_message(message, beatmap_info)
@@ -70,6 +70,43 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_command_error(self, ctx, error):
         pass
+
+    async def _update_channel(self, message: Message):
+        """
+        Updates channel twitch and osu! usernames every day
+        :param message: Message from twitch
+        :return: None
+        """
+        # Get current channel details from db
+        channel_details = self.users_db.get_user_from_twitch_username(twitch_username=message.channel.name)
+        channel_last_updated = channel_details['updated_at']
+        osu_user_id = channel_details['osu_id']
+        twitch_id = channel_details['twitch_id']
+        time_passed_since_last_update = datetime.datetime.now() - channel_last_updated
+        # Check if user has been updated since yesterday
+        if time_passed_since_last_update.days >= 1:
+            osu_user_info, twitch_info = await self.get_osu_and_twitch_details(osu_user_id, twitch_id)
+
+            new_osu_username = osu_user_info['username']
+            new_twitch_username = twitch_info[0].login
+
+            # Update database with new information
+            self.users_db.update_user(new_twitch_username=new_twitch_username, new_osu_username=new_osu_username,
+                                      twitch_id=twitch_id, osu_user_id=osu_user_id)
+
+        return
+
+    async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_id_or_name):
+
+        if osu_user_id_or_name.isdigit():
+            # Handle ids in the string form
+            osu_user_id_or_name = int(osu_user_id_or_name)
+
+        # Get osu! username from osu! api (usernames can change)
+        osu_user_info = await self.osu_api.get_user_info(osu_user_id_or_name)
+        # Get twitch username from twitch api
+        twitch_info = await self.get_users(*[twitch_id_or_name])
+        return osu_user_info, twitch_info
 
     @staticmethod
     def check_if_author_is_broadcaster(message: Message, test_status: bool = False):
@@ -126,14 +163,15 @@ class TwitchBot(commands.Bot, ABC):
             self.user_last_request[author_id] = time_right_now
         else:
             last_message_time = self.user_last_request[author_id]
-            assert (time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, f'{author.name} is on cooldown.'
+            assert (
+                               time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, f'{author.name} is on cooldown.'
             self.user_last_request[author_id] = time_right_now
 
         return
 
     def _prune_cooldowns(self, time_right_now: datetime.datetime):
         """
-        Prunes cooldowned users list so it doesn't get too cluttered.
+        Prunes users on that are on cooldown list so it doesn't get too cluttered.
         :param time_right_now:
         :return:
         """
@@ -157,7 +195,7 @@ class TwitchBot(commands.Bot, ABC):
         """
         irc_message = self._prepare_irc_message(message.author.name, beatmap_info, given_mods)
 
-        irc_target_channel = self.channel_mappings[message.channel.name]
+        irc_target_channel = self.users_db.get_user_from_twitch_username(message.channel.name)['osu_username']
         self.irc_bot.send_message(irc_target_channel, irc_message)
         return
 
@@ -215,6 +253,15 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_ready(self):
         logger.info(f'Ready | {self.nick}')
+
+        logger.debug(f'Populating users: {self.initial_channel_ids}')
+        # Get channel names from ids
+        channel_names = await self.get_users(*self.initial_channel_ids)
+
+        channels_to_join = [ch.login for ch in channel_names]
+        logger.debug(f'Joining channels: {channels_to_join}')
+        # Join channels
+        await self.join_channels(channels_to_join)
 
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:

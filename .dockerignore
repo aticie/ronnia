@@ -1,0 +1,15 @@
+.dockerignore
+.gitignore
+.git
+.idea
+__pycache__
+cool_gifs/
+venv*/
+users*
+*.tar
+*.log*
+*.md
+LICENSE
+*.json
+mount/
+*.pyc
