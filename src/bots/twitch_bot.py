@@ -171,7 +171,7 @@ class TwitchBot(commands.Bot, ABC):
         else:
             last_message_time = self.user_last_request[author_id]
             assert (
-                               time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, f'{author.name} is on cooldown.'
+                           time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, f'{author.name} is on cooldown.'
             self.user_last_request[author_id] = time_right_now
 
         return
@@ -200,7 +200,7 @@ class TwitchBot(commands.Bot, ABC):
         :param given_mods: String of mods if they are requested, empty string instead
         :return:
         """
-        irc_message = self._prepare_irc_message(message.author.name, beatmap_info, given_mods)
+        irc_message = await self._prepare_irc_message(message, beatmap_info, given_mods)
 
         irc_target_channel = self.users_db.get_user_from_twitch_username(message.channel.name)['osu_username']
         self.irc_bot.send_message(irc_target_channel, irc_message)
@@ -240,7 +240,7 @@ class TwitchBot(commands.Bot, ABC):
             logger.debug("Couldn't find beatmap in message")
             return None, None
 
-    def _prepare_irc_message(self, author: str, beatmap_info: dict, given_mods: str):
+    async def _prepare_irc_message(self, message: Message, beatmap_info: dict, given_mods: str):
         """
         Prepare beatmap request message to send to osu!irc.
         :param author: Message author name
@@ -256,7 +256,18 @@ class TwitchBot(commands.Bot, ABC):
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
         beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) {given_mods}"
-        return f"{author} -> [{beatmap_status}] {beatmap_info}"
+        extra = ""
+        if message.author.is_mod:
+            extra += "***MOD Request*** "
+        elif message.author.is_subscriber:
+            extra += "**SUB Request** "
+        elif 'vip' in message.author.badges:
+            extra += "*VIP Request* "
+
+        if 'custom-reward-id' in message.tags:
+            extra += "+ USED POINTS"
+
+        return f"{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra}"
 
     async def event_ready(self):
         logger.info(f'Ready | {self.nick}')
