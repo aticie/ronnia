@@ -28,10 +28,11 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.connection.set_rate_limit(1)
 
     def on_welcome(self, c: ServerConnection, e: Event):
+        logger.info(f"Successfully joined irc!")
         c.join(self.channel)
 
     def send_message(self, target: str, cmd: str):
-        logger.info(f"Sending request in-game: {cmd}")
+        logger.info(f"Sending request in-game to {target}: {cmd}")
         self.connection.privmsg(target, cmd)
 
     def on_privmsg(self, c: ServerConnection, e: Event):
