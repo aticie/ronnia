@@ -18,6 +18,13 @@ logger = logging.getLogger('ronnia')
 
 class TwitchBot(commands.Bot, ABC):
     PER_REQUEST_COOLDOWN = 30  # each request has 30 seconds cooldown
+    BEATMAP_STATUS_DICT = {"0": 'Pending',
+                           "1": 'Ranked',
+                           "2": 'Approved',
+                           "3": 'Qualified',
+                           "4": 'Loved',
+                           "-1": 'WIP',
+                           "-2": 'Graveyard'}
 
     def __init__(self):
         self.users_db = UserDatabase()
@@ -233,8 +240,7 @@ class TwitchBot(commands.Bot, ABC):
             logger.debug("Couldn't find beatmap in message")
             return None, None
 
-    @staticmethod
-    def _prepare_irc_message(author: str, beatmap_info: dict, given_mods: str):
+    def _prepare_irc_message(self, author: str, beatmap_info: dict, given_mods: str):
         """
         Prepare beatmap request message to send to osu!irc.
         :param author: Message author name
@@ -246,10 +252,11 @@ class TwitchBot(commands.Bot, ABC):
         title = beatmap_info['title']
         version = beatmap_info['version']
         bpm = beatmap_info['bpm']
+        beatmap_status = self.BEATMAP_STATUS_DICT[beatmap_info['approved']]
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
         beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) {given_mods}"
-        return f"{author} -> {beatmap_info}"
+        return f"{author} -> [{beatmap_status}] {beatmap_info}"
 
     async def event_ready(self):
         logger.info(f'Ready | {self.nick}')
