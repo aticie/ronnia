@@ -94,7 +94,7 @@ class TwitchBot(commands.Bot, ABC):
         if time_passed_since_last_update.days >= 1:
             osu_user_info, twitch_info = await self.get_osu_and_twitch_details(osu_user_id, twitch_id)
 
-            new_osu_username = osu_user_info['username']
+            new_osu_username = osu_user_info['username'].lower()
             new_twitch_username = twitch_info[0].login
 
             # Update database with new information

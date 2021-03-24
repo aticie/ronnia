@@ -80,7 +80,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         :param event: Event of the current message
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
-        _, osu_username, twitch_username, enabled = user_details
+        twitch_username = user_details['twitch_username']
+        osu_username = user_details['osu_username']
         logger.debug(f'Disable requests on channel: {osu_username}')
         self.users_db.disable_channel(twitch_username)
         self.send_message(event.source.nick,
@@ -102,7 +103,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         Enables requests on twitch channel
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
-        _, osu_username, twitch_username, enabled = user_details
+        twitch_username = user_details['twitch_username']
         logger.debug(f'Enable requests on channel - Current user details: {user_details}')
         self.users_db.enable_channel(twitch_username)
         self.send_message(event.source.nick,
@@ -114,7 +115,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         Toggles echo notifications on twitch channel when requesting beatmaps
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
         """
-        _, osu_username, twitch_username, enabled = user_details
+        twitch_username = user_details['twitch_username']
         logger.debug(f'Toggle notifications on channel: {event.source.nick}')
         new_echo_status = self.users_db.toggle_echo(twitch_username)
         if new_echo_status is True:
