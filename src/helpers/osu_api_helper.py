@@ -46,9 +46,13 @@ class OsuApiHelper:
 
     async def _get_endpoint(self, params: dict, endpoint: str):
         self._wait_for_rate_limit()
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(f'http://osu.ppy.sh/api/{endpoint}', params=params) as response:
-                r = await response.json()
+                try:
+                    r = await response.json()
+                except:
+                    return None
         return r
 
     def _wait_for_rate_limit(self):

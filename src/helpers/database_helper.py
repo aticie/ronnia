@@ -97,9 +97,9 @@ class UserDatabase(BaseDatabase):
     def update_user(self, new_twitch_username, new_osu_username, twitch_id, osu_user_id) -> None:
         """
         Updates an existing user in the database
-        :param old_twitch_username: Old Twitch username before change
+        :param twitch_id: Twitch id of the user
         :param new_twitch_username: New Twitch username (possibly twitch id)
-        :param old_osu_username: Old osu username before change
+        :param osu_user_id: osu user id of the user
         :param new_osu_username: New osu username (possibly osu id)
         :return:
         """
