@@ -93,8 +93,10 @@ class TwitchBot(commands.Bot, ABC):
         # Check if user has been updated since yesterday
         if time_passed_since_last_update.days >= 1:
             osu_user_info, twitch_info = await self.get_osu_and_twitch_details(osu_user_id, twitch_id)
-
-            new_osu_username = osu_user_info['username'].lower()
+            try:
+                new_osu_username = osu_user_info['username'].lower()
+            except:
+                new_osu_username = channel_details['osu_username']
             new_twitch_username = twitch_info[0].login
 
             # Update database with new information
