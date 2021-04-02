@@ -55,3 +55,21 @@ class AdminCog:
         new_value = self.bot.users_db.toggle_setting('test', twitch_username)
         await ctx.send(f'Setting test to {new_value} for {twitch_username}.')
         logger.info(f'Setting test to {new_value} for {twitch_username}.')
+
+    @commands.command(name="get_status")
+    async def get_active_channels(self, ctx: Context):
+        if ctx.author.name != os.getenv('BOT_NICK'):
+            return
+
+        all_users = self.bot.users_db.get_all_users()
+
+        not_joined = []
+        for user in all_users:
+            if user['twitch_username'] not in self.bot._ws._channel_cache:
+                not_joined.append(user['twitch_username'])
+
+        if len(not_joined) != 0:
+            await ctx.send('Not joined to: ' + ','.join(not_joined))
+        else:
+            await ctx.send('We are connected to every channel')
+

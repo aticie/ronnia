@@ -1,4 +1,5 @@
 import logging
+import os
 
 from dotenv import load_dotenv
 from bots.twitch_bot import TwitchBot
@@ -6,7 +7,7 @@ from bots.twitch_bot import TwitchBot
 load_dotenv()
 
 logger = logging.getLogger('ronnia')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(os.getenv('LOG_LEVEL').upper())
 loggers_formatter = logging.Formatter(
     '%(asctime)s | %(levelname)s | %(process)d | %(name)s | %(funcName)s | %(message)s',
     datefmt='%d/%m/%Y %I:%M:%S')

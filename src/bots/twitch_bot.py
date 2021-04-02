@@ -76,6 +76,7 @@ class TwitchBot(commands.Bot, ABC):
         await self.check_if_streaming_osu(message.channel, test_status)
 
     async def event_command_error(self, ctx, error):
+        logger.error(error)
         pass
 
     async def _update_channel(self, message: Message):
