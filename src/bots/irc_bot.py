@@ -11,7 +11,9 @@ logger = logging.getLogger('ronnia')
 
 class IrcBot(irc.bot.SingleServerIRCBot):
     def __init__(self, channel, nickname, server, port=6667, password=None):
-        irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname)
+        reconnect_strategy = irc.bot.ExponentialBackoff(min_interval=5, max_interval=30)
+        irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname,
+                                            recon=reconnect_strategy)
         self.channel = channel
         self.users_db = UserDatabase()
         self.users_db.initialize()
