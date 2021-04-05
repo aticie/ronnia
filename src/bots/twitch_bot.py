@@ -259,18 +259,19 @@ class TwitchBot(commands.Bot, ABC):
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
         beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) {given_mods}"
-        extra = ""
+        extra_postfix = ""
+        extra_prefix = ""
         if message.author.is_mod:
-            extra += "***MOD Request*** "
+            extra_prefix += "[MOD] "
         elif message.author.is_subscriber:
-            extra += "**SUB Request** "
+            extra_prefix += "[SUB] "
         elif 'vip' in message.author.badges:
-            extra += "*VIP Request* "
+            extra_prefix += "[VIP] "
 
         if 'custom-reward-id' in message.tags:
-            extra += "+ USED POINTS"
+            extra_postfix += "+ USED POINTS"
 
-        return f"{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra}"
+        return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
 
     async def event_ready(self):
         logger.info(f'Ready | {self.nick}')
