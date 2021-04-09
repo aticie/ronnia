@@ -6,3 +6,8 @@ ronnia.log*
 test.db
 *.tar
 *.db
+.gitignore
+.env*
+*.json
+docker-compose.yml
+.idea
