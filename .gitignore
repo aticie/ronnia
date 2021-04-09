@@ -1,0 +1,8 @@
+venv
+venv39
+cool_gifs
+mount
+ronnia.log*
+test.db
+*.tar
+*.db
