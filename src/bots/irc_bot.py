@@ -34,6 +34,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         c.join(self.channel)
 
     def send_message(self, target: str, cmd: str):
+        target = target.replace(" ", "_")
         logger.info(f"Sending request in-game to {target}: {cmd}")
         self.connection.privmsg(target, cmd)
 

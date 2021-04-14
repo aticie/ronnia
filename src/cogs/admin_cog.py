@@ -56,7 +56,7 @@ class AdminCog:
         await ctx.send(f'Setting test to {new_value} for {twitch_username}.')
         logger.info(f'Setting test to {new_value} for {twitch_username}.')
 
-    @commands.command(name="get_status")
+    @commands.command(name="status")
     async def get_active_channels(self, ctx: Context):
         if ctx.author.name != os.getenv('BOT_NICK'):
             return
