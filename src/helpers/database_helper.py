@@ -74,7 +74,7 @@ class UserDatabase(BaseDatabase):
             f"CREATE TABLE IF NOT EXISTS user_range_settings (user_id INTEGER, "
             f"range_start REAL,"
             f"range_end REAL,"
-            f"key, text);"
+            f"key text);"
         )
 
         self.c.execute(

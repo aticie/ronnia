@@ -1,5 +1,13 @@
+import attr
+
 from twitchio.ext import commands
 from bots.twitch_bot import TwitchBot
+
+
+@attr.s
+class RangeInput(object):
+    range_low = attr.ib(converter=float)
+    range_high = attr.ib(converter=float)
 
 
 @commands.cog()
@@ -33,6 +41,25 @@ class RequestCog:
     async def disable_channel(self, ctx):
         new_value = self.bot.users_db.toggle_sub_only(ctx.author.name)
         if new_value:
-            await ctx.send(f"Enabled sub-only mode on the channel! Type {self.bot.main_prefix}sub-only again to disable.")
+            await ctx.send(
+                f"Enabled sub-only mode on the channel! Type {self.bot.main_prefix}sub-only again to disable.")
         else:
-            await ctx.send(f"Disabled sub-only mode on the channel. Type {self.bot.main_prefix}sub-only again to enable.")
+            await ctx.send(
+                f"Disabled sub-only mode on the channel. Type {self.bot.main_prefix}sub-only again to enable.")
+
+    @commands.command(name='setsr')
+    async def set_sr_rating(self, ctx, sr_text: str):
+        try:
+            range_input = RangeInput(*(sr_text.split('-')))
+        except ValueError as e:
+            await ctx.send('Invalid input.. For example, use: !sr 3.5-7.5')
+            return
+
+        try:
+            new_low, new_high = self.bot.users_db.set_sr_rating(twitch_username=ctx.author.name,
+                                                                **attr.asdict(range_input))
+        except AssertionError as e:
+            await ctx.send(e)
+            return
+
+        await ctx.send(f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')

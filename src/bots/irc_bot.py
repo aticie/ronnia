@@ -1,3 +1,4 @@
+import attr
 import logging
 from threading import Lock
 
@@ -7,6 +8,12 @@ from irc.client import Event, ServerConnection
 from helpers.database_helper import UserDatabase
 
 logger = logging.getLogger('ronnia')
+
+
+@attr.s
+class RangeInput(object):
+    range_low = attr.ib(converter=float)
+    range_high = attr.ib(converter=float)
 
 
 class IrcBot(irc.bot.SingleServerIRCBot):
@@ -25,7 +32,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           'feedback': self.toggle_notifications,
                           'enable': self.enable_requests_on_channel,
                           'register': self.register_bot_on_channel,
-                          'help': self.show_help_message
+                          'help': self.show_help_message,
+                          'setsr': self.set_sr_rating
                           }
         self.connection.set_rate_limit(1)
 
@@ -50,6 +58,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         # Make command lowercase
         cmd = cmd.lower()
         cmd = cmd[1:]
+        args = cmd.split(' ')[1:]
         cmd = cmd.split(' ')[0]
 
         db_nick = e.source.nick.lower()
@@ -68,16 +77,18 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                               f'Contact me on discord and I can enable it for you! heyronii#9925')
             return
         elif existing_user is None:
-            self.send_message(e.source.nick, f'Sorry, you are not registered...')
+            self.send_message(e.source.nick, f'Sorry, you are not registered. '
+                                             f'(Check out the project page for details.)'
+                                             f'[https://github.com/aticie/ronnia]')
         else:
             # Check if command is valid
             try:
-                self._commands[cmd](e, user_details=existing_user)
+                self._commands[cmd](e, *args, user_details=existing_user)
             except KeyError:
                 self.send_message(e.source.nick, f'Sorry, I couldn\'t understand what {cmd} means')
                 pass
 
-    def disable_requests_on_channel(self, event: Event, user_details: tuple):
+    def disable_requests_on_channel(self, event: Event, *args, user_details: tuple):
         """
         Disables requests on twitch channel
         :param event: Event of the current message
@@ -91,7 +102,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'I\'ve disabled requests for now. '
                           f'If you want to re-enable requests, type !enable anytime.')
 
-    def register_bot_on_channel(self, event: Event, user_details: tuple):
+    def register_bot_on_channel(self, event: Event, *args, user_details: tuple):
         """
         Registers bot on twitch channel
         :param event: Event of the current message
@@ -101,7 +112,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         logger.debug(f'Register bot on channel: {user_details}')
 
-    def enable_requests_on_channel(self, event: Event, user_details: tuple):
+    def enable_requests_on_channel(self, event: Event, *args, user_details: tuple):
         """
         Enables requests on twitch channel
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
@@ -113,7 +124,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'I\'ve enabled requests. Have fun!')
         logger.debug(f'I\'ve enabled requests. Have fun!')
 
-    def toggle_notifications(self, event: Event, user_details: tuple):
+    def toggle_notifications(self, event: Event, *args, user_details: tuple):
         """
         Toggles echo notifications on twitch channel when requesting beatmaps
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
@@ -129,7 +140,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                                                  f'information feedback on your channel.')
         pass
 
-    def show_help_message(self, event: Event, user_details: tuple):
+    def show_help_message(self, event: Event, *args, user_details: tuple):
         """
         Shows help message to user
         :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
@@ -140,3 +151,21 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'Check out the (project page)[https://github.com/aticie/ronnia] for more information. '
                           f'List of available commands are (listed here)'
                           f'[https://github.com/aticie/ronnia/wiki/Commands].')
+
+    def set_sr_rating(self, event: Event, *args, user_details: tuple):
+        sr_text = ' '.join(args)
+        try:
+            range_input = RangeInput(*(sr_text.split('-')))
+        except ValueError as e:
+            self.send_message(event.source.nick, 'Invalid input.. For example, use: !sr 3.5-7.5')
+            return
+
+        twitch_username = user_details['twitch_username']
+        try:
+            new_low, new_high = self.users_db.set_sr_rating(twitch_username=twitch_username,
+                                                            **attr.asdict(range_input))
+        except AssertionError as e:
+            self.send_message(event.source.nick, e)
+            return
+
+        self.send_message(event.source.nick, f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
