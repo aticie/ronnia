@@ -10,12 +10,12 @@ class RequestCog:
     @commands.command(name="disable")
     async def disable_channel(self, ctx):
         self.bot.users_db.disable_channel(ctx.author.name)
-        await ctx.send("Disabled requests! If you want to enable requests, type !enable.")
+        await ctx.send(f"Disabled requests! If you want to enable requests, type {self.bot.main_prefix}enable.")
 
     @commands.command(name="enable")
     async def enable_channel(self, ctx):
         self.bot.users_db.enable_channel(ctx.author.name)
-        await ctx.send("Enabled requests! If you want to disable requests, type !disable.")
+        await ctx.send(f"Enabled requests! If you want to disable requests, type {self.bot.main_prefix}disable.")
 
     @commands.command(name="echo", aliases=["feedback"])
     async def toggle_feedback(self, ctx):
@@ -28,3 +28,11 @@ class RequestCog:
     @commands.command(name="help", aliases=["h"])
     async def show_help_message(self, ctx):
         await ctx.send(f'Check out the project page for more information. https://github.com/aticie/ronnia')
+
+    @commands.command(name="sub-only")
+    async def disable_channel(self, ctx):
+        new_value = self.bot.users_db.toggle_sub_only(ctx.author.name)
+        if new_value:
+            await ctx.send(f"Enabled sub-only mode on the channel! Type {self.bot.main_prefix}sub-only again to disable.")
+        else:
+            await ctx.send(f"Disabled sub-only mode on the channel. Type {self.bot.main_prefix}sub-only again to enable.")

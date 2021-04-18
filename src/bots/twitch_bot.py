@@ -42,6 +42,7 @@ class TwitchBot(commands.Bot, ABC):
         }
         super().__init__(**args)
 
+        self.main_prefix = None
         self.osu_api = OsuApiHelper()
         self.user_last_request = {}
         self.irc_bot = IrcBot("#osu", os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
@@ -274,6 +275,9 @@ class TwitchBot(commands.Bot, ABC):
         return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
 
     async def event_ready(self):
+
+        self.main_prefix = self.prefixes[0]
+
         logger.info(f'Ready | {self.nick}')
 
         logger.debug(f'Populating users: {self.initial_channel_ids}')

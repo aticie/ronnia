@@ -2,6 +2,7 @@ import sqlite3
 import os
 import time
 from datetime import datetime
+from typing import Tuple
 
 
 class BaseDatabase:
@@ -35,10 +36,21 @@ class UserDatabase(BaseDatabase):
                                       f"INNER JOIN users ON users.user_id=user_settings.user_id " \
                                       f"WHERE user_settings.key=? AND users.twitch_username=?"
 
+        self.sql_string_get_range_setting = f"SELECT range_start, range_end FROM user_range_settings " \
+                                            f"INNER JOIN range_settings ON user_range_settings.key=range_settings.key " \
+                                            f"INNER JOIN users ON users.user_id=user_range_settings.user_id " \
+                                            f"WHERE user_range_settings.key=? AND users.twitch_username=?"
+
         self.sql_string_insert_setting = f"INSERT INTO user_settings (key, value, user_id) " \
                                          f"VALUES (?1, ?2, ?3);"
 
+        self.sql_string_insert_range_setting = f"INSERT INTO user_range_settings (key, range_start, range_end, user_id) " \
+                                               f"VALUES (?1, ?2, ?3, ?4);"
+
         self.sql_string_update_setting = f"UPDATE user_settings SET value=?2 WHERE key=?1 AND user_id=?3"
+
+        self.sql_string_update_range_setting = f"UPDATE user_range_settings SET range_start=?2, range_end=?3 " \
+                                               f"WHERE key=?1 AND user_id=?4"
 
     def initialize(self):
         super().initialize()
@@ -59,8 +71,10 @@ class UserDatabase(BaseDatabase):
         )
 
         self.c.execute(
-            f"CREATE TABLE IF NOT EXISTS exclude_list (user_id INTEGER, "
-            f"excluded_user text UNIQUE NOT NULL);"
+            f"CREATE TABLE IF NOT EXISTS user_range_settings (user_id INTEGER, "
+            f"range_start REAL,"
+            f"range_end REAL,"
+            f"key, text);"
         )
 
         self.c.execute(
@@ -70,6 +84,19 @@ class UserDatabase(BaseDatabase):
             f"description text);"
         )
 
+        self.c.execute(
+            f"CREATE TABLE IF NOT EXISTS range_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            f"key text UNIQUE, "
+            f"default_low REAL, "
+            f"default_high REAL, "
+            f"description text);"
+        )
+
+        self.c.execute(
+            f"CREATE TABLE IF NOT EXISTS exclude_list (user_id INTEGER, "
+            f"excluded_user text UNIQUE NOT NULL);"
+        )
+
         self.conn.commit()
 
         self.define_setting('echo', 1, 'Setting for the feedback message sent to twitch channel on beatmap request.')
@@ -77,6 +104,7 @@ class UserDatabase(BaseDatabase):
         self.define_setting('sub-only', 0, 'Setting for sub-only requests mode.')
         self.define_setting('cp-only', 0, 'Setting for channel points only requests mode.')
         self.define_setting('test', 0, 'Enables test mode on the channel.')
+        self.define_range_setting('sr', -1, -1, 'Set star rating limit for requests.')
 
     def add_user(self,
                  twitch_username: str,
@@ -92,7 +120,8 @@ class UserDatabase(BaseDatabase):
         user = result.fetchone()
         if user is None:
             self.c.execute(
-                f"INSERT INTO users (twitch_username, twitch_id, osu_username, osu_id, enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                f"INSERT INTO users (twitch_username, twitch_id, osu_username, osu_id, enabled, updated_at)"
+                f" VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (twitch_username, twitch_id, osu_username, osu_user_id, enabled_status, datetime.now()))
         else:
             self.c.execute(f"UPDATE users SET osu_username=?1, osu_id=?2, updated_at=?3 WHERE twitch_username=?4",
@@ -156,11 +185,28 @@ class UserDatabase(BaseDatabase):
             self.conn.commit()
         return
 
+    def define_range_setting(self, key: str, default_low: float, default_high: float, description: str) -> None:
+        """
+        Define a new user specific setting
+        :param key: Setting key
+        :param default_low: Default lower value of the range
+        :param default_high: Default higher value of the range
+        :param description: Description of the setting
+        :return:
+        """
+        result = self.c.execute(f"SELECT * FROM range_settings WHERE key=?", (key,))
+        setting = result.fetchone()
+        if setting is None:
+            self.c.execute(f"INSERT INTO range_settings (key, default_low, default_high, description)"
+                           f" VALUES (?, ?, ?, ?)",
+                           (key, default_low, default_high, description))
+            self.conn.commit()
+        return
+
     def get_echo_status(self, twitch_username: str) -> bool:
         """
         Gets echo setting of user
-        :param osu_username: Must be given if twitch username is not given.
-        :param twitch_username: Must be given if osu username is not given.
+        :param twitch_username: Twitch username.
         :return: User's echo setting status
         """
         return self.get_setting('echo', twitch_username)
@@ -170,7 +216,7 @@ class UserDatabase(BaseDatabase):
         Toggles setting of given user
         :param setting_key: Key of the setting
         :param twitch_username: Twitch username
-        :return:
+        :return: New value of the toggled setting.
         """
         # Get current status of setting
         cur_value = self.get_setting(setting_key, twitch_username)
@@ -223,6 +269,19 @@ class UserDatabase(BaseDatabase):
             value = r.fetchone()
         return bool(value[0])
 
+    def handle_none_type_range_setting(self, value: str, setting_key: str):
+        """
+        If a setting is none, gets the default value for that setting from the database
+        :param value: Current value of the key - could be None or a tuple
+        :param setting_key: Requested setting key
+        :return: Default or current value of the setting
+        """
+        if value is None:
+            r = self.c.execute(f"SELECT default_low, default_high FROM range_settings WHERE key=?", (setting_key,))
+            value = r.fetchone()
+            return value['default_low'], value['default_high']
+        return value['range_start'], value['range_end']
+
     def get_setting(self, setting_key: str, twitch_username: str):
         """
         Get the setting's current value for user
@@ -252,6 +311,60 @@ class UserDatabase(BaseDatabase):
             self.c.execute(self.sql_string_update_setting, (setting_key, new_value, user_id))
         self.conn.commit()
         return new_value
+
+    def toggle_sub_only(self, twitch_username: str) -> bool:
+        """
+        Toggles sub-only mode on the channel.
+        :param twitch_username: Twitch username
+        :return: New sub-only setting.
+        """
+        return self.toggle_setting('sub-only', twitch_username=twitch_username)
+
+    def set_sr_rating(self, twitch_username: str, range_low: float, range_high: float) -> Tuple[float, float]:
+        """
+        Sets star rating range for user.
+        :param twitch_username: Twitch username
+        :param range_low: Lower value of the range
+        :param range_high: Higher value of the range
+        :return: New value tuple
+        """
+        return self.set_range_setting(twitch_username=twitch_username,
+                                      setting_key='sr',
+                                      range_low=range_low,
+                                      range_high=range_high)
+
+    def get_range_setting(self, twitch_username: str, setting_key: str):
+        """
+        Gets the range setting from database.
+        :param twitch_username: Twitch username
+        :param setting_key: Setting key
+        :return:
+        """
+        result = self.c.execute(self.sql_string_get_range_setting, (setting_key, twitch_username))
+        value = result.fetchone()
+        return self.handle_none_type_range_setting(value, setting_key)
+
+    def set_range_setting(self, twitch_username: str, setting_key: str, range_low: float, range_high: float):
+        """
+        Sets a range setting with given key
+        :param twitch_username: Twitch username
+        :param setting_key: Setting key
+        :param range_low: Lower value of the range
+        :param range_high: Higher value of the range
+        :return: Tuple: New range values
+        """
+        assert range_high > range_low, 'Max value cannot be lower than min value.'
+
+        user_details = self.get_user_from_twitch_username(twitch_username)
+        user_id = user_details['user_id']
+        result = self.c.execute(self.sql_string_get_range_setting, (setting_key, twitch_username))
+        value = result.fetchone()
+        if value is None:
+            self.c.execute(self.sql_string_insert_range_setting, (setting_key, range_low, range_high, user_id))
+        else:
+            self.c.execute(self.sql_string_update_range_setting, (setting_key, range_low, range_high, user_id))
+        self.conn.commit()
+        return range_low, range_high
 
     def get_all_users(self):
         """

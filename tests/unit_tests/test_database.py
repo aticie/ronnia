@@ -46,11 +46,17 @@ class TestDatabase(TestCase):
         user_details = result.fetchone()
         self.assertIsNotNone(user_details)
 
+        result = new_cursor.execute('SELECT COUNT(*) FROM users;').fetchone()
+        self.assertEqual(4, result[0])
+
         self.db.remove_user(twitch_username='user_to_be_removed')
 
         result = new_cursor.execute('SELECT * FROM users WHERE twitch_username=?;', ('user_to_be_removed',))
         user_details = result.fetchone()
         self.assertIsNone(user_details)
+
+        result = new_cursor.execute('SELECT COUNT(*) FROM users;').fetchone()
+        self.assertEqual(3, result[0])
 
     def test_get_user_from_osu_username_returns_correct_result(self):
         user = self.db.get_user_from_osu_username('test_user_unchanged')
@@ -96,3 +102,49 @@ class TestDatabase(TestCase):
         self.db.disable_channel(user_twitch_username)
         result = self.db.get_enabled_status(user_twitch_username)
         self.assertEqual(0, result)
+
+    def test_define_range_setting_creates_a_row(self):
+        self.db.define_range_setting('test_range_setting', 0, 100, 'test_description')
+        new_cursor = self.db.conn.cursor()
+
+        result = new_cursor.execute('SELECT * FROM range_settings WHERE key="test_range_setting";').fetchone()
+
+        self.assertEqual(0, result['default_low'])
+        self.assertEqual(100, result['default_high'])
+
+    def test_toggle_sub_only_toggles_setting(self):
+        user = self.db.get_user_from_twitch_username('test_user_unchanged')
+        user_twitch_username = user['twitch_username']
+        self.db.toggle_sub_only(user_twitch_username)
+        new_cursor = self.db.conn.cursor()
+
+        result = new_cursor.execute('SELECT * FROM user_settings WHERE key="sub-only";').fetchone()
+        self.assertEqual(1, result['value'])
+
+        self.db.toggle_sub_only(user_twitch_username)
+        result = new_cursor.execute('SELECT * FROM user_settings WHERE key="sub-only";').fetchone()
+        self.assertEqual(0, result['value'])
+
+    def test_get_range_setting_gets_correct_value(self):
+        user = self.db.get_user_from_twitch_username('test_user_unchanged')
+        user_twitch_username = user['twitch_username']
+        key = 'sr'
+        range_low, range_high = self.db.get_range_setting(user_twitch_username, key)
+
+        self.assertEqual(-1, range_low)
+        self.assertEqual(-1, range_high)
+
+    def test_set_range_setting_creates_new_range_setting(self):
+        user = self.db.get_user_from_twitch_username('test_user_unchanged')
+        user_twitch_username = user['twitch_username']
+        expected_low, expected_high = 3, 5
+
+        self.db.set_range_setting(twitch_username=user_twitch_username,
+                                  setting_key='test_range_setting',
+                                  range_low=expected_low,
+                                  range_high=expected_high)
+        range_low, range_high = self.db.get_range_setting(twitch_username=user_twitch_username,
+                                                          setting_key='test_range_setting')
+
+        self.assertEqual(expected_low, range_low)
+        self.assertEqual(expected_high, range_high)
