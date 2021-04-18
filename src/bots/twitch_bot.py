@@ -77,6 +77,9 @@ class TwitchBot(commands.Bot, ABC):
         diff_rating = float(beatmap_info['difficultyrating'])
         range_low, range_high = self.users_db.get_range_setting(twitch_username=twitch_username, setting_key='sr')
 
+        if range_low == -1 or range_high == -1:
+            return
+
         assert range_low < diff_rating < range_high, \
             f'@{requester_name} Streamer is accepting requests between {range_low:.1f}-{range_high:.1f}* difficulty.' \
             f' Your map is {diff_rating:.1f}*.'
@@ -91,6 +94,7 @@ class TwitchBot(commands.Bot, ABC):
             self.check_beatmap_star_rating(message, beatmap_info)
         except AssertionError as e:
             await message.channel.send(e)
+            raise Exception
 
     async def event_command_error(self, ctx, error):
         logger.error(error)
