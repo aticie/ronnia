@@ -15,7 +15,6 @@ class TestDatabase(TestCase):
         self.db.initialize()
 
     def test_add_user_adds_a_row_in_db(self):
-
         self.db.add_user(twitch_username='test_twitch_username',
                          osu_username='test_osu_username',
                          twitch_id='test_twitch_id',
@@ -29,7 +28,6 @@ class TestDatabase(TestCase):
         self.assertEqual(user_details['twitch_id'], 'test_twitch_id')
 
     def test_update_user_updates_db_fields(self):
-
         self.db.update_user(new_twitch_username='new_twitch_username',
                             new_osu_username='new_osu_username',
                             twitch_id='68427964',
@@ -66,3 +64,35 @@ class TestDatabase(TestCase):
         self.assertEqual(user['osu_username'], 'test_user_unchanged')
         self.assertEqual(user['osu_id'], '1111')
 
+    def test_enable_channel_sets_enabled_key_to_true(self):
+        user = self.db.get_user_from_twitch_username('test_user_unchanged')
+        user_twitch_username = user['twitch_username']
+
+        self.db.enable_channel(user_twitch_username)
+
+        new_cursor = self.db.conn.cursor()
+        result = new_cursor.execute('SELECT value FROM user_settings WHERE key="enable";').fetchone()
+
+        self.assertEqual(1, result['value'])
+
+    def test_disable_channel_sets_enabled_key_to_false(self):
+        user = self.db.get_user_from_twitch_username('test_user_unchanged')
+        user_twitch_username = user['twitch_username']
+        self.db.disable_channel(user_twitch_username)
+
+        new_cursor = self.db.conn.cursor()
+        result = new_cursor.execute('SELECT value FROM user_settings WHERE key="enable";').fetchone()
+
+        self.assertEqual(0, result['value'])
+
+    def test_get_enabled_gets_correct_enabled_status(self):
+        user = self.db.get_user_from_twitch_username('test_user_unchanged')
+        user_twitch_username = user['twitch_username']
+        self.db.enable_channel(user_twitch_username)
+
+        result = self.db.get_enabled_status(user_twitch_username)
+        self.assertEqual(1, result)
+
+        self.db.disable_channel(user_twitch_username)
+        result = self.db.get_enabled_status(user_twitch_username)
+        self.assertEqual(0, result)

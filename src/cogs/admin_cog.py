@@ -19,7 +19,7 @@ class AdminCog:
         if ctx.author.name != os.getenv('BOT_NICK'):
             return
 
-        twitch_username = args[0]
+        twitch_username = args[0].lower()
         osu_username = args[1].lower()
 
         osu_user_info, twitch_user_info = await self.bot.get_osu_and_twitch_details(osu_user_id_or_name=osu_username,

@@ -59,6 +59,11 @@ class UserDatabase(BaseDatabase):
         )
 
         self.c.execute(
+            f"CREATE TABLE IF NOT EXISTS exclude_list (user_id INTEGER, "
+            f"excluded_user text UNIQUE NOT NULL);"
+        )
+
+        self.c.execute(
             f"CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             f"key text UNIQUE, "
             f"default_value INTEGER, "
@@ -190,20 +195,13 @@ class UserDatabase(BaseDatabase):
         :param twitch_username: Twitch username of the requested user
         :return: Channel enabled status
         """
-        result = self.c.execute(
-            f"SELECT enabled FROM users "
-            f"WHERE twitch_username=?",
-            (twitch_username,))
-
-        return bool(result.fetchone()[0])
+        return self.get_setting('enable', twitch_username)
 
     def disable_channel(self, twitch_username: str):
-        self.c.execute(f"UPDATE users SET enabled=? WHERE twitch_username=?", (False, twitch_username,))
-        self.conn.commit()
+        self.set_setting(setting_key='enable', twitch_username=twitch_username, new_value=0)
 
     def enable_channel(self, twitch_username: str):
-        self.c.execute(f"UPDATE users SET enabled=? WHERE twitch_username=?", (True, twitch_username,))
-        self.conn.commit()
+        self.set_setting(setting_key='enable', twitch_username=twitch_username, new_value=1)
 
     def get_test_status(self, twitch_username: str):
         """
@@ -280,35 +278,3 @@ class BeatmapDatabase(BaseDatabase):
             f");"
         )
         self.conn.commit()
-
-
-if __name__ == '__main__':
-    start = time.time()
-    test_db = UserDatabase()
-    test_db.initialize()
-
-    tw_username = 'heyronii'
-
-    test_db.add_user('heyronii', 'heyronii')
-
-    print(
-        f'{tw_username} - Echo: {test_db.get_echo_status(tw_username)} - Enabled: {test_db.get_enabled_status(twitch_username=tw_username)}')
-    print(f'Disabled requests')
-    test_db.disable_channel(tw_username)
-    print(
-        f'{tw_username} - Echo: {test_db.get_echo_status(tw_username)} - Enabled: {test_db.get_enabled_status(twitch_username=tw_username)}')
-    print(f'Enabled requests')
-    test_db.enable_channel(tw_username)
-    print(
-        f'{tw_username} - Echo: {test_db.get_echo_status(tw_username)} - Enabled: {test_db.get_enabled_status(twitch_username=tw_username)}')
-    print(f'Enabled requests')
-    test_db.enable_channel(tw_username)
-    print(
-        f'{tw_username} - Echo: {test_db.get_echo_status(tw_username)} - Enabled: {test_db.get_enabled_status(twitch_username=tw_username)}')
-    for _ in range(3):
-        print(f'Toggling echo')
-        test_db.toggle_echo(tw_username)
-        print(
-            f'{tw_username} - Echo: {test_db.get_echo_status(tw_username)} - Enabled: {test_db.get_enabled_status(twitch_username=tw_username)}')
-
-    print(f'Testing done in {time.time() - start}')
