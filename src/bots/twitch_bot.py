@@ -66,15 +66,31 @@ class TwitchBot(commands.Bot, ABC):
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
                 await self._update_channel(message)
-                await self.check_request_criteria(message)
+                await self.check_request_criteria(message, beatmap_info)
                 if self.users_db.get_echo_status(twitch_username=message.channel.name):
                     await self._send_twitch_message(message, beatmap_info)
                 await self._send_irc_message(message, beatmap_info, given_mods)
 
-    async def check_request_criteria(self, message: Message):
+    def check_beatmap_star_rating(self, message: Message, beatmap_info):
+        twitch_username = message.channel.name
+        requester_name = message.author.name
+        diff_rating = float(beatmap_info['difficultyrating'])
+        range_low, range_high = self.users_db.get_range_setting(twitch_username=twitch_username, setting_key='sr')
+
+        assert range_low < diff_rating < range_high, \
+            f'@{requester_name} Streamer is accepting requests between {range_low:.1f}-{range_high:.1f}* difficulty.' \
+            f' Your map is {diff_rating:.1f}*.'
+
+        return
+
+    async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = self.users_db.get_test_status(message.channel.name)
         self.check_if_author_is_broadcaster(message, test_status)
         await self.check_if_streaming_osu(message.channel, test_status)
+        try:
+            self.check_beatmap_star_rating(message, beatmap_info)
+        except AssertionError as e:
+            await message.channel.send(e)
 
     async def event_command_error(self, ctx, error):
         logger.error(error)
