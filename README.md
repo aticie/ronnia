@@ -49,12 +49,13 @@ and my osu! account might get silenced. For now, I'm examining the memory usage 
 
 ## Features on the Roadmap 🏗️
 
-- Priority requests with channel points. (or an option to only allow channel point requests)
-- Priority requests for people that are loyal to streamer. (subs, vips, mods)
+- Indicate requests with channel points. (or an option to only allow channel point requests) ✅
+- Indicate requests for people that are loyal to streamer. (subs, vips, mods) ✅
 - Recommend popular beatmaps requested in other streams. (ex: top5 most requested beatmaps of this week)
 - Dockerize the bot. ✅
-- Star rating limit for requests. (Min:5 - Max:10 stars)
+- Star rating limit for requests. (Min:5 - Max:10 stars) ✅
 - Accept beatmaps with only selected ranked status. (Graveyard, Loved, Approved ...)
+- External program to post now playing beatmap with `!np`.
 - Other game modes than standard.
 
 ## Setup 📦
