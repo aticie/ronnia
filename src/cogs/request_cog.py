@@ -38,7 +38,7 @@ class RequestCog:
         await ctx.send(f'Check out the project page for more information. https://github.com/aticie/ronnia')
 
     @commands.command(name="sub-only")
-    async def disable_channel(self, ctx):
+    async def sub_only(self, ctx):
         new_value = self.bot.users_db.toggle_sub_only(ctx.author.name)
         if new_value:
             await ctx.send(
