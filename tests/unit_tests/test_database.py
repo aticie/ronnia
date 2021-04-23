@@ -6,13 +6,16 @@ from src.helpers.database_helper import UserDatabase
 
 
 class TestDatabase(TestCase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+
+    @classmethod
+    def setUpClass(cls) -> None:
         test_db_path = os.path.join('tests', 'data', 'users_test.db')
         db_path = os.path.join('tests', 'data', 'users.db')
+        if os.path.exists(db_path):
+            os.remove(db_path)
         shutil.copyfile(test_db_path, db_path)
-        self.db = UserDatabase(db_path=db_path)
-        self.db.initialize()
+        cls.db = UserDatabase(db_path=db_path)
+        cls.db.initialize()
 
     def test_add_user_adds_a_row_in_db(self):
         self.db.add_user(twitch_username='test_twitch_username',
