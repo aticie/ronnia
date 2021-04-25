@@ -1,9 +1,9 @@
-version: "3.9"
+version: "3"
 
 services:
   ronnia-bot:
     build: .
-    image: ronnia-bot:latest
+    image: eatici/ronnia:release-v1.1.0
     restart: always
     volumes:
       - your_host_machine_db_folder_path:/mount
