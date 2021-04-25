@@ -103,10 +103,26 @@ And then, the bot will be listening to messages on your channel. You can add oth
 `!adduser <twitch_username> <osu_username>`
 
 ### Docker 🐳
+#### Build and Run
 To use docker either build dockerfile and supply a .env file for running:
 
 `docker build -t ronnia-bot .`and `docker run --name ronnia --env-file .env ronnia-bot`
 
-Or use the docker-compose with the given template. 
+#### Docker Hub releases
+
+Releases from 1.1.0 and onwards are published to Docker hub automatically. 
+[You can find the repository here.](https://hub.docker.com/r/eatici/ronnia)
+
+Use the release tag you want to use in docker-compose with the given template. 
+
+```
+...
+services:
+  ronnia-bot:
+    build: .
+    image: eatici/ronnia:release-v1.1.0 <- change the tag here!
+```
+
+To run the bot:
 
 `docker-compose up -d`
