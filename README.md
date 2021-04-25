@@ -120,7 +120,7 @@ Use the release tag you want to use in docker-compose with the given template.
 services:
   ronnia-bot:
     build: .
-    image: eatici/ronnia:release-v1.1.0 <- change the tag here!
+    image: eatici/ronnia:release-v1.x.x <- change the tag here!
 ```
 
 To run the bot:
