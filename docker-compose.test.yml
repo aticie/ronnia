@@ -3,4 +3,4 @@ sut:
   working_dir: /
   environment:
     PYTHONPATH: "$PYTHONPATH:/src"
-  command: python3 -m unittest -s /tests
+  entrypoint: python3 -m unittest -s /tests
