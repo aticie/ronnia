@@ -1,0 +1,6 @@
+sut:
+  build: .
+  working_dir: /
+  environment:
+    PYTHONPATH: "$PYTHONPATH:/src"
+  command: python3 -m unittest -s /tests

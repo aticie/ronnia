@@ -2,7 +2,7 @@ import os
 import shutil
 from unittest import TestCase
 
-from src.helpers.database_helper import UserDatabase
+from helpers.database_helper import UserDatabase
 
 
 class TestDatabase(TestCase):
