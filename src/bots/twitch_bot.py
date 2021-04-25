@@ -1,17 +1,17 @@
-import os
-from threading import Thread
-from abc import ABC
-from typing import AnyStr, Tuple, Union
-import logging
 import datetime
+import logging
+import os
+from abc import ABC
+from threading import Thread
+from typing import AnyStr, Tuple, Union
 
-from twitchio.ext import commands
 from twitchio import Message, User, Channel
+from twitchio.ext import commands
 
-from helpers.beatmap_link_parser import parse_beatmap_link
-from helpers.osu_api_helper import OsuApiHelper
-from helpers.database_helper import UserDatabase
 from bots.irc_bot import IrcBot
+from helpers.beatmap_link_parser import parse_beatmap_link
+from helpers.database_helper import UserDatabase
+from helpers.osu_api_helper import OsuApiHelper
 
 logger = logging.getLogger('ronnia')
 
@@ -65,11 +65,23 @@ class TwitchBot(commands.Bot, ABC):
             self._check_user_cooldown(message.author)
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
-                await self._update_channel(message)
                 await self.check_request_criteria(message, beatmap_info)
+                await self._update_channel(message)
+                # If user has enabled echo setting, send twitch chat a message
                 if self.users_db.get_echo_status(twitch_username=message.channel.name):
                     await self._send_twitch_message(message, beatmap_info)
+
                 await self._send_irc_message(message, beatmap_info, given_mods)
+
+    def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
+        if not is_updated:
+            update_message = f'Hello! There have been updates to the bot! ' \
+                             f'You can now visit (ronnia dashboard)[https://ronnia.me] to change your settings. ' \
+                             f'If you don\'t like using irc !commands,' \
+                             f' you can now easily change your settings on the website!'
+            self.irc_bot.send_message(osu_username, update_message)
+            self.users_db.set_channel_updated(twitch_username)
+        return
 
     def check_beatmap_star_rating(self, message: Message, beatmap_info):
         twitch_username = message.channel.name
@@ -90,11 +102,25 @@ class TwitchBot(commands.Bot, ABC):
         test_status = self.users_db.get_test_status(message.channel.name)
         self.check_if_author_is_broadcaster(message, test_status)
         await self.check_if_streaming_osu(message.channel, test_status)
+        self.check_sub_only_mode(message)
+        self.check_cp_only_mode(message)
         try:
             self.check_beatmap_star_rating(message, beatmap_info)
         except AssertionError as e:
             await message.channel.send(e)
             raise Exception
+
+    def check_sub_only_mode(self, message: Message):
+        is_sub_only = self.users_db.get_setting('sub-only', message.channel.name)
+        if is_sub_only:
+            assert message.author.is_mod or message.author.is_subscriber or 'vip' in message.author.badges, \
+                'Subscriber only request mode is active.'
+
+    def check_cp_only_mode(self, message):
+        is_cp_only = self.users_db.get_setting('cp-only', message.channel.name)
+        if is_cp_only:
+            assert 'custom-reward-id' in message.tags, 'Channel Points only mode is active.'
+        return
 
     async def event_command_error(self, ctx, error):
         logger.error(error)
@@ -111,6 +137,8 @@ class TwitchBot(commands.Bot, ABC):
         channel_last_updated = channel_details['updated_at']
         osu_user_id = channel_details['osu_id']
         twitch_id = channel_details['twitch_id']
+        twitch_username = channel_details['twitch_username']
+        is_channel_updated = channel_details['enabled']
         time_passed_since_last_update = datetime.datetime.now() - channel_last_updated
         # Check if user has been updated since yesterday
         if time_passed_since_last_update.days >= 1:
@@ -124,7 +152,10 @@ class TwitchBot(commands.Bot, ABC):
             # Update database with new information
             self.users_db.update_user(new_twitch_username=new_twitch_username, new_osu_username=new_osu_username,
                                       twitch_id=twitch_id, osu_user_id=osu_user_id)
+            self.inform_user_on_updates(new_osu_username, new_twitch_username, is_channel_updated)
+            return
 
+        self.inform_user_on_updates(channel_details['osu_username'], twitch_username, is_channel_updated)
         return
 
     async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_id_or_name):

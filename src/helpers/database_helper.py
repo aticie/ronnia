@@ -1,6 +1,5 @@
-import sqlite3
 import os
-import time
+import sqlite3
 from datetime import datetime
 from typing import Tuple
 
@@ -105,6 +104,11 @@ class UserDatabase(BaseDatabase):
         self.define_setting('cp-only', 0, 'Setting for channel points only requests mode.')
         self.define_setting('test', 0, 'Enables test mode on the channel.')
         self.define_range_setting('sr', -1, -1, 'Set star rating limit for requests.')
+
+    def set_channel_updated(self, twitch_username: str):
+        self.c.execute(f'UPDATE users SET enabled=? WHERE twitch_username=?', (1, twitch_username))
+        self.conn.commit()
+        return
 
     def add_user(self,
                  twitch_username: str,

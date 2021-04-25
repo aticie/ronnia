@@ -92,7 +92,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         Disables requests on twitch channel
         :param event: Event of the current message
-        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
+        :param user_details: User Details Sqlite row factory
         """
         twitch_username = user_details['twitch_username']
         osu_username = user_details['osu_username']
@@ -106,7 +106,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         Registers bot on twitch channel
         :param event: Event of the current message
-        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
+        :param user_details: User Details Sqlite row factory
 
         Currently not supported... TODO: Register user -> ask twitch
         """
@@ -115,7 +115,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
     def enable_requests_on_channel(self, event: Event, *args, user_details: tuple):
         """
         Enables requests on twitch channel
-        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
+        :param user_details: User Details Sqlite row factory
         """
         twitch_username = user_details['twitch_username']
         logger.debug(f'Enable requests on channel - Current user details: {user_details}')
@@ -127,7 +127,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
     def toggle_notifications(self, event: Event, *args, user_details: tuple):
         """
         Toggles echo notifications on twitch channel when requesting beatmaps
-        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
+        :param user_details: User Details Sqlite row factory
         """
         twitch_username = user_details['twitch_username']
         logger.debug(f'Toggle notifications on channel: {event.source.nick}')
@@ -143,7 +143,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
     def show_help_message(self, event: Event, *args, user_details: tuple):
         """
         Shows help message to user
-        :param user_details: Tuple of user details (user_id, osu! username, twitch username, enabled flag)
+        :param user_details: User Details Sqlite row factory
         :return:
         """
         logger.debug(f'Showing help message on channel: {event.source.nick}')

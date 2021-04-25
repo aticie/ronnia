@@ -1,10 +1,7 @@
 import logging
 import os
 
-from dotenv import load_dotenv
 from bots.twitch_bot import TwitchBot
-
-load_dotenv()
 
 logger = logging.getLogger('ronnia')
 logger.setLevel(os.getenv('LOG_LEVEL').upper())
