@@ -115,7 +115,7 @@ Releases from 1.1.0 and onwards are published to Docker hub automatically.
 
 Use the release tag you want to use in docker-compose with the given template. 
 
-```
+```yaml
 ...
 services:
   ronnia-bot:
