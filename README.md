@@ -1,3 +1,7 @@
+![codeql-analysis](https://github.com/aticie/ronnia/actions/workflows/codeql-analysis.yml/badge.svg)
+![docker-build](https://img.shields.io/docker/cloud/build/eatici/ronnia)
+
+
 <div align="center">
 
 # ronnia - A Beatmap Request Bot
