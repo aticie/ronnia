@@ -10,6 +10,12 @@
 
 ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the streamer's in-game messages.
 
+# Ronnia Dashboard - https://github.com/aticie/ronnia-web
+
+Ronnia Dashboard is available at https://ronnia.me/
+
+Registered streamers can now change their settings from website instead of IRC commmands!
+
 ## Disclaimer 📝
 
 Currently, the bot runs under my personal account `heyronii`. I'm planning to change its name to `ronnia` when I can get
