@@ -114,7 +114,7 @@ class TwitchBot(commands.Bot, ABC):
 
     def check_user_excluded(self, message: Message):
         excluded_users = self.users_db.get_excluded_users(twitch_username=message.channel.name, return_mode='list')
-        assert message.author.name not in excluded_users, f'{message.author.name} is excluded'
+        assert message.author.name.lower() not in excluded_users, f'{message.author.name} is excluded'
 
     def check_sub_only_mode(self, message: Message):
         is_sub_only = self.users_db.get_setting('sub-only', message.channel.name)

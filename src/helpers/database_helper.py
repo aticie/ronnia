@@ -390,7 +390,7 @@ class UserDatabase(BaseDatabase):
         result = self.c.execute("SELECT * FROM exclude_list WHERE user_id=?", (user_id,))
         value = result.fetchone()
 
-        excluded_users = ','.join(map(str.strip, excluded_users.split(',')))
+        excluded_users = ','.join(map(str.lower, map(str.strip, excluded_users.split(','))))
 
         if value is None:
             self.c.execute("INSERT INTO exclude_list (excluded_user, user_id) VALUES (?, ?)",
