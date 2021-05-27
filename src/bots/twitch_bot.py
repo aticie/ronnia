@@ -100,15 +100,21 @@ class TwitchBot(commands.Bot, ABC):
 
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = self.users_db.get_test_status(message.channel.name)
-        self.check_if_author_is_broadcaster(message, test_status)
-        await self.check_if_streaming_osu(message.channel, test_status)
         self.check_sub_only_mode(message)
         self.check_cp_only_mode(message)
+        self.check_user_excluded(message)
+        self.check_if_author_is_broadcaster(message, test_status)
+        await self.check_if_streaming_osu(message.channel, test_status)
+
         try:
             self.check_beatmap_star_rating(message, beatmap_info)
         except AssertionError as e:
             await message.channel.send(e)
             raise Exception
+
+    def check_user_excluded(self, message: Message):
+        excluded_users = self.users_db.get_excluded_users(twitch_username=message.channel.name, return_mode='list')
+        assert message.author.name not in excluded_users, f'{message.author.name} is excluded'
 
     def check_sub_only_mode(self, message: Message):
         is_sub_only = self.users_db.get_setting('sub-only', message.channel.name)

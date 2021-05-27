@@ -1,14 +1,14 @@
 import os
 import sqlite3
 from datetime import datetime
-from typing import Tuple
+from typing import Tuple, Optional, List, Union
 
 
 class BaseDatabase:
     def __init__(self, db_path: str):
         self.db_path: str = db_path
-        self.conn: sqlite3.Connection = None
-        self.c: sqlite3.Cursor = None
+        self.conn: Optional[sqlite3.Connection] = None
+        self.c: Optional[sqlite3.Cursor] = None
 
     def initialize(self):
         self.conn = sqlite3.connect(self.db_path,
@@ -92,8 +92,8 @@ class UserDatabase(BaseDatabase):
         )
 
         self.c.execute(
-            f"CREATE TABLE IF NOT EXISTS exclude_list (user_id INTEGER, "
-            f"excluded_user text UNIQUE NOT NULL);"
+            f"CREATE TABLE IF NOT EXISTS exclude_list (user_id INTEGER UNIQUE, "
+            f"excluded_user text NOT NULL);"
         )
 
         self.conn.commit()
@@ -155,7 +155,7 @@ class UserDatabase(BaseDatabase):
         self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
         self.conn.commit()
 
-    def get_user_from_osu_username(self, osu_username: str) -> str:
+    def get_user_from_osu_username(self, osu_username: str) -> sqlite3.Row:
         """
         Gets the user details from database using osu username
         :param osu_username: osu username
@@ -164,7 +164,7 @@ class UserDatabase(BaseDatabase):
         result = self.c.execute(f"SELECT * from users WHERE osu_username=?", (osu_username,))
         return result.fetchone()
 
-    def get_user_from_twitch_username(self, twitch_username: str) -> str:
+    def get_user_from_twitch_username(self, twitch_username: str) -> sqlite3.Row:
         """
         Gets the user details from database using Twitch username
         :param twitch_username:
@@ -273,7 +273,7 @@ class UserDatabase(BaseDatabase):
             value = r.fetchone()
         return bool(value[0])
 
-    def handle_none_type_range_setting(self, value: str, setting_key: str):
+    def handle_none_type_range_setting(self, value: Optional[sqlite3.Row], setting_key: str):
         """
         If a setting is none, gets the default value for that setting from the database
         :param value: Current value of the key - could be None or a tuple
@@ -378,6 +378,53 @@ class UserDatabase(BaseDatabase):
         result = self.c.execute("SELECT * FROM users;")
         value = result.fetchall()
         return value
+
+    def set_excluded_users(self, twitch_username: str, excluded_users: str):
+        """
+        Sets excluded users as comma separated list
+        :param twitch_username: Twitch username
+        :param excluded_users: Excluded users
+        :return: Status
+        """
+        user_id = self.get_user_from_twitch_username(twitch_username)['user_id']
+        result = self.c.execute("SELECT * FROM exclude_list WHERE user_id=?", (user_id,))
+        value = result.fetchone()
+
+        excluded_users = ','.join(map(str.strip, excluded_users.split(',')))
+
+        if value is None:
+            self.c.execute("INSERT INTO exclude_list (excluded_user, user_id) VALUES (?, ?)",
+                           (excluded_users, user_id))
+        else:
+            self.c.execute("UPDATE exclude_list SET excluded_user=? WHERE user_id=?",
+                           (excluded_users, user_id))
+
+        self.conn.commit()
+
+    def get_excluded_users(self, twitch_username: str, return_mode='str') -> Union[List, str]:
+        """
+        Gets excluded user settings of a user
+        :param twitch_username: Twitch username
+        :param return_mode: Can be 'str' (String of comma separated values) or 'list' (List of excluded users)
+        :return: Comma separated values of excluded users
+        """
+        result = self.c.execute("SELECT * FROM exclude_list INNER JOIN users ON users.user_id=exclude_list.user_id "
+                                "WHERE twitch_username=?", (twitch_username,))
+
+        value = result.fetchone()
+
+        if value is None:
+            if return_mode == 'list':
+                excluded_users = []
+            else:
+                excluded_users = ''
+        else:
+            excluded_users = value['excluded_user']
+
+            if return_mode == 'list':
+                excluded_users = excluded_users.split(',')
+
+        return excluded_users
 
 
 class BeatmapDatabase(BaseDatabase):

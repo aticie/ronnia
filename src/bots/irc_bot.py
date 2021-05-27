@@ -1,3 +1,6 @@
+import sqlite3
+from typing import Union
+
 import attr
 import logging
 from threading import Lock
@@ -88,7 +91,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                 self.send_message(e.source.nick, f'Sorry, I couldn\'t understand what {cmd} means')
                 pass
 
-    def disable_requests_on_channel(self, event: Event, *args, user_details: tuple):
+    def disable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Disables requests on twitch channel
         :param event: Event of the current message
@@ -102,7 +105,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'I\'ve disabled requests for now. '
                           f'If you want to re-enable requests, type !enable anytime.')
 
-    def register_bot_on_channel(self, event: Event, *args, user_details: tuple):
+    def register_bot_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Registers bot on twitch channel
         :param event: Event of the current message
@@ -112,7 +115,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         logger.debug(f'Register bot on channel: {user_details}')
 
-    def enable_requests_on_channel(self, event: Event, *args, user_details: tuple):
+    def enable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Enables requests on twitch channel
         :param user_details: User Details Sqlite row factory
@@ -124,7 +127,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'I\'ve enabled requests. Have fun!')
         logger.debug(f'I\'ve enabled requests. Have fun!')
 
-    def toggle_notifications(self, event: Event, *args, user_details: tuple):
+    def toggle_notifications(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Toggles echo notifications on twitch channel when requesting beatmaps
         :param user_details: User Details Sqlite row factory
@@ -140,7 +143,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                                                  f'information feedback on your channel.')
         pass
 
-    def show_help_message(self, event: Event, *args, user_details: tuple):
+    def show_help_message(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Shows help message to user
         :param user_details: User Details Sqlite row factory
@@ -152,7 +155,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'List of available commands are (listed here)'
                           f'[https://github.com/aticie/ronnia/wiki/Commands].')
 
-    def set_sr_rating(self, event: Event, *args, user_details: tuple):
+    def set_sr_rating(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         sr_text = ' '.join(args)
         try:
             range_input = RangeInput(*(sr_text.split('-')))
