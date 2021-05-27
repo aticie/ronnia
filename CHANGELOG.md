@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.  
 
+## [1.2.1] - 2021-05-27
+### Fixed
+- Excluded users to be lowercase when comparing and adding to database. 
+
 ## [1.2.0] - 2021-05-27
 ### Added
 - Excluded users list so that the bot doesn't respond to unwanted messages. 
@@ -17,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/aticie/ronnia/releases/tag/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/aticie/ronnia/releases/tag/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/aticie/ronnia/releases/tag/v1.1.0
