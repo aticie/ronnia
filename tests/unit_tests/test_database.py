@@ -200,6 +200,19 @@ class TestDatabase(TestCase):
 
         self.assertEqual(expected_value, value)
 
+    def test_set_excluded_users_makes_entry_lowercase(self):
+        excluded_users = 'TesTUser1'
+        expected_value = 'testuser1'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=excluded_users)
+
+        new_cursor = self.db.conn.cursor()
+        response = new_cursor.execute('SELECT excluded_user FROM exclude_list WHERE user_id=19;').fetchone()
+
+        value = response['excluded_user']
+
+        self.assertEqual(expected_value, value)
+
     def test_get_excluded_users_gets_entry_from_db_in_str_return_mode(self):
         expected_value = 'get_str_test_excluded_user_1,get_str_test_excluded_user_1'
         self.db.set_excluded_users(twitch_username='test_user_unchanged',
