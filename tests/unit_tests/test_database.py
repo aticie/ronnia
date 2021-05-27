@@ -151,3 +151,83 @@ class TestDatabase(TestCase):
 
         self.assertEqual(expected_low, range_low)
         self.assertEqual(expected_high, range_high)
+
+    def test_set_excluded_users_upserts_entry_to_db(self):
+        excluded_users = 'test_excluded_user_1,test_excluded_user_2'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=excluded_users)
+
+        new_cursor = self.db.conn.cursor()
+        response = new_cursor.execute('SELECT excluded_user FROM exclude_list WHERE user_id=19;').fetchone()
+
+        value = response['excluded_user']
+
+        self.assertEqual(excluded_users, value)
+
+        update_excluded_users = 'test_excluded_user_1'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=update_excluded_users)
+
+        response = new_cursor.execute('SELECT excluded_user FROM exclude_list WHERE user_id=19;').fetchone()
+
+        updated_value = response['excluded_user']
+
+        self.assertEqual(update_excluded_users, updated_value)
+
+    def test_set_excluded_users_removes_trailing_whitespaces(self):
+        excluded_users = 'test excluded user 1 , test excluded user 2'
+        expected_value = 'test excluded user 1,test excluded user 2'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=excluded_users)
+
+        new_cursor = self.db.conn.cursor()
+        response = new_cursor.execute('SELECT excluded_user FROM exclude_list WHERE user_id=19;').fetchone()
+
+        value = response['excluded_user']
+
+        self.assertEqual(expected_value, value)
+
+    def test_set_excluded_users_inserts_empty_string(self):
+        excluded_users = ''
+        expected_value = ''
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=excluded_users)
+
+        new_cursor = self.db.conn.cursor()
+        response = new_cursor.execute('SELECT excluded_user FROM exclude_list WHERE user_id=19;').fetchone()
+
+        value = response['excluded_user']
+
+        self.assertEqual(expected_value, value)
+
+    def test_get_excluded_users_gets_entry_from_db_in_str_return_mode(self):
+        expected_value = 'get_str_test_excluded_user_1,get_str_test_excluded_user_1'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=expected_value)
+        returned_value = self.db.get_excluded_users(twitch_username='test_user_unchanged')
+
+        self.assertEqual(expected_value, returned_value)
+
+    def test_get_excluded_users_returns_list_from_db_in_list_return_mode(self):
+        expected_value = ['get_list_test_excluded_user_1', 'get_list_test_excluded_user_1']
+        excluded_users = 'get_list_test_excluded_user_1, get_list_test_excluded_user_1'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=excluded_users)
+        returned_value = self.db.get_excluded_users(twitch_username='test_user_unchanged', return_mode='list')
+
+        self.assertListEqual(expected_value, returned_value)
+
+    def test_get_excluded_users_returns_empty_string_when_value_is_null(self):
+        expected_value = ['get_list_test_excluded_user_1', 'get_list_test_excluded_user_1']
+        excluded_users = 'get_list_test_excluded_user_1, get_list_test_excluded_user_1'
+        self.db.set_excluded_users(twitch_username='test_user_unchanged',
+                                   excluded_users=excluded_users)
+        returned_value = self.db.get_excluded_users(twitch_username='test_user_unchanged', return_mode='list')
+
+        self.assertListEqual(expected_value, returned_value)
+
+    def test_get_excluded_users_returns_empty_list_in_list_mode_when_value_is_null(self):
+        expected_value = []
+        returned_value = self.db.get_excluded_users(twitch_username='unknown_user', return_mode='list')
+
+        self.assertListEqual(expected_value, returned_value)
