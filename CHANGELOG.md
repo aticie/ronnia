@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.2.3] - 2021-06-09
+### Fixed
+- Edge case for mod text when no mod is given
+
 ## [1.2.2] - 2021-06-09
 ### Added
 - Support for different beatmap links and mod combinations. 

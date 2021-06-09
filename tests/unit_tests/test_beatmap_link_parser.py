@@ -109,7 +109,6 @@ class TestBeatmapLinkParser(unittest.TestCase):
             self.assertEqual(expected_mods_int, mods_int)
             self.assertEqual(expected_mods_text, mods_text)
 
-
     def test_get_mod_from_text_returns_correct_mod_combination_when_mod_is_given_with_space_after_plus_sign(self):
         expected_mods_int = 64 + 8
         expected_mods_text = "+HDDT"
@@ -120,7 +119,6 @@ class TestBeatmapLinkParser(unittest.TestCase):
 
             self.assertEqual(expected_mods_int, mods_int)
             self.assertEqual(expected_mods_text, mods_text)
-
 
     def test_get_mod_from_text_returns_correct_mod_combination_when_mod_is_given_without_plus_sign(self):
         expected_mods_int = 64 + 8
@@ -133,13 +131,23 @@ class TestBeatmapLinkParser(unittest.TestCase):
             self.assertEqual(expected_mods_int, mods_int)
             self.assertEqual(expected_mods_text, mods_text)
 
-
     def test_get_mod_from_text_returns_correct_mod_combination_when_mod_is_case_insensitive(self):
         expected_mods_int = 64 + 8
         expected_mods_text = "+HDDT"
 
         for beatmap_link in self.beatmap_links:
             content = f'{beatmap_link} +HdDt'
+            mods_int, mods_text = get_mod_from_text(content, beatmap_link)
+
+            self.assertEqual(expected_mods_int, mods_int)
+            self.assertEqual(expected_mods_text, mods_text)
+
+    def test_get_mod_from_text_returns_nomod_when_no_mod_is_given(self):
+        expected_mods_int = 0
+        expected_mods_text = ""
+
+        for beatmap_link in self.beatmap_links:
+            content = f'{beatmap_link}'
             mods_int, mods_text = get_mod_from_text(content, beatmap_link)
 
             self.assertEqual(expected_mods_int, mods_int)

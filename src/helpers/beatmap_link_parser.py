@@ -33,6 +33,9 @@ def get_mod_from_text(content, candidate_link) -> Tuple[int, str]:
 
         total_mods.extend(mods_as_list)
 
+    if len(total_mods) == 0:
+        return 0, ""
+
     mods_as_int = 0
     mods_as_text = "+"
     for mod in total_mods:
@@ -41,8 +44,6 @@ def get_mod_from_text(content, candidate_link) -> Tuple[int, str]:
             mods_as_text += mod
 
     return mods_as_int, mods_as_text
-
-    return 0, ""
 
 
 def extract_url_parameters(headers_string, desired_keys) -> Optional[List]:
