@@ -1,5 +1,5 @@
 import re
-from typing import Sequence, Union, AnyStr
+from typing import Sequence, AnyStr, Optional, Tuple, Union, List
 
 legacy_mode_converter = {'osu': '0',
                          'taiko': '1',
@@ -21,32 +21,31 @@ mod_bit_shift_dict = {
 }
 
 
-def get_mod_from_text(content, candidate_link):
-    pattern = r'^\+([A-Za-z]+)'
+def get_mod_from_text(content, candidate_link) -> Tuple[int, str]:
     text = content.split(candidate_link)[-1].strip()
-    match = re.search(pattern, text)
+    matches = re.findall(r'(?i)[-+~|]?(?:EZ|HD|HR|DT|HT|NC|FL|TD)+[~|]?', text)
 
-    if match:
-        mods = match.group(1)
-        if len(mods) % 2 == 1:
-            mods = mods[:-1]
-        mods = mods.upper()
+    total_mods = []
+    for mods in matches:
+        mods = mods.strip("-+~|").upper()
 
         mods_as_list = [mods[i:i + 2] for i in range(0, len(mods), 2)]
-        mods_as_int = 0
 
-        mods_as_text = "+"
-        for mod in mods_as_list:
-            if mod in mod_bit_shift_dict:
-                mods_as_int |= 1 << mod_bit_shift_dict[mod]
-                mods_as_text += mod
+        total_mods.extend(mods_as_list)
 
-        return mods_as_int, mods_as_text
+    mods_as_int = 0
+    mods_as_text = "+"
+    for mod in total_mods:
+        if mod in mod_bit_shift_dict:
+            mods_as_int |= 1 << mod_bit_shift_dict[mod]
+            mods_as_text += mod
+
+    return mods_as_int, mods_as_text
 
     return 0, ""
 
 
-def extract_url_headers(headers_string, desired_keys):
+def extract_url_parameters(headers_string, desired_keys) -> Optional[List]:
     headers = {head.split('=')[0]: head.split('=')[1] for head in headers_string.split('&')}
 
     collected_values = []
@@ -58,7 +57,7 @@ def extract_url_headers(headers_string, desired_keys):
     return collected_values
 
 
-def parse_beatmapset(map_link: str):
+def parse_beatmapset(map_link: str) -> Optional[Tuple]:
     patterns = {'official': r"https?:\/\/osu.ppy.sh\/beatmapsets\/([0-9]+)",
                 'old': r"https?:\/\/(osu|old).ppy.sh\/s\/([0-9]+)",
                 'old_alternate': r"https?:\/\/(osu|old).ppy.sh\/p\/beatmap\?(.+)"
@@ -72,18 +71,20 @@ def parse_beatmapset(map_link: str):
             continue
         else:
             if link_type == 'official':
-                return 0, result.group(1)
+                return '0', result.group(1)
             elif link_type == 'old':
-                return 0, result.group(2)
+                return '0', result.group(2)
             else:
-                return extract_url_headers(result.group(2), ['m', 's'])
+                return extract_url_parameters(result.group(2), ['m', 's'])
 
     return None
 
 
-def parse_single_beatmap(map_link: str) -> Union[Sequence[AnyStr], None]:
+def parse_single_beatmap(map_link: str) -> Optional[Sequence[AnyStr]]:
     patterns = {'official': r"https?:\/\/osu.ppy.sh\/beatmapsets\/[0-9]+\#(osu|taiko|fruits|mania)\/([0-9]+)",
                 # Official osu! beatmap link
+                'official_alt': r"https?:\/\/osu.ppy.sh\/beatmaps\/([0-9]+)\?(.+)",
+                # Official alternate beatmap link
                 'old_single': r"https?:\/\/(osu|old).ppy.sh\/b\/([0-9]+)",
                 # Old beatmap link
                 'old_alternate': r"https?:\/\/(osu|old).ppy.sh\/p\/beatmap\?(.+)"
@@ -101,14 +102,16 @@ def parse_single_beatmap(map_link: str) -> Union[Sequence[AnyStr], None]:
             if link_type == 'official':
                 return legacy_mode_converter[result.group(1)], result.group(2)
             elif link_type == 'old_single':
-                return 0, result.group(2)
+                return '0', result.group(2)
+            elif link_type == 'official_alt':
+                return legacy_mode_converter[extract_url_parameters(result.group(2), ['mode'])[0]], result.group(1)
             else:
-                return extract_url_headers(result.group(2), ['m', 'b'])
+                return extract_url_parameters(result.group(2), ['m', 'b'])
 
     return None
 
 
-def parse_beatmap_link(beatmap_link: str, content: str):
+def parse_beatmap_link(beatmap_link: str, content: str) -> Union[Tuple[dict, str], Tuple[None, None]]:
     beatmap_link = beatmap_link.split('+')[0]
     result = parse_single_beatmap(beatmap_link)
 
