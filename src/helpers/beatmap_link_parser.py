@@ -1,4 +1,5 @@
 import re
+from collections import OrderedDict
 from typing import Sequence, AnyStr, Optional, Tuple, Union, List
 
 legacy_mode_converter = {'osu': '0',
@@ -23,7 +24,7 @@ mod_bit_shift_dict = {
 
 def get_mod_from_text(content, candidate_link) -> Tuple[int, str]:
     text = content.split(candidate_link)[-1].strip()
-    matches = re.findall(r'(?i)[-+~|]?(?:EZ|HD|HR|DT|HT|NC|FL|TD)+[~|]?', text)
+    matches = re.findall(r'(?i)[-+~|]?(?:EZ|HD|HR|DT|HT|NC|FL|SO|PF|SD)+[~|]?', text)
 
     total_mods = []
     for mods in matches:
@@ -38,7 +39,8 @@ def get_mod_from_text(content, candidate_link) -> Tuple[int, str]:
 
     mods_as_int = 0
     mods_as_text = "+"
-    for mod in total_mods:
+    total_mods = OrderedDict.fromkeys(total_mods)
+    for mod in total_mods.keys():
         if mod in mod_bit_shift_dict:
             mods_as_int |= 1 << mod_bit_shift_dict[mod]
             mods_as_text += mod
