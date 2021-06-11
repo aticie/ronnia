@@ -11,3 +11,4 @@ test.db
 *.json
 docker-compose.yml
 .idea
+__pycache__
