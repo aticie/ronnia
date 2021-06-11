@@ -91,12 +91,14 @@ BOT_PREFIX=! (Currently unused, might change in future)
 OSU_USERNAME=heyronii (Change this to your osu! username)
 IRC_PASSWORD=**** (Get yours from here: https://osu.ppy.sh/p/irc)
 OSU_API_KEY=**** (Get yours from here: https://osu.ppy.sh/p/api)
+LOG_LEVEL=INFO (https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here)
+DB_DIR=mount/
 ```
 
 Add yourself to database by doing:
 
 ```python
-from utils.database_helper import UserDatabase
+from helpers.database_helper import UserDatabase
 
 twitch_username = heyronii  # Change this line to your username
 osu_username = heyronii  # Change this line as well
