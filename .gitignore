@@ -12,3 +12,4 @@ test.db
 docker-compose.yml
 .idea
 __pycache__
+
