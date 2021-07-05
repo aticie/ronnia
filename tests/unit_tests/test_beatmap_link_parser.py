@@ -9,6 +9,7 @@ class TestBeatmapLinkParser(unittest.TestCase):
     def setUp(self) -> None:
         self.official_beatmap_link = 'https://osu.ppy.sh/beatmapsets/1341551#osu/2778999'
         self.official_beatmap_link_alt = 'https://osu.ppy.sh/beatmaps/806017?mode=osu'
+        self.official_beatmap_link_alt_2 = 'https://osu.ppy.sh/beatmaps/806017'
         self.old_beatmap_link = 'https://osu.ppy.sh/b/2778999'
         self.old_beatmap_link_alt = 'https://old.ppy.sh/p/beatmap?b=1955170&m=2'
 
@@ -32,6 +33,14 @@ class TestBeatmapLinkParser(unittest.TestCase):
         expected_id = '806017'
         expected_mod = '0'
         result_mod, result_id = parse_single_beatmap(self.official_beatmap_link_alt)
+
+        self.assertEqual(expected_id, result_id)
+        self.assertEqual(expected_mod, result_mod)
+
+    def test_parse_single_beatmap_returns_beatmap_id_for_official_links_alternate_2(self):
+        expected_id = '806017'
+        expected_mod = '0'
+        result_mod, result_id = parse_single_beatmap(self.official_beatmap_link_alt_2)
 
         self.assertEqual(expected_id, result_id)
         self.assertEqual(expected_mod, result_mod)
