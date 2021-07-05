@@ -84,7 +84,7 @@ def parse_beatmapset(map_link: str) -> Optional[Tuple]:
 def parse_single_beatmap(map_link: str) -> Optional[Sequence[AnyStr]]:
     patterns = {'official': r"https?:\/\/osu.ppy.sh\/beatmapsets\/[0-9]+\#(osu|taiko|fruits|mania)\/([0-9]+)",
                 # Official osu! beatmap link
-                'official_alt': r"https?:\/\/osu.ppy.sh\/beatmaps\/([0-9]+)\?(.+)",
+                'official_alt': r"https?:\/\/osu.ppy.sh\/beatmaps\/([0-9]+)",
                 # Official alternate beatmap link
                 'old_single': r"https?:\/\/(osu|old).ppy.sh\/b\/([0-9]+)",
                 # Old beatmap link
@@ -105,7 +105,7 @@ def parse_single_beatmap(map_link: str) -> Optional[Sequence[AnyStr]]:
             elif link_type == 'old_single':
                 return '0', result.group(2)
             elif link_type == 'official_alt':
-                return legacy_mode_converter[extract_url_parameters(result.group(2), ['mode'])[0]], result.group(1)
+                return '0',  result.group(1)
             else:
                 return extract_url_parameters(result.group(2), ['m', 'b'])
 
