@@ -12,6 +12,7 @@ from bots.irc_bot import IrcBot
 from helpers.beatmap_link_parser import parse_beatmap_link
 from helpers.database_helper import UserDatabase
 from helpers.osu_api_helper import OsuApiHelper
+from helpers.utils import convert_seconds_to_readable
 
 logger = logging.getLogger('ronnia')
 
@@ -316,7 +317,8 @@ class TwitchBot(commands.Bot, ABC):
         beatmap_status = self.BEATMAP_STATUS_DICT[beatmap_info['approved']]
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
-        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*) {given_mods}"
+        beatmap_length = convert_seconds_to_readable(beatmap_info['hit_length'])
+        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
         extra_postfix = ""
         extra_prefix = ""
         if message.author.is_mod:
