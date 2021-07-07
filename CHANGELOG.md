@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.2.6] - 2021-07-05
+### Added
+- Drain Length to requested beatmap information.
+
 ## [1.2.5] - 2021-07-05
 ### Fixed
 - Alternate official beatmap link not being parsed correctly.
@@ -37,8 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.2.5...HEAD
-[1.2.4]: https://github.com/aticie/ronnia/compare/v1.2.4...v1.2.5
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.2.6...HEAD
+[1.2.6]: https://github.com/aticie/ronnia/compare/v1.2.5...v1.2.6
+[1.2.5]: https://github.com/aticie/ronnia/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/aticie/ronnia/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/aticie/ronnia/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/aticie/ronnia/compare/v1.2.1...v1.2.2
