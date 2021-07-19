@@ -19,7 +19,7 @@ Registered streamers can now change their settings from website instead of IRC c
 ## Disclaimer 📝
 
 Currently, the bot runs under my personal account `heyronii`. I'm planning to change its name to `ronnia` when I can get
-a bot account on osu!. The only criteria I haven't met is the 6 months criteria. (Running since 2021/02/20)
+a bot account on osu!. The only criteria I haven't met is the 6 months criteria. (Running since 2021/02/19)
 
 ## Usage✍️
 
