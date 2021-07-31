@@ -4,11 +4,11 @@
 
 <div align="center">
 
-# ronnia - A Beatmap Request Bot
+# Ronnia - A Beatmap Request Bot
 
 </div>
 
-ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the streamer's in-game messages.
+Ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the streamer's in-game messages.
 
 # Ronnia Dashboard - https://github.com/aticie/ronnia-web
 
@@ -18,23 +18,22 @@ Registered streamers can now change their settings from website instead of IRC c
 
 ## Disclaimer 📝
 
-Currently, the bot runs under my personal account `heyronii`. I'm planning to change its name to `ronnia` when I can get
+Currently, the bot runs under my personal account `heyronii`. I'm planning to change its name to `Ronnia` when I can get
 a bot account on osu!. The only criteria I haven't met is the 6 months criteria. (Running since 2021/02/19)
 
 ## Usage✍️
 
-[Check out the commands that you can use!](https://github.com/aticie/ronnia/wiki/Commands)
+You can sign-up to Ronnia if you have more than 100 followers on Twitch. To enable it on your Twitch channel, fill out this form:
 
-Currently, I'm manually adding channels that want to use the bot. To enable it on your Twitch channel, send me a pm on:
-
-- Discord: `heyronii#9925`
-- osu!: https://osu.ppy.sh/users/5642779
-- Twitch: https://www.twitch.tv/heyronii
+[Ronnia Sign-up Form](https://forms.gle/x7iGkiEf1xQGzK7D9)
 
 and I will set it up for you!
 
-The reason I'm not letting everyone set-up the bot by themselves is that I don't know if it might get too many requests
-and my osu! account might get silenced. For now, I'm examining the memory usage and its behaviour under heavy load by allowing channels gradually.
+The reason I'm limiting sign-ups to 100 followers is that the bot is still in the testing stage. For now, I'm examining the memory usage and its behaviour under heavy load by allowing channels gradually.
+
+After signing up you can:
+
+[Check out the commands that you can use!](https://github.com/aticie/ronnia/wiki/Commands)
 
 ## FAQ 🙋❓
 
