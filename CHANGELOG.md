@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.3.0] - 2021-08-07
+### Updated
+- Twitchio library from v1 to v2.
+
 ## [1.2.6] - 2021-07-05
 ### Added
 - Drain Length to requested beatmap information.
