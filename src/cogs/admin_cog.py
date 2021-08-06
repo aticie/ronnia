@@ -2,14 +2,13 @@ import os
 import logging
 
 from twitchio.ext import commands
-from twitchio import Context
+from twitchio.ext.commands import Context
 from bots.twitch_bot import TwitchBot
 
 logger = logging.getLogger('ronnia')
 
 
-@commands.cog()
-class AdminCog:
+class AdminCog(commands.Cog):
 
     def __init__(self, bot: TwitchBot):
         self.bot = bot
@@ -23,7 +22,7 @@ class AdminCog:
         osu_username = args[1].lower()
 
         osu_user_info, twitch_user_info = await self.bot.get_osu_and_twitch_details(osu_user_id_or_name=osu_username,
-                                                                                    twitch_id_or_name=twitch_username)
+                                                                                    twitch_username=twitch_username)
 
         twitch_id = twitch_user_info[0].id
         osu_user_id = osu_user_info['user_id']
@@ -41,7 +40,7 @@ class AdminCog:
         twitch_username = args[0].lower()
 
         self.bot.users_db.remove_user(twitch_username=twitch_username)
-        await self.bot.part_channels([twitch_username])
+        await self.bot.part_channel([twitch_username])
         await ctx.send(f'Removed {twitch_username}.')
         logger.info(f'Removed {twitch_username}!')
 

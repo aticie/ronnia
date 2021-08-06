@@ -10,8 +10,7 @@ class RangeInput(object):
     range_high = attr.ib(converter=float)
 
 
-@commands.cog()
-class RequestCog:
+class RequestCog(commands.Cog):
     def __init__(self, bot: TwitchBot):
         self.bot = bot
 

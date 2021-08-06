@@ -35,11 +35,11 @@ class TestAdminCog(unittest.TestCase):
             cog.add_user_to_db._callback(cog, self.ctx, test_twitch_username, test_osu_username))
 
         self.bot.get_osu_and_twitch_details.assert_called_once_with(osu_user_id_or_name='test_osu_username',
-                                                                    twitch_id_or_name='test_twitch_username')
+                                                                    twitch_username='test_twitch_username')
 
     def test_remove_user_from_db_calls_db_remove_user(self):
-        self.bot.part_channels = MagicMock(return_value=Future())
-        self.bot.part_channels.return_value.set_result('')
+        self.bot.part_channel = MagicMock(return_value=Future())
+        self.bot.part_channel.return_value.set_result('')
 
         cog = AdminCog(self.bot)
 
