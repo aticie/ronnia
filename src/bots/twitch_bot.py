@@ -1,12 +1,15 @@
+import asyncio
 import datetime
 import logging
 import os
+import re
 from abc import ABC
 from threading import Thread
 from typing import AnyStr, Tuple, Union
 
+import aiohttp
 from twitchio import Message, User, Channel
-from twitchio.ext import commands
+from twitchio.ext import commands, routines
 
 from bots.irc_bot import IrcBot
 from helpers.beatmap_link_parser import parse_beatmap_link
@@ -31,14 +34,12 @@ class TwitchBot(commands.Bot, ABC):
         self.users_db = UserDatabase()
         self.users_db.initialize()
 
-        self.channel_mappings = {user[2]: user[1] for user in self.users_db.get_all_users()}
-        self.initial_channel_ids = [twitch for twitch, osu in self.channel_mappings.items()]
-
+        self.all_user_details = self.users_db.get_all_users()
+        self.initial_channel_ids = [user['twitch_id'] for user in self.all_user_details]
         args = {
-            'irc_token': os.getenv('TMI_TOKEN'),
+            'token': os.getenv('TMI_TOKEN'),
             'client_id': os.getenv('CLIENT_ID'),
             'client_secret': os.getenv('CLIENT_SECRET'),
-            'nick': os.getenv('BOT_NICK'),
             'prefix': os.getenv('BOT_PREFIX')
         }
         super().__init__(**args)
@@ -50,6 +51,20 @@ class TwitchBot(commands.Bot, ABC):
 
         p = Thread(target=self.irc_bot.start)
         p.start()
+
+    async def get_access_token(self):
+        client_id = os.getenv('CLIENT_ID'),
+        client_secret = os.getenv('CLIENT_SECRET')
+        grant_type = 'client_credentials'
+        scope = 'chat:read chat:edit'
+        payload = {'client_id': client_id,
+                   'client_secret': client_secret,
+                   'grant_type': grant_type,
+                   'scope': scope}
+        async with aiohttp.ClientSession() as session:
+            async with session.post('https://id.twitch.tv/oauth2/token', data=payload) as resp:
+                response_json = await resp.json()
+        return response_json['access_token']
 
     async def event_message(self, message: Message):
         await self.handle_commands(message)
@@ -110,7 +125,7 @@ class TwitchBot(commands.Bot, ABC):
         try:
             self.check_beatmap_star_rating(message, beatmap_info)
         except AssertionError as e:
-            await message.channel.send(e)
+            await message.channel.send(str(e))
             raise Exception
 
     def check_user_excluded(self, message: Message):
@@ -120,7 +135,7 @@ class TwitchBot(commands.Bot, ABC):
     def check_sub_only_mode(self, message: Message):
         is_sub_only = self.users_db.get_setting('sub-only', message.channel.name)
         if is_sub_only:
-            assert message.author.is_mod or message.author.is_subscriber or 'vip' in message.author.badges, \
+            assert message.author.is_mod or message.author.is_subscriber or 'vip' in message.author._badges, \
                 'Subscriber only request mode is active.'
 
     def check_cp_only_mode(self, message):
@@ -154,7 +169,7 @@ class TwitchBot(commands.Bot, ABC):
                 new_osu_username = osu_user_info['username'].lower()
             except:
                 new_osu_username = channel_details['osu_username']
-            new_twitch_username = twitch_info[0].login
+            new_twitch_username = twitch_info[0].name
 
             # Update database with new information
             self.users_db.update_user(new_twitch_username=new_twitch_username, new_osu_username=new_osu_username,
@@ -165,8 +180,9 @@ class TwitchBot(commands.Bot, ABC):
         self.inform_user_on_updates(channel_details['osu_username'], twitch_username, is_channel_updated)
         return
 
-    async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_id_or_name):
+    async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_user_id=None, twitch_username=None):
 
+        assert twitch_user_id is not None or twitch_username is not None, 'Twitch user id or twitch username must be given.'
         if osu_user_id_or_name.isdigit():
             # Handle ids in the string form
             osu_user_id_or_name = int(osu_user_id_or_name)
@@ -174,7 +190,10 @@ class TwitchBot(commands.Bot, ABC):
         # Get osu! username from osu! api (usernames can change)
         osu_user_info = await self.osu_api.get_user_info(osu_user_id_or_name)
         # Get twitch username from twitch api
-        twitch_info = await self.get_users(*[twitch_id_or_name])
+        if twitch_user_id is None:
+            twitch_info = await self.fetch_users(names=[twitch_username])
+        else:
+            twitch_info = await self.fetch_users(ids=[twitch_user_id])
         return osu_user_info, twitch_info
 
     @staticmethod
@@ -196,8 +215,7 @@ class TwitchBot(commands.Bot, ABC):
         assert user is not None, 'User does not exist'
         assert ctx.message.channel.name == ctx.author.name, 'Message is not in author\'s channel'
 
-    @staticmethod
-    async def check_if_streaming_osu(channel: Channel, test_status: bool = False):
+    async def check_if_streaming_osu(self, channel: Channel, test_status: bool = False):
         """
         Checks if stream is on and they're playing osu!, otherwise ignores channel.
         :param channel: Channel of the message
@@ -207,7 +225,7 @@ class TwitchBot(commands.Bot, ABC):
         if test_status is True:
             return
 
-        stream = await channel.get_stream()
+        stream = await self._http.get_streams(user_logins=[channel.name])
         assert stream is not None, 'Stream is not on.'
         assert stream.get('game_name') == 'osu!', 'Stream is not playing osu!'
 
@@ -305,7 +323,7 @@ class TwitchBot(commands.Bot, ABC):
     async def _prepare_irc_message(self, message: Message, beatmap_info: dict, given_mods: str):
         """
         Prepare beatmap request message to send to osu!irc.
-        :param author: Message author name
+        :param message: Twitch message
         :param beatmap_info: Beatmap info taken from osu!api as dictionary
         :param given_mods: Mods as string
         :return:
@@ -325,7 +343,7 @@ class TwitchBot(commands.Bot, ABC):
             extra_prefix += "[MOD] "
         elif message.author.is_subscriber:
             extra_prefix += "[SUB] "
-        elif 'vip' in message.author.badges:
+        elif 'vip' in message.author._badges:
             extra_prefix += "[VIP] "
 
         if 'custom-reward-id' in message.tags:
@@ -335,19 +353,43 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_ready(self):
 
-        self.main_prefix = self.prefixes[0]
+        self.main_prefix = self._prefix
 
         logger.info(f'Ready | {self.nick}')
 
         logger.debug(f'Populating users: {self.initial_channel_ids}')
         # Get channel names from ids
-        channel_names = await self.get_users(*self.initial_channel_ids)
+        channel_names = await self.fetch_users(ids=self.initial_channel_ids)
 
-        channels_to_join = [ch.login for ch in channel_names]
+        channels_to_join = [ch.name for ch in channel_names]
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
         await self.join_channels(channels_to_join)
 
+        # Start update users routine
+        self.update_users.start()
+
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)
+
+    @routines.routine(hours=2)
+    async def update_users(self):
+        user_details = self.users_db.get_all_users()
+        channel_ids = [ch['twitch_id'] for ch in user_details]
+        channel_details = await self.fetch_users(ids=channel_ids)
+
+        for db_user, new_twitch_user in zip(user_details, channel_details):
+            try:
+                osu_details = await self.osu_api.get_user_info(db_user['osu_username'])
+            except:
+                osu_details = {'user_id': db_user['osu_id'],
+                               'username': db_user['osu_username']}
+            self.users_db.update_user(new_twitch_username=new_twitch_user.name,
+                                      new_osu_username=osu_details['username'],
+                                      twitch_id=new_twitch_user.id,
+                                      osu_user_id=osu_details['user_id'])
+
+    async def part_channel(self, entry):
+        channel = re.sub("[#]", "", entry).lower()
+        await self._connection.send(f"PART #{channel}\r\n")
