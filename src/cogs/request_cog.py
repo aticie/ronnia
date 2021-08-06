@@ -1,6 +1,6 @@
 import attr
-
 from twitchio.ext import commands
+
 from bots.twitch_bot import TwitchBot
 
 
@@ -62,3 +62,8 @@ class RequestCog(commands.Cog):
             return
 
         await ctx.send(f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
+
+
+def prepare(bot: TwitchBot):
+    # Load our cog with this module...
+    bot.add_cog(RequestCog(bot))

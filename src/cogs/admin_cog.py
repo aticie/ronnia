@@ -71,3 +71,7 @@ class AdminCog(commands.Cog):
         else:
             await ctx.send('We are connected to every channel')
 
+
+def prepare(bot: TwitchBot):
+    # Load our cog with this module...
+    bot.add_cog(AdminCog(bot))
