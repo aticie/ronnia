@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import re
+import time
 from abc import ABC
 from threading import Thread
 from typing import AnyStr, Tuple, Union
@@ -75,7 +76,7 @@ class TwitchBot(commands.Bot, ABC):
             logger.debug(f'Check unsuccessful: {e}')
 
     async def handle_request(self, message):
-        logger.info(f"{message.channel} - {message.author.name}: {message.content}")
+        logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
             self._check_user_cooldown(message.author)
@@ -364,7 +365,7 @@ class TwitchBot(commands.Bot, ABC):
         channels_to_join = [ch.name for ch in channel_names]
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
-        await self.join_channels(channels_to_join)
+        await self.join_channels_with_new_rate_limit(channels_to_join)
 
         # Start update users routine
         self.update_users.start()
@@ -372,6 +373,20 @@ class TwitchBot(commands.Bot, ABC):
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)
+
+    async def join_channels_with_new_rate_limit(self, channels):
+        async with self._connection._join_lock:  # acquire a lock, allowing only one join_channels at once...
+            for channel in channels:
+                if self._connection._join_handle < time.time():  # Handle is less than the current time
+                    self._connection._join_tick = 20  # So lets start a new rate limit bucket..
+                    self._connection._join_handle = time.time() + 10  # Set the handle timeout time
+
+                if self._connection._join_tick == 0:  # We have exhausted the bucket, wait so we can make a new one...
+                    await asyncio.sleep(self._connection._join_handle - time.time())
+                    continue
+
+                asyncio.create_task(self._connection._join_channel(channel))
+                self._connection._join_tick -= 1
 
     @routines.routine(hours=2)
     async def update_users(self):
