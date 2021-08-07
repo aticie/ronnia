@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - There are no unreleased changes.
+## [1.3.1] - 2021-08-07
+### Fixed
+- Twitchio v2 rate-limit being wrong when joining channels.
+- Cogs not being added.
 
 ## [1.3.0] - 2021-08-07
 ### Updated
@@ -45,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.3.1...HEAD
+[1.3.0]: https://github.com/aticie/ronnia/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/aticie/ronnia/compare/v1.2.6...v1.3.0
 [1.2.6]: https://github.com/aticie/ronnia/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/aticie/ronnia/compare/v1.2.4...v1.2.5
