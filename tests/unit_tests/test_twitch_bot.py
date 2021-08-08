@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from bots.twitch_bot import TwitchBot
 
@@ -17,13 +17,15 @@ def Any(cls):
                                        'TMI_TOKEN': 'test_tmi_token',
                                        'CLIENT_ID': 'test_client_id',
                                        'CLIENT_SECRET': 'test_client_secret',
-                                       'BOT_PREFIX': 'test_bot_prefix'
+                                       'BOT_PREFIX': 'test_bot_prefix',
+                                       'DB_DIR': 'test_db_dir'
                                        })
 class TestTwitchBot(unittest.TestCase):
 
     @patch('bots.twitch_bot.UserDatabase')
     @patch('bots.twitch_bot.IrcBot')
-    def test_inform_user_on_updates_sends_irc_message_to_osu_username(self, mock_irc_bot, mock_user_db):
+    @patch('builtins.open')
+    def test_inform_user_on_updates_sends_irc_message_to_osu_username(self, mock_open, mock_irc_bot, mock_user_db):
         twitch_bot = TwitchBot()
 
         mocked_send_msg = twitch_bot.irc_bot.send_message
@@ -38,7 +40,9 @@ class TestTwitchBot(unittest.TestCase):
 
     @patch('bots.twitch_bot.UserDatabase')
     @patch('bots.twitch_bot.IrcBot')
-    def test_inform_user_on_updates_calls_db_set_channel_updated_with_twitch_username(self, mock_irc_bot, mock_user_db):
+    @patch('builtins.open')
+    def test_inform_user_on_updates_calls_db_set_channel_updated_with_twitch_username(self, mock_open, mock_irc_bot,
+                                                                                      mock_user_db):
         twitch_bot = TwitchBot()
 
         mocked_set_channel_updated = twitch_bot.users_db.set_channel_updated
