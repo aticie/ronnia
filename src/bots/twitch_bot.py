@@ -92,10 +92,8 @@ class TwitchBot(commands.Bot, ABC):
 
     def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
         if not is_updated:
-            update_message = f'Hello! There have been updates to the bot! ' \
-                             f'You can now visit (ronnia dashboard)[https://ronnia.me] to change your settings. ' \
-                             f'If you don\'t like using irc !commands,' \
-                             f' you can now easily change your settings on the website!'
+            with open('/mount/update_message.txt') as f:
+                update_message = f.read()
             self.irc_bot.send_message(osu_username, update_message)
             self.users_db.set_channel_updated(twitch_username)
         return
