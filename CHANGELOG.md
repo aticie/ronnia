@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.3.3] - 2021-08-08
+### Changed
+- User update message being hardcoded to read from a text file.
+
 ## [1.3.2] - 2021-08-08
 ### Fixed
 - Test mode being useless for some criteria checks.
 - `check_if_streaming_osu()` producing an error.
-- 
+
 ## [1.3.1] - 2021-08-07
 ### Fixed
 - Twitchio v2 rate-limit being wrong when joining channels.
@@ -55,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.3.3...HEAD
+[1.3.2]: https://github.com/aticie/ronnia/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/aticie/ronnia/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/aticie/ronnia/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/aticie/ronnia/compare/v1.2.6...v1.3.0
