@@ -117,17 +117,18 @@ class TwitchBot(commands.Bot, ABC):
 
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = self.users_db.get_test_status(message.channel.name)
-        self.check_sub_only_mode(message)
-        self.check_cp_only_mode(message)
-        self.check_user_excluded(message)
-        self.check_if_author_is_broadcaster(message, test_status)
-        await self.check_if_streaming_osu(message.channel, test_status)
+        if not test_status:
+            self.check_sub_only_mode(message)
+            self.check_cp_only_mode(message)
+            self.check_user_excluded(message)
+            self.check_if_author_is_broadcaster(message)
+            await self.check_if_streaming_osu(message.channel)
 
         try:
             self.check_beatmap_star_rating(message, beatmap_info)
         except AssertionError as e:
             await message.channel.send(str(e))
-            raise Exception
+            raise AssertionError
 
     def check_user_excluded(self, message: Message):
         excluded_users = self.users_db.get_excluded_users(twitch_username=message.channel.name, return_mode='list')
@@ -198,9 +199,7 @@ class TwitchBot(commands.Bot, ABC):
         return osu_user_info, twitch_info
 
     @staticmethod
-    def check_if_author_is_broadcaster(message: Message, test_status: bool = False):
-        if test_status is True:
-            return
+    def check_if_author_is_broadcaster(message: Message):
 
         assert message.author.name != message.channel.name, 'Author is broadcaster and not in test mode.'
 
@@ -216,18 +215,15 @@ class TwitchBot(commands.Bot, ABC):
         assert user is not None, 'User does not exist'
         assert ctx.message.channel.name == ctx.author.name, 'Message is not in author\'s channel'
 
-    async def check_if_streaming_osu(self, channel: Channel, test_status: bool = False):
+    async def check_if_streaming_osu(self, channel: Channel):
         """
         Checks if stream is on and they're playing osu!, otherwise ignores channel.
         :param channel: Channel of the message
-        :param test_status: Flag for if account set for test.
         :return:
         """
-        if test_status is True:
-            return
-
-        stream = await self._http.get_streams(user_logins=[channel.name])
-        assert stream is not None, 'Stream is not on.'
+        stream_list = await self._http.get_streams(user_logins=[channel.name])
+        assert len(stream_list) == 1, 'Stream is not on.'
+        stream = stream_list[0]
         assert stream.get('game_name') == 'osu!', 'Stream is not playing osu!'
 
         return
