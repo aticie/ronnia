@@ -68,6 +68,9 @@ class TwitchBot(commands.Bot, ABC):
         return response_json['access_token']
 
     async def event_message(self, message: Message):
+        if message.author is None:
+            return
+
         await self.handle_commands(message)
         try:
             self.check_channel_enabled(message.channel.name)
