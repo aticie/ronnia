@@ -362,7 +362,7 @@ class TwitchBot(commands.Bot, ABC):
         channels_to_join = [ch.name for ch in channel_names]
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
-        await self.join_channels_with_new_rate_limit(channels_to_join)
+        # await self.join_channels_with_new_rate_limit(channels_to_join)
 
         # Start update users routine
         self.update_users.start()
@@ -390,6 +390,9 @@ class TwitchBot(commands.Bot, ABC):
         user_details = self.users_db.get_all_users()
         channel_ids = [ch['twitch_id'] for ch in user_details]
         channel_details = await self.fetch_users(ids=channel_ids)
+
+        user_details.sort(key=lambda x: int(x['twitch_id']))
+        channel_details.sort(key=lambda x: x.id)
 
         for db_user, new_twitch_user in zip(user_details, channel_details):
             try:

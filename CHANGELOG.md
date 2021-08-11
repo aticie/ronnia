@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.3.5] - 2021-08-09
+### Fixed
+- Channel update routine messing up user information because of unsorted lists.
+
 ## [1.3.4] - 2021-08-09
 ### Fixed
 - Minor fixes.
@@ -63,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.3.4...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.3.5...HEAD
+[1.3.5]: https://github.com/aticie/ronnia/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/aticie/ronnia/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/aticie/ronnia/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/aticie/ronnia/compare/v1.3.1...v1.3.2
