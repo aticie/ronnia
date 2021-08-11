@@ -362,7 +362,7 @@ class TwitchBot(commands.Bot, ABC):
         channels_to_join = [ch.name for ch in channel_names]
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
-        # await self.join_channels_with_new_rate_limit(channels_to_join)
+        await self.join_channels_with_new_rate_limit(channels_to_join)
 
         # Start update users routine
         self.update_users.start()
