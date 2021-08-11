@@ -362,8 +362,10 @@ class TwitchBot(commands.Bot, ABC):
         channels_to_join = [ch.name for ch in channel_names]
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
+        channel_join_start = time.time()
         await self.join_channels_with_new_rate_limit(channels_to_join)
 
+        logger.debug(f'Joined all channels after {time.time() - channel_join_start:.2f}s')
         # Start update users routine
         self.update_users.start()
 
@@ -387,6 +389,7 @@ class TwitchBot(commands.Bot, ABC):
 
     @routines.routine(hours=1)
     async def update_users(self):
+        logger.info('Started updating user routine')
         user_details = self.users_db.get_all_users()
         channel_ids = [ch['twitch_id'] for ch in user_details]
         channel_details = await self.fetch_users(ids=channel_ids)
@@ -407,7 +410,7 @@ class TwitchBot(commands.Bot, ABC):
             twitch_id = new_twitch_user.id
             osu_user_id = osu_details['user_id']
 
-            if new_twitch_username != db_user['osu_username'] or new_osu_username != db_user['twitch_username']:
+            if new_osu_username != db_user['osu_username'] or new_twitch_username != db_user['twitch_username']:
                 logger.info(f'Username change:')
                 logger.info(f'osu! old: {db_user["osu_username"]} - new: {new_osu_username}')
                 logger.info(f'Twitch old: {db_user["twitch_username"]} - new: {new_twitch_username}')
