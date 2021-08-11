@@ -6,7 +6,7 @@ import re
 import time
 from abc import ABC
 from threading import Thread
-from typing import AnyStr, Tuple, Union
+from typing import AnyStr, Tuple, Union, List
 
 import aiohttp
 from twitchio import Message, Channel, Chatter
@@ -262,7 +262,8 @@ class TwitchBot(commands.Bot, ABC):
             self.user_last_request[author_id] = time_right_now
         else:
             last_message_time = self.user_last_request[author_id]
-            assert (time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, \
+            seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
+            assert seconds_since_last_request >= TwitchBot.PER_REQUEST_COOLDOWN, \
                 f'{author.name} is on cooldown.'
             self.user_last_request[author_id] = time_right_now
 
@@ -276,7 +277,8 @@ class TwitchBot(commands.Bot, ABC):
         """
         pop_list = []
         for user_id, last_message_time in self.user_last_request.items():
-            if (time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN:
+            seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
+            if seconds_since_last_request >= TwitchBot.PER_REQUEST_COOLDOWN:
                 pop_list.append(user_id)
 
         for user in pop_list:
@@ -377,7 +379,7 @@ class TwitchBot(commands.Bot, ABC):
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
         channel_join_start = time.time()
-        await self.join_channels_with_new_rate_limit(channels_to_join)
+        await self.join_channels(channels_to_join)
 
         logger.debug(f'Joined all channels after {time.time() - channel_join_start:.2f}s')
         # Start update users routine
@@ -387,7 +389,7 @@ class TwitchBot(commands.Bot, ABC):
         for extension in initial_extensions:
             self.load_module(extension)
 
-    async def join_channels_with_new_rate_limit(self, channels):
+    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
         async with self._connection._join_lock:  # acquire a lock, allowing only one join_channels at once...
             for channel in channels:
                 if self._connection._join_handle < time.time():  # Handle is less than the current time
