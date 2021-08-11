@@ -448,10 +448,10 @@ class UserDatabase(BaseDatabase):
         return excluded_users
 
 
-class MessagesDatabase(BaseDatabase):
+class StatisticsDatabase(BaseDatabase):
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            db_path = os.path.join(os.getenv('DB_DIR'), 'beatmaps.db')
+            db_path = os.path.join(os.getenv('DB_DIR'), 'statistics.db')
         super().__init__(db_path)
 
     def initialize(self):

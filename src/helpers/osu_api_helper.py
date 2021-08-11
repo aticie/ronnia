@@ -8,14 +8,14 @@ from datetime import datetime
 
 import aiohttp
 
-from helpers.database_helper import MessagesDatabase
+from helpers.database_helper import StatisticsDatabase
 
 logger = logging.getLogger('ronnia')
 
 
 class OsuApi:
 
-    def __init__(self, messages_db: MessagesDatabase):
+    def __init__(self, messages_db: StatisticsDatabase):
         self._osu_api_key = os.getenv('OSU_API_KEY')
         self._last_request_time = datetime.now()
         self._cooldown_seconds = 1

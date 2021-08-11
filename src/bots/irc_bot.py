@@ -8,7 +8,7 @@ from threading import Lock
 import irc.bot
 from irc.client import Event, ServerConnection
 
-from helpers.database_helper import UserDatabase, MessagesDatabase
+from helpers.database_helper import UserDatabase, StatisticsDatabase
 
 logger = logging.getLogger('ronnia')
 
@@ -28,7 +28,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.users_db = UserDatabase()
         self.users_db.initialize()
 
-        self.messages_db = MessagesDatabase()
+        self.messages_db = StatisticsDatabase()
         self.messages_db.initialize()
 
         self.message_lock = Lock()

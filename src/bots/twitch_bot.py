@@ -14,7 +14,7 @@ from twitchio.ext import commands, routines
 
 from bots.irc_bot import IrcBot
 from helpers.beatmap_link_parser import parse_beatmap_link
-from helpers.database_helper import UserDatabase, MessagesDatabase
+from helpers.database_helper import UserDatabase, StatisticsDatabase
 from helpers.osu_api_helper import OsuApi
 from helpers.utils import convert_seconds_to_readable
 
@@ -35,7 +35,7 @@ class TwitchBot(commands.Bot, ABC):
         self.users_db = UserDatabase()
         self.users_db.initialize()
 
-        self.messages_db = MessagesDatabase()
+        self.messages_db = StatisticsDatabase()
         self.messages_db.initialize()
 
         self.all_user_details = self.users_db.get_all_users()
