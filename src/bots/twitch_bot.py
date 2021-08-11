@@ -6,16 +6,16 @@ import re
 import time
 from abc import ABC
 from threading import Thread
-from typing import AnyStr, Tuple, Union
+from typing import AnyStr, Tuple, Union, List
 
 import aiohttp
-from twitchio import Message, User, Channel
+from twitchio import Message, Channel, Chatter
 from twitchio.ext import commands, routines
 
 from bots.irc_bot import IrcBot
 from helpers.beatmap_link_parser import parse_beatmap_link
-from helpers.database_helper import UserDatabase
-from helpers.osu_api_helper import OsuApiHelper
+from helpers.database_helper import UserDatabase, StatisticsDatabase
+from helpers.osu_api_helper import OsuApi
 from helpers.utils import convert_seconds_to_readable
 
 logger = logging.getLogger('ronnia')
@@ -35,6 +35,9 @@ class TwitchBot(commands.Bot, ABC):
         self.users_db = UserDatabase()
         self.users_db.initialize()
 
+        self.messages_db = StatisticsDatabase()
+        self.messages_db.initialize()
+
         self.all_user_details = self.users_db.get_all_users()
         self.initial_channel_ids = [user['twitch_id'] for user in self.all_user_details]
         args = {
@@ -46,14 +49,15 @@ class TwitchBot(commands.Bot, ABC):
         super().__init__(**args)
 
         self.main_prefix = None
-        self.osu_api = OsuApiHelper()
+        self.osu_api = OsuApi(self.messages_db)
         self.user_last_request = {}
         self.irc_bot = IrcBot("#osu", os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
 
         p = Thread(target=self.irc_bot.start)
         p.start()
 
-    async def get_access_token(self):
+    @staticmethod
+    async def _get_access_token():
         client_id = os.getenv('CLIENT_ID'),
         client_secret = os.getenv('CLIENT_SECRET')
         grant_type = 'client_credentials'
@@ -77,8 +81,9 @@ class TwitchBot(commands.Bot, ABC):
             await self.handle_request(message)
         except AssertionError as e:
             logger.debug(f'Check unsuccessful: {e}')
+            self.messages_db.add_error('internal_check', str(e))
 
-    async def handle_request(self, message):
+    async def handle_request(self, message: Message):
         logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
@@ -92,6 +97,34 @@ class TwitchBot(commands.Bot, ABC):
                     await self._send_twitch_message(message, beatmap_info)
 
                 await self._send_irc_message(message, beatmap_info, given_mods)
+                self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['beatmap_id']),
+                                             requested_channel_id=int(self._get_room_id_from_raw_msg(message)),
+                                             requester_channel_name=message.channel.name,
+                                             mods=given_mods)
+
+    @staticmethod
+    def _get_room_id_from_raw_msg(message: Message) -> int:
+        """
+        Gets the room-id from message.raw_data
+        message.raw_data example:
+
+        @badge-info=subscriber/32;
+        badges=broadcaster/1,subscriber/0,premium/1;client-nonce=e037dd420603c32baf4fbc7a6a33ec02;
+        color=;
+        display-name=heyronii;
+        emotes=;
+        flags=0-49:;
+        id=490513d9-dae6-4560-8951-8837d44e4584;
+        mod=0;
+        room-id=68427964;  <-- We need this
+        subscriber=1;
+        tmi-sent-ts=1628695671874;
+        turbo=0;
+        user-id=68427964;
+        user-type= :heyronii!heyronii@heyronii.tmi.twitch.tv
+        PRIVMSG #heyronii :https://osu.ppy.sh/beatmapsets/1360321#osu/3054812
+        """
+        return int(message.raw_data.split(';')[9].split('=')[-1])
 
     def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
         if not is_updated:
@@ -125,11 +158,11 @@ class TwitchBot(commands.Bot, ABC):
             self.check_if_author_is_broadcaster(message)
             await self.check_if_streaming_osu(message.channel)
 
-        try:
-            self.check_beatmap_star_rating(message, beatmap_info)
-        except AssertionError as e:
-            await message.channel.send(str(e))
-            raise AssertionError
+            try:
+                self.check_beatmap_star_rating(message, beatmap_info)
+            except AssertionError as e:
+                await message.channel.send(str(e))
+                raise AssertionError
 
     def check_user_excluded(self, message: Message):
         excluded_users = self.users_db.get_excluded_users(twitch_username=message.channel.name, return_mode='list')
@@ -149,37 +182,18 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_command_error(self, ctx, error):
         logger.error(error)
+        self.messages_db.add_error(error_type='twitch_command_error', error_text=str(error))
         pass
 
     async def _update_channel(self, message: Message):
         """
-        Updates channel twitch and osu! usernames every day
-        :param message: Message from twitch
-        :return: None
+        Updates the user about news
         """
+
         # Get current channel details from db
         channel_details = self.users_db.get_user_from_twitch_username(twitch_username=message.channel.name)
-        channel_last_updated = channel_details['updated_at']
-        osu_user_id = channel_details['osu_id']
-        twitch_id = channel_details['twitch_id']
         twitch_username = channel_details['twitch_username']
         is_channel_updated = channel_details['enabled']
-        time_passed_since_last_update = datetime.datetime.now() - channel_last_updated
-        # Check if user has been updated since yesterday
-        if time_passed_since_last_update.days >= 1:
-            osu_user_info, twitch_info = await self.get_osu_and_twitch_details(osu_user_id, twitch_id)
-            try:
-                new_osu_username = osu_user_info['username'].lower()
-            except:
-                new_osu_username = channel_details['osu_username']
-            new_twitch_username = twitch_info[0].name
-
-            # Update database with new information
-            self.users_db.update_user(new_twitch_username=new_twitch_username, new_osu_username=new_osu_username,
-                                      twitch_id=twitch_id, osu_user_id=osu_user_id)
-            self.inform_user_on_updates(new_osu_username, new_twitch_username, is_channel_updated)
-            return
-
         self.inform_user_on_updates(channel_details['osu_username'], twitch_username, is_channel_updated)
         return
 
@@ -233,7 +247,7 @@ class TwitchBot(commands.Bot, ABC):
         enabled = self.users_db.get_enabled_status(twitch_username=channel_name)
         assert enabled, 'Channel not open for requests'
 
-    def _check_user_cooldown(self, author: User):
+    def _check_user_cooldown(self, author: Chatter):
         """
         Check if user is on cooldown, raise an exception if the user is on request cooldown.
         :param author: Twitch user object
@@ -248,8 +262,9 @@ class TwitchBot(commands.Bot, ABC):
             self.user_last_request[author_id] = time_right_now
         else:
             last_message_time = self.user_last_request[author_id]
-            assert (
-                           time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN, f'{author.name} is on cooldown.'
+            seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
+            assert seconds_since_last_request >= TwitchBot.PER_REQUEST_COOLDOWN, \
+                f'{author.name} is on cooldown.'
             self.user_last_request[author_id] = time_right_now
 
         return
@@ -262,7 +277,8 @@ class TwitchBot(commands.Bot, ABC):
         """
         pop_list = []
         for user_id, last_message_time in self.user_last_request.items():
-            if (time_right_now - last_message_time).total_seconds() > TwitchBot.PER_REQUEST_COOLDOWN:
+            seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
+            if seconds_since_last_request >= TwitchBot.PER_REQUEST_COOLDOWN:
                 pop_list.append(user_id)
 
         for user in pop_list:
@@ -363,7 +379,7 @@ class TwitchBot(commands.Bot, ABC):
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
         channel_join_start = time.time()
-        await self.join_channels_with_new_rate_limit(channels_to_join)
+        await self.join_channels(channels_to_join)
 
         logger.debug(f'Joined all channels after {time.time() - channel_join_start:.2f}s')
         # Start update users routine
@@ -373,7 +389,7 @@ class TwitchBot(commands.Bot, ABC):
         for extension in initial_extensions:
             self.load_module(extension)
 
-    async def join_channels_with_new_rate_limit(self, channels):
+    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
         async with self._connection._join_lock:  # acquire a lock, allowing only one join_channels at once...
             for channel in channels:
                 if self._connection._join_handle < time.time():  # Handle is less than the current time

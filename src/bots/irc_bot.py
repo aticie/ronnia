@@ -8,7 +8,7 @@ from threading import Lock
 import irc.bot
 from irc.client import Event, ServerConnection
 
-from helpers.database_helper import UserDatabase
+from helpers.database_helper import UserDatabase, StatisticsDatabase
 
 logger = logging.getLogger('ronnia')
 
@@ -27,6 +27,9 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.channel = channel
         self.users_db = UserDatabase()
         self.users_db.initialize()
+
+        self.messages_db = StatisticsDatabase()
+        self.messages_db.initialize()
 
         self.message_lock = Lock()
 
@@ -104,6 +107,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.send_message(event.source.nick,
                           f'I\'ve disabled requests for now. '
                           f'If you want to re-enable requests, type !enable anytime.')
+        self.messages_db.add_command('disable', 'osu_irc', event.source.nick)
 
     def register_bot_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
@@ -125,7 +129,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.users_db.enable_channel(twitch_username)
         self.send_message(event.source.nick,
                           f'I\'ve enabled requests. Have fun!')
-        logger.debug(f'I\'ve enabled requests. Have fun!')
+        self.messages_db.add_command('enable', 'osu_irc', event.source.nick)
 
     def toggle_notifications(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
@@ -141,6 +145,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         else:
             self.send_message(event.source.nick, f'I\'ve disabled the beatmap request '
                                                  f'information feedback on your channel.')
+        self.messages_db.add_command('echo', 'osu_irc', event.source.nick)
         pass
 
     def show_help_message(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
@@ -154,6 +159,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'Check out the (project page)[https://github.com/aticie/ronnia] for more information. '
                           f'List of available commands are (listed here)'
                           f'[https://github.com/aticie/ronnia/wiki/Commands].')
+        self.messages_db.add_command('help', 'osu_irc', event.source.nick)
 
     def set_sr_rating(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         sr_text = ' '.join(args)
@@ -170,5 +176,5 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         except AssertionError as e:
             self.send_message(event.source.nick, e)
             return
-
         self.send_message(event.source.nick, f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
+        self.messages_db.add_command('sr_rating', 'osu_irc', event.source.nick)

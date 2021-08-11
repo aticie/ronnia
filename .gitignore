@@ -13,3 +13,4 @@ docker-compose.yml
 .idea
 __pycache__
 
+/src/update_users.py

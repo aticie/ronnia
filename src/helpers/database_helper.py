@@ -448,19 +448,127 @@ class UserDatabase(BaseDatabase):
         return excluded_users
 
 
-class BeatmapDatabase(BaseDatabase):
-    # TODO: Save beatmap requests and recommend beatmaps from other streamers
-    def __init__(self, db_path: str):
+class StatisticsDatabase(BaseDatabase):
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            db_path = os.path.join(os.getenv('DB_DIR'), 'statistics.db')
         super().__init__(db_path)
 
     def initialize(self):
         super().initialize()
         self.c.execute(
             f"CREATE TABLE IF NOT EXISTS beatmaps "
-            f"(request_date TEXT PRIMARY KEY NOT NULL, "
+            f"(request_date timestamp, "
             f"beatmap_id TEXT, "
-            f"requested_by TEXT, "
-            f"mods TEXT"
-            f");"
+            f"requester_channel_name TEXT, "
+            f"requested_channel_id TEXT, "
+            f"mods TEXT);"
         )
+        self.c.execute(
+            f"CREATE TABLE IF NOT EXISTS commands "
+            f"(timestamp timestamp, "
+            f"command_name TEXT, "
+            f"used_from TEXT, "
+            f"username TEXT);"
+        )
+        self.c.execute(
+            f"CREATE TABLE IF NOT EXISTS api_usage "
+            f"(timestamp timestamp, "
+            f"endpoint TEXT);"
+        )
+        self.c.execute(
+            f"CREATE TABLE IF NOT EXISTS errors "
+            f"(timestamp timestamp, "
+            f"type TEXT, "
+            f"error_text TEXT);"
+        )
+        self.conn.commit()
+
+    def add_api_usage(self, endpoint_name: str):
+        """
+        Adds an api usage entry to database.
+        :param endpoint_name: osu! Api endpoint name
+        """
+        self.c.execute("INSERT INTO api_usage (timestamp, endpoint) VALUES (?, ?)", (datetime.now(), endpoint_name))
+        self.conn.commit()
+
+    def add_request(self, requester_channel_name: str, requested_beatmap_id: int, requested_channel_id: int,
+                    mods: Optional[str]):
+        """
+        Adds a beatmap request to database.
+        :param requester_channel_name: Channel name of the beatmap requester
+        :param requested_beatmap_id: Beatmap id of the requested beatmap
+        :param requested_channel_id: Channel id of the chat where the beatmap is requested
+        :param mods: Requested mods (optional)
+        """
+        if mods == '':
+            mods = None
+        self.c.execute("INSERT INTO beatmaps "
+                       "(request_date, beatmap_id, requester_channel_name, requested_channel_id, mods) "
+                       "VALUES (?, ?, ?, ?, ?)",
+                       (datetime.now(), requested_beatmap_id, requester_channel_name, requested_channel_id, mods))
+        self.conn.commit()
+
+    def get_popular_beatmap_id(self, top_n: int = 5) -> List[sqlite3.Row]:
+        """
+        Gets the top_n most requested beatmap ids.
+
+        SELECT       `column`,
+                 COUNT(`column`) AS `value_occurrence`
+        FROM     `my_table`
+        GROUP BY `column`
+        ORDER BY `value_occurrence` DESC
+        LIMIT    1;
+        """
+        cursor = self.c.execute("SELECT beatmap_id, COUNT(beatmap_id) AS nr_of_requests FROM beatmaps "
+                                "GROUP BY beatmap_id "
+                                "ORDER BY nr_of_requests DESC "
+                                f"LIMIT {top_n};")
+
+        return cursor.fetchall()
+
+    def get_popular_requesters(self, top_n: int = 5) -> List[sqlite3.Row]:
+        """
+        Gets the top_n most popular beatmap requester names.
+        """
+        cursor = self.c.execute("SELECT requester_channel_name, COUNT(requester_channel_name) AS nr_of_requests "
+                                "FROM beatmaps "
+                                "GROUP BY requester_channel_name "
+                                "ORDER BY nr_of_requests DESC "
+                                f"LIMIT {top_n};")
+
+        return cursor.fetchall()
+
+    def get_popular_streamer_ids(self, top_n: int = 5) -> List[sqlite3.Row]:
+        """
+        Gets the top_n most popular streamer channel ids.
+        """
+        cursor = self.c.execute("SELECT requested_channel_id, COUNT(requested_channel_id) AS nr_of_requests "
+                                "FROM beatmaps "
+                                "GROUP BY requested_channel_id "
+                                "ORDER BY nr_of_requests DESC "
+                                f"LIMIT {top_n};")
+
+        return cursor.fetchall()
+
+    def add_command(self, command: str, used_on: str, user: str):
+        """
+        Adds a command entry to database
+        This is used for statistics on the usage of chatbot.
+        For example, if heyronii uses !echo on twitch, it will add:
+        (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
+        """
+        self.c.execute("INSERT INTO commands (timestamp, command_name, used_from, username) VALUES (?,?,?,?)",
+                       (datetime.now(), command, used_on, user))
+        self.conn.commit()
+
+    def add_error(self, error_type: str, error_text: Optional[str] = None):
+        """
+        Adds an error entry to database
+        This is used for statistics. It will keep information about osu! api issues and twitch api issues.
+        For example, if we get rate-limited by osu, we will add:
+        (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
+        """
+        self.c.execute("INSERT INTO errors (timestamp, error_type, error_text) VALUES (?,?,?)",
+                       (datetime.now(), error_type, error_text))
         self.conn.commit()
