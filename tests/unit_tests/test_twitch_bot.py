@@ -22,10 +22,12 @@ def Any(cls):
                                        })
 class TestTwitchBot(unittest.TestCase):
 
+    @patch('bots.twitch_bot.MessagesDatabase')
     @patch('bots.twitch_bot.UserDatabase')
     @patch('bots.twitch_bot.IrcBot')
     @patch('builtins.open')
-    def test_inform_user_on_updates_sends_irc_message_to_osu_username(self, mock_open, mock_irc_bot, mock_user_db):
+    def test_inform_user_on_updates_sends_irc_message_to_osu_username(self, mock_open, mock_irc_bot, mock_user_db,
+                                                                      mock_msg_db):
         twitch_bot = TwitchBot()
 
         mocked_send_msg = twitch_bot.irc_bot.send_message
@@ -38,11 +40,12 @@ class TestTwitchBot(unittest.TestCase):
         mocked_send_msg.assert_called_once_with(osu_username, Any(str))
         pass
 
+    @patch('bots.twitch_bot.MessagesDatabase')
     @patch('bots.twitch_bot.UserDatabase')
     @patch('bots.twitch_bot.IrcBot')
     @patch('builtins.open')
     def test_inform_user_on_updates_calls_db_set_channel_updated_with_twitch_username(self, mock_open, mock_irc_bot,
-                                                                                      mock_user_db):
+                                                                                      mock_user_db, mock_msg_db):
         twitch_bot = TwitchBot()
 
         mocked_set_channel_updated = twitch_bot.users_db.set_channel_updated

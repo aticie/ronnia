@@ -17,11 +17,13 @@ class RequestCog(commands.Cog):
     @commands.command(name="disable")
     async def disable_channel(self, ctx):
         self.bot.users_db.disable_channel(ctx.author.name)
+        self.bot.messages_db.add_command('disable', 'twitch', ctx.author.name)
         await ctx.send(f"Disabled requests! If you want to enable requests, type {self.bot.main_prefix}enable.")
 
     @commands.command(name="enable")
     async def enable_channel(self, ctx):
         self.bot.users_db.enable_channel(ctx.author.name)
+        self.bot.messages_db.add_command('enable', 'twitch', ctx.author.name)
         await ctx.send(f"Enabled requests! If you want to disable requests, type {self.bot.main_prefix}disable.")
 
     @commands.command(name="echo", aliases=["feedback"])
@@ -31,6 +33,8 @@ class RequestCog(commands.Cog):
             await ctx.send("Disabled feedback message after requests!")
         else:
             await ctx.send("Enabled feedback message after requests!")
+
+        self.bot.messages_db.add_command('echo', 'twitch', ctx.author.name)
 
     @commands.command(name="help", aliases=["h"])
     async def show_help_message(self, ctx):
@@ -62,6 +66,7 @@ class RequestCog(commands.Cog):
             return
 
         await ctx.send(f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
+        self.bot.messages_db.add_command('sr_rating', 'twitch', ctx.author.name)
 
 
 def prepare(bot: TwitchBot):

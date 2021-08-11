@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import time
 import logging
@@ -6,15 +8,18 @@ from datetime import datetime
 
 import aiohttp
 
+from helpers.database_helper import MessagesDatabase
+
 logger = logging.getLogger('ronnia')
 
 
-class OsuApiHelper:
+class OsuApi:
 
-    def __init__(self):
+    def __init__(self, messages_db: MessagesDatabase):
         self._osu_api_key = os.getenv('OSU_API_KEY')
         self._last_request_time = datetime.now()
         self._cooldown_seconds = 1
+        self._messages_db = messages_db
 
     async def get_beatmap_info(self, api_params: dict):
         endpoint = 'get_beatmaps'
@@ -25,6 +30,8 @@ class OsuApiHelper:
             return result[0]
         except IndexError:
             logger.debug(f'No beatmap found. Api returned: \n {result}')
+            if result is not None:
+                self._messages_db.add_error(error_type='osu_beatmap_error', error_text=json.dumps(result))
             return None
 
     async def get_user_info(self, username: Union[str, int]):
@@ -42,6 +49,8 @@ class OsuApiHelper:
             return result[0]
         except IndexError:
             logger.debug(f'No user found. Api returned: \n {result}')
+            if result is not None:
+                self._messages_db.add_error(error_type='osu_user_error', error_text=json.dumps(result))
             return None
 
     async def _get_endpoint(self, params: dict, endpoint: str):
@@ -51,8 +60,11 @@ class OsuApiHelper:
             async with session.get(f'http://osu.ppy.sh/api/{endpoint}', params=params) as response:
                 try:
                     r = await response.json()
-                except:
+                except asyncio.TimeoutError as e:
+                    self._messages_db.add_error(error_type='osu_timeout_error', error_text=None)
                     return None
+
+        self._messages_db.add_api_usage(endpoint)
         return r
 
     def _wait_for_rate_limit(self):
@@ -64,12 +76,3 @@ class OsuApiHelper:
         self._last_request_time = datetime.now()
 
         return
-
-
-if __name__ == '__main__':
-    import asyncio
-
-    ex_dict = {'s': '1341551', 'm': '0'}
-    o = OsuApiHelper()
-    print(asyncio.run(o.get_beatmap_info(ex_dict)))
-    print(asyncio.run(o.get_user_info('heyronii')))

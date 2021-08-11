@@ -9,11 +9,12 @@ class TestIrcBot(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         with patch('bots.irc_bot.UserDatabase') as mock:
-            cls.event = MagicMock()
+            with patch('bots.irc_bot.MessagesDatabase') as mock:
+                cls.event = MagicMock()
 
-            cls.bot = IrcBot(channel='test', nickname='test', server='test')
-            cls.bot.send_message = MagicMock()
-            cls.bot.users_db = MagicMock()
+                cls.bot = IrcBot(channel='test', nickname='test', server='test')
+                cls.bot.send_message = MagicMock()
+                cls.bot.users_db = MagicMock()
         return
 
     def test_disable_requests_on_channel_calls_db_disable_channel(self):
