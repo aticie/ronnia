@@ -18,7 +18,7 @@ def Any(cls):
 class TestTwitchBot(unittest.TestCase):
 
     @classmethod
-    @patch('bots.twitch_bot.MessagesDatabase')
+    @patch('bots.twitch_bot.StatisticsDatabase')
     @patch('bots.twitch_bot.UserDatabase')
     @patch('bots.twitch_bot.IrcBot')
     @patch.dict(os.environ, {'BOT_NICK': 'test_user',

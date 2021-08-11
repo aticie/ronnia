@@ -9,7 +9,7 @@ class TestIrcBot(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         with patch('bots.irc_bot.UserDatabase') as mock:
-            with patch('bots.irc_bot.MessagesDatabase') as mock:
+            with patch('bots.irc_bot.StatisticsDatabase') as mock:
                 cls.event = MagicMock()
 
                 cls.bot = IrcBot(channel='test', nickname='test', server='test')
