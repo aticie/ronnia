@@ -569,6 +569,6 @@ class StatisticsDatabase(BaseDatabase):
         For example, if we get rate-limited by osu, we will add:
         (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
         """
-        self.c.execute("INSERT INTO errors (timestamp, error_type, error_text) VALUES (?,?,?)",
+        self.c.execute("INSERT INTO errors (timestamp, type, error_text) VALUES (?,?,?)",
                        (datetime.now(), error_type, error_text))
         self.conn.commit()
