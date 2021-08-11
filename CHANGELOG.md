@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.4.1] - 2021-08-12
+### Fixed
+- `error_type` variable name mistake
+
 ## [1.4.0] - 2021-08-12
 ### Added
 - Statistics Database which keeps information about:
@@ -74,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/aticie/ronnia/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/aticie/ronnia/compare/v1.3.5...v1.4.0
 [1.3.5]: https://github.com/aticie/ronnia/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/aticie/ronnia/compare/v1.3.3...v1.3.4
