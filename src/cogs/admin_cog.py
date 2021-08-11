@@ -63,7 +63,8 @@ class AdminCog(commands.Cog):
 
         not_joined = []
         for user in all_users:
-            if user['twitch_username'] not in self.bot._ws._channel_cache:
+            connected_channel_names = [ch.name for ch in self.bot.connected_channels]
+            if user['twitch_username'] not in connected_channel_names:
                 not_joined.append(user['twitch_username'])
 
         if len(not_joined) != 0:

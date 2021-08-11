@@ -119,6 +119,9 @@ class UserDatabase(BaseDatabase):
         """
         Adds a user to database.
         """
+        twitch_username = twitch_username.lower()
+        osu_username = osu_username.lower().replace(' ', '_')
+
         result = self.c.execute(f"SELECT * FROM users WHERE twitch_username=?",
                                 (twitch_username,))
         user = result.fetchone()
@@ -132,7 +135,7 @@ class UserDatabase(BaseDatabase):
                            (osu_username, osu_user_id, datetime.now(), twitch_username))
         self.conn.commit()
 
-    def update_user(self, new_twitch_username, new_osu_username, twitch_id, osu_user_id) -> None:
+    def update_user(self, new_twitch_username: str, new_osu_username: str, twitch_id: str, osu_user_id: str) -> None:
         """
         Updates an existing user in the database
         :param twitch_id: Twitch id of the user
@@ -141,6 +144,9 @@ class UserDatabase(BaseDatabase):
         :param new_osu_username: New osu username (possibly osu id)
         :return:
         """
+        new_twitch_username = new_twitch_username.lower()
+        new_osu_username = new_osu_username.lower().replace(' ', '_')
+
         self.c.execute(f"UPDATE users SET twitch_username=?1, osu_username=?2, updated_at=?5 "
                        f"WHERE twitch_id=?3 AND osu_id=?4",
                        (new_twitch_username, new_osu_username, twitch_id, osu_user_id, datetime.now()))
@@ -152,6 +158,8 @@ class UserDatabase(BaseDatabase):
         :param twitch_username: Twitch username.
         :return:
         """
+        twitch_username = twitch_username.lower()
+
         self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
         self.conn.commit()
 
@@ -161,6 +169,8 @@ class UserDatabase(BaseDatabase):
         :param osu_username: osu username
         :return: User details of the user associated with osu username
         """
+        osu_username = osu_username.lower().replace(' ', '_')
+
         result = self.c.execute(f"SELECT * from users WHERE osu_username=?", (osu_username,))
         return result.fetchone()
 
@@ -170,6 +180,8 @@ class UserDatabase(BaseDatabase):
         :param twitch_username:
         :return: User details of the user associated with twitch username
         """
+        twitch_username = twitch_username.lower()
+
         result = self.c.execute(f"SELECT * from users WHERE twitch_username=?", (twitch_username,))
         return result.fetchone()
 
@@ -222,6 +234,8 @@ class UserDatabase(BaseDatabase):
         :param twitch_username: Twitch username
         :return: New value of the toggled setting.
         """
+        twitch_username = twitch_username.lower()
+
         # Get current status of setting
         cur_value = self.get_setting(setting_key, twitch_username)
         # Toggle it
@@ -305,6 +319,8 @@ class UserDatabase(BaseDatabase):
         :param new_value: New value of the desired setting
         :return:
         """
+        twitch_username = twitch_username.lower()
+
         user_details = self.get_user_from_twitch_username(twitch_username)
         user_id = user_details['user_id']
         result = self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username))
@@ -357,6 +373,8 @@ class UserDatabase(BaseDatabase):
         :param range_high: Higher value of the range
         :return: Tuple: New range values
         """
+        twitch_username = twitch_username.lower()
+
         assert range_high > range_low, 'Max value cannot be lower than min value.'
 
         user_details = self.get_user_from_twitch_username(twitch_username)
@@ -386,10 +404,13 @@ class UserDatabase(BaseDatabase):
         :param excluded_users: Excluded users
         :return: Status
         """
+        twitch_username = twitch_username.lower()
+
         user_id = self.get_user_from_twitch_username(twitch_username)['user_id']
         result = self.c.execute("SELECT * FROM exclude_list WHERE user_id=?", (user_id,))
         value = result.fetchone()
 
+        # Make a comma separated list where every username is lowercase and stripped
         excluded_users = ','.join(map(str.lower, map(str.strip, excluded_users.split(','))))
 
         if value is None:
@@ -436,9 +457,10 @@ class BeatmapDatabase(BaseDatabase):
         super().initialize()
         self.c.execute(
             f"CREATE TABLE IF NOT EXISTS beatmaps "
-            f"(request_date text PRIMARY KEY NOT NULL, "
-            f"beatmap_link TEXT, "
-            f"requested_on TEXT, "
+            f"(request_date TEXT PRIMARY KEY NOT NULL, "
+            f"beatmap_id TEXT, "
+            f"requested_by TEXT, "
+            f"mods TEXT"
             f");"
         )
         self.conn.commit()

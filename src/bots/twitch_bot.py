@@ -93,7 +93,7 @@ class TwitchBot(commands.Bot, ABC):
     def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
         if not is_updated:
             with open(os.path.join(os.getenv('DB_DIR'), 'update_message.txt')) as f:
-                update_message = f.read()
+                update_message = f.read().strip()
             self.irc_bot.send_message(osu_username, update_message)
             self.users_db.set_channel_updated(twitch_username)
         return
@@ -382,7 +382,7 @@ class TwitchBot(commands.Bot, ABC):
                 asyncio.create_task(self._connection._join_channel(channel))
                 self._connection._join_tick -= 1
 
-    @routines.routine(hours=2)
+    @routines.routine(hours=1)
     async def update_users(self):
         user_details = self.users_db.get_all_users()
         channel_ids = [ch['twitch_id'] for ch in user_details]
@@ -391,13 +391,24 @@ class TwitchBot(commands.Bot, ABC):
         for db_user, new_twitch_user in zip(user_details, channel_details):
             try:
                 osu_details = await self.osu_api.get_user_info(db_user['osu_username'])
-            except:
+            except aiohttp.ClientError as client_error:
+                logger.error(client_error)
                 osu_details = {'user_id': db_user['osu_id'],
                                'username': db_user['osu_username']}
-            self.users_db.update_user(new_twitch_username=new_twitch_user.name,
-                                      new_osu_username=osu_details['username'],
-                                      twitch_id=new_twitch_user.id,
-                                      osu_user_id=osu_details['user_id'])
+
+            new_twitch_username = new_twitch_user.name.lower()
+            new_osu_username = osu_details['username'].lower().replace(' ', '_')
+            twitch_id = new_twitch_user.id
+            osu_user_id = osu_details['user_id']
+
+            if new_twitch_username != db_user['osu_username'] or new_osu_username != db_user['twitch_username']:
+                logger.info(f'Username change:')
+                logger.info(f'osu! old: {db_user["osu_username"]} - new: {new_osu_username}')
+                logger.info(f'Twitch old: {db_user["twitch_username"]} - new: {new_twitch_username}')
+                self.users_db.update_user(new_twitch_username=new_twitch_username,
+                                          new_osu_username=new_osu_username,
+                                          twitch_id=twitch_id,
+                                          osu_user_id=osu_user_id)
 
     async def part_channel(self, entry):
         channel = re.sub("[#]", "", entry).lower()
