@@ -98,33 +98,9 @@ class TwitchBot(commands.Bot, ABC):
 
                 await self._send_irc_message(message, beatmap_info, given_mods)
                 self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['beatmap_id']),
-                                             requested_channel_id=int(self._get_room_id_from_raw_msg(message)),
-                                             requester_channel_name=message.channel.name,
+                                             requested_channel_name=message.channel.name,
+                                             requester_channel_name=message.author.name,
                                              mods=given_mods)
-
-    @staticmethod
-    def _get_room_id_from_raw_msg(message: Message) -> int:
-        """
-        Gets the room-id from message.raw_data
-        message.raw_data example:
-
-        @badge-info=subscriber/32;
-        badges=broadcaster/1,subscriber/0,premium/1;client-nonce=e037dd420603c32baf4fbc7a6a33ec02;
-        color=;
-        display-name=heyronii;
-        emotes=;
-        flags=0-49:;
-        id=490513d9-dae6-4560-8951-8837d44e4584;
-        mod=0;
-        room-id=68427964;  <-- We need this
-        subscriber=1;
-        tmi-sent-ts=1628695671874;
-        turbo=0;
-        user-id=68427964;
-        user-type= :heyronii!heyronii@heyronii.tmi.twitch.tv
-        PRIVMSG #heyronii :https://osu.ppy.sh/beatmapsets/1360321#osu/3054812
-        """
-        return int(message.raw_data.split(';')[9].split('=')[-1])
 
     def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
         if not is_updated:

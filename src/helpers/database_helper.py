@@ -492,13 +492,13 @@ class StatisticsDatabase(BaseDatabase):
         self.c.execute("INSERT INTO api_usage (timestamp, endpoint) VALUES (?, ?)", (datetime.now(), endpoint_name))
         self.conn.commit()
 
-    def add_request(self, requester_channel_name: str, requested_beatmap_id: int, requested_channel_id: int,
+    def add_request(self, requester_channel_name: str, requested_beatmap_id: int, requested_channel_name: str,
                     mods: Optional[str]):
         """
         Adds a beatmap request to database.
         :param requester_channel_name: Channel name of the beatmap requester
         :param requested_beatmap_id: Beatmap id of the requested beatmap
-        :param requested_channel_id: Channel id of the chat where the beatmap is requested
+        :param requested_channel_name: Channel id of the chat where the beatmap is requested
         :param mods: Requested mods (optional)
         """
         if mods == '':
@@ -506,7 +506,7 @@ class StatisticsDatabase(BaseDatabase):
         self.c.execute("INSERT INTO beatmaps "
                        "(request_date, beatmap_id, requester_channel_name, requested_channel_id, mods) "
                        "VALUES (?, ?, ?, ?, ?)",
-                       (datetime.now(), requested_beatmap_id, requester_channel_name, requested_channel_id, mods))
+                       (datetime.now(), requested_beatmap_id, requester_channel_name, requested_channel_name, mods))
         self.conn.commit()
 
     def get_popular_beatmap_id(self, top_n: int = 5) -> List[sqlite3.Row]:
