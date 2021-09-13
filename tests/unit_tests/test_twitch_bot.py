@@ -276,6 +276,7 @@ class TestTwitchBot(unittest.TestCase):
         self.bot.join_channels = MagicMock(return_value=join_channels_return_value)
         self.bot.load_module = MagicMock()
         self.bot.update_users = MagicMock()
+        self.bot._http.nick = 'test_owner'
 
         fetch_users_return_value = asyncio.Future()
 
@@ -288,5 +289,5 @@ class TestTwitchBot(unittest.TestCase):
         self.bot.fetch_users = MagicMock(return_value=fetch_users_return_value)
 
         self.loop.run_until_complete(self.bot.event_ready())
-        self.bot.join_channels.assert_called_once_with(['test_user_1', 'test_user_2', 'test_user_3'])
+        self.bot.join_channels.assert_called_once_with(['test_user_1', 'test_user_2', 'test_user_3', 'test_owner'])
         pass
