@@ -23,13 +23,9 @@ a bot account on osu!. The only criteria I haven't met is the 6 months criteria.
 
 ## Usage✍️
 
-You can sign-up to Ronnia if you have more than 100 followers on Twitch. To enable it on your Twitch channel, fill out this form:
+### Sign-ups are closed until I fix an issue with Twitch.
 
-[Ronnia Sign-up Form](https://forms.gle/x7iGkiEf1xQGzK7D9)
-
-and I will set it up for you!
-
-The reason I'm limiting sign-ups to 100 followers is that the bot is still in the testing stage. For now, I'm examining the memory usage and its behaviour under heavy load by allowing channels gradually.
+Right now, the bot gets randomly disconnected from channels due to [this issue](https://discuss.dev.twitch.tv/t/verified-bot-randomly-disconnected/28927). I'm working on fixing it, until then I can't allow any more people sign-up because if I do, the disconnects will occur more frequently.
 
 After signing up you can:
 
