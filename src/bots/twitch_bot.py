@@ -357,6 +357,10 @@ class TwitchBot(commands.Bot, ABC):
         channel_names = await self.fetch_users(ids=self.initial_channel_ids)
 
         channels_to_join = [ch.name for ch in channel_names]
+
+        if self.nick not in channels_to_join:
+            channels_to_join.append(self.nick)
+
         logger.debug(f'Joining channels: {channels_to_join}')
         # Join channels
         channel_join_start = time.time()
