@@ -104,9 +104,13 @@ class TwitchBot(commands.Bot, ABC):
 
     def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
         if not is_updated:
-            with open(os.path.join(os.getenv('DB_DIR'), 'update_message.txt')) as f:
-                update_message = f.read().strip()
-            self.irc_bot.send_message(osu_username, update_message)
+            message_txt_path = os.path.join(os.getenv('DB_DIR'), 'update_message.txt')
+            if os.path.exists(message_txt_path):
+                with open(message_txt_path) as f:
+                    update_message = f.read().strip()
+                self.irc_bot.send_message(osu_username, update_message)
+            else:
+                logger.warning(f'Looking for {message_txt_path}, but it does not exist!')
             self.users_db.set_channel_updated(twitch_username)
         return
 
@@ -166,6 +170,7 @@ class TwitchBot(commands.Bot, ABC):
         Updates the user about news
         """
 
+        logger.info('Updating user with the latest news!')
         # Get current channel details from db
         channel_details = self.users_db.get_user_from_twitch_username(twitch_username=message.channel.name)
         twitch_username = channel_details['twitch_username']
