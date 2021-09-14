@@ -131,6 +131,8 @@ services:
     image: eatici/ronnia:release-v1.x.x <- change the tag here!
 ```
 
-To run the bot:
+Set the fields in `<>` tags according to your setup. For examples look at [Hosting the bot](https://github.com/aticie/ronnia/blob/master/README.md#hosting-the-bot).
+
+Run the bot:
 
 `docker-compose up -d`
