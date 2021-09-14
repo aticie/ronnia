@@ -77,37 +77,38 @@ Library requirements can be installed with:
 
 To host the bot, clone this repository. Create a .env file at the root folder with the following environment variables:
 
-```
-TMI_TOKEN=**** (Get your credentials from here https://twitchapps.com/tmi/)
-CLIENT_ID=**** (Get these from https://dev.twitch.tv/console)
+```dosini
+TMI_TOKEN=****  # Get your credentials from here https://twitchapps.com/tmi/
+CLIENT_ID=****  # Get these from https://dev.twitch.tv/console
 CLIENT_SECRET=****
-BOT_NICK=heyronii (Change this to your Twitch username)
-BOT_PREFIX=! (Currently unused, might change in future)
-OSU_USERNAME=heyronii (Change this to your osu! username)
-IRC_PASSWORD=**** (Get yours from here: https://osu.ppy.sh/p/irc)
-OSU_API_KEY=**** (Get yours from here: https://osu.ppy.sh/p/api)
-LOG_LEVEL=INFO (https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here)
-DB_DIR=mount/
+BOT_NICK=heyronii  # Change this to your Twitch username
+BOT_PREFIX=!  # Twitch and osu! bot prefix for commands
+OSU_USERNAME=heyronii  # Change this to your osu! username
+IRC_PASSWORD=****  # Get yours from here: https://osu.ppy.sh/p/irc
+OSU_API_KEY=****  # Get yours from here: https://osu.ppy.sh/p/api
+LOG_LEVEL=INFO  # https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here
+DB_DIR=mount/  # Change this to a folder that you can store .db files in
 ```
 
-Add yourself to database by doing:
+Run:
 
-```python
-from helpers.database_helper import UserDatabase
+`python main.py`
 
-twitch_username = heyronii  # Change this line to your username
-osu_username = heyronii  # Change this line as well
-twitch_user_id = # You need to find your twitch user id from twitch api (somehow)
-osu_user_id = # osu.ppy.sh/u/{this_id_goes_here}
-
-users_db = UserDatabase()
-users_db.initialize()
-users_db.add_user(twitch_username, osu_username, twitch_user_id, osu_user_id)
-```
-
-And then, the bot will be listening to messages on your channel. You can add other users by:
+The bot will be listening to messages on your channel. You can add your osu account with using twitch chat:
 
 `!adduser <twitch_username> <osu_username>`
+
+If you want to enable test mode, you can use:
+
+`!test <twitch_username>`
+
+Test mode:
+- allows the broadcaster to request beatmaps
+- allows beatmap requests when stream is offline
+- allows excluded users to request beatmaps
+- disables 30 sec cooldown
+- ignores sub-only, channel points only modes
+- ignores star rating limits
 
 ### Docker 🐳
 #### Build and Run
