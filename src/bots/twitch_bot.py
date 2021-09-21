@@ -336,7 +336,8 @@ class TwitchBot(commands.Bot, ABC):
         extra_prefix = ""
         if message.author.is_mod:
             extra_prefix += "[MOD] "
-        elif message.author.is_subscriber:
+        elif message.author.is_subscriber == '0':
+            # TODO: Check if this conditional changed in the next releases of tio
             extra_prefix += "[SUB] "
         elif 'vip' in message.author._badges:
             extra_prefix += "[VIP] "
