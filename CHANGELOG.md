@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
+## [1.4.4] - 2021-08-13
+### Fixed
+- \[SUB\] Notation appearing in messages even though the user is not subbed to channel.
+
 ## [1.4.3] - 2021-08-13
 ### Fixed
 - Bot now joins the owner's channel if started from scratch
@@ -86,8 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.3...HEAD
-[1.4.3]: https://github.com/aticie/ronnia/compare/v1.4.2...1.4.3
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.4...HEAD
+[1.4.4]: https://github.com/aticie/ronnia/compare/v1.4.3...v1.4.4
+[1.4.3]: https://github.com/aticie/ronnia/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/aticie/ronnia/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/aticie/ronnia/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/aticie/ronnia/compare/v1.3.5...v1.4.0
