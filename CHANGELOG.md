@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 - There are no unreleased changes.
 
-## [1.4.4] - 2021-08-13
+## [1.4.5] - 2021-09-21
+### Added
+- Hourly channel join routine to join the channels in case of a disconnection
+### Changed
+- Updated to twitchio 2.0.6
+- `admin_cog.py` code refactoring
+## [1.4.4] - 2021-09-21
 ### Fixed
 - \[SUB\] Notation appearing in messages even though the user is not subbed to channel.
 
@@ -90,7 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.4...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.5...HEAD
+[1.4.4]: https://github.com/aticie/ronnia/compare/v1.4.4...v1.4.5
 [1.4.4]: https://github.com/aticie/ronnia/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/aticie/ronnia/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/aticie/ronnia/compare/v1.4.1...v1.4.2
