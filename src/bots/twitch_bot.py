@@ -56,6 +56,8 @@ class TwitchBot(commands.Bot, ABC):
         p = Thread(target=self.irc_bot.start)
         p.start()
 
+        self.join_channels_first_time = True
+
     @staticmethod
     async def _get_access_token():
         client_id = os.getenv('CLIENT_ID'),
@@ -151,7 +153,7 @@ class TwitchBot(commands.Bot, ABC):
     def check_sub_only_mode(self, message: Message):
         is_sub_only = self.users_db.get_setting('sub-only', message.channel.name)
         if is_sub_only:
-            assert message.author.is_mod or message.author.is_subscriber or 'vip' in message.author._badges, \
+            assert message.author.is_mod or message.author.is_subscriber != '0' or 'vip' in message.author.badges, \
                 'Subscriber only request mode is active.'
 
     def check_cp_only_mode(self, message):
@@ -339,7 +341,7 @@ class TwitchBot(commands.Bot, ABC):
         elif message.author.is_subscriber != '0':
             # TODO: Check if this conditional changed in the next releases of tio
             extra_prefix += "[SUB] "
-        elif 'vip' in message.author._badges:
+        elif 'vip' in message.author.badges:
             extra_prefix += "[VIP] "
 
         if 'custom-reward-id' in message.tags:
@@ -370,24 +372,11 @@ class TwitchBot(commands.Bot, ABC):
         logger.debug(f'Joined all channels after {time.time() - channel_join_start:.2f}s')
         # Start update users routine
         self.update_users.start()
+        self.join_channels_routine.start()
 
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)
-
-    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
-        async with self._connection._join_lock:  # acquire a lock, allowing only one join_channels at once...
-            for channel in channels:
-                if self._connection._join_handle < time.time():  # Handle is less than the current time
-                    self._connection._join_tick = 20  # So lets start a new rate limit bucket..
-                    self._connection._join_handle = time.time() + 10  # Set the handle timeout time
-
-                if self._connection._join_tick == 0:  # We have exhausted the bucket, wait so we can make a new one...
-                    await asyncio.sleep(self._connection._join_handle - time.time())
-                    continue
-
-                asyncio.create_task(self._connection._join_channel(channel))
-                self._connection._join_tick -= 1
 
     @routines.routine(hours=1)
     async def update_users(self):
@@ -420,6 +409,17 @@ class TwitchBot(commands.Bot, ABC):
                                           new_osu_username=new_osu_username,
                                           twitch_id=twitch_id,
                                           osu_user_id=osu_user_id)
+
+    @routines.routine(hours=1)
+    async def join_channels_routine(self):
+        logger.debug('Started join channels routine')
+        if self.join_channels_first_time:
+            self.join_channels_first_time = False
+            return
+        all_user_details = self.users_db.get_all_users()
+        twitch_users = [user['twitch_username'] for user in all_user_details]
+        logger.debug(f'Joining: {twitch_users}')
+        await self.join_channels(twitch_users)
 
     async def part_channel(self, entry):
         channel = re.sub("[#]", "", entry).lower()
