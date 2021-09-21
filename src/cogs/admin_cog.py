@@ -13,10 +13,13 @@ class AdminCog(commands.Cog):
     def __init__(self, bot: TwitchBot):
         self.bot = bot
 
+    async def cog_check(self, ctx):
+        if ctx.author.name != os.getenv('BOT_NICK'):
+            return False
+        return True
+
     @commands.command(name="adduser")
     async def add_user_to_db(self, ctx: Context, *args):
-        if ctx.author.name != os.getenv('BOT_NICK'):
-            return
 
         twitch_username = args[0].lower()
         osu_username = args[1].lower()
@@ -34,8 +37,6 @@ class AdminCog(commands.Cog):
 
     @commands.command(name="rmuser")
     async def remove_user_from_db(self, ctx: Context, *args):
-        if ctx.author.name != os.getenv('BOT_NICK'):
-            return
 
         twitch_username = args[0].lower()
 
@@ -46,8 +47,6 @@ class AdminCog(commands.Cog):
 
     @commands.command(name="test")
     async def toggle_test_for_user(self, ctx: Context, *args):
-        if ctx.author.name != os.getenv('BOT_NICK'):
-            return
 
         twitch_username = args[0].lower()
         new_value = self.bot.users_db.toggle_setting('test', twitch_username)
@@ -56,8 +55,6 @@ class AdminCog(commands.Cog):
 
     @commands.command(name="status")
     async def get_active_channels(self, ctx: Context):
-        if ctx.author.name != os.getenv('BOT_NICK'):
-            return
 
         all_users = self.bot.users_db.get_all_users()
 
