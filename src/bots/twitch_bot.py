@@ -336,12 +336,19 @@ class TwitchBot(commands.Bot, ABC):
         beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
         extra_postfix = ""
         extra_prefix = ""
+
+        # TODO: Check if this issue is fixed in next twitchio
+        try:
+            badges = message.author.badges
+        except ValueError:
+            badges = []
+
         if message.author.is_mod:
             extra_prefix += "[MOD] "
         elif message.author.is_subscriber != '0':
             # TODO: Check if this conditional changed in the next releases of tio
             extra_prefix += "[SUB] "
-        elif 'vip' in message.author.badges:
+        elif 'vip' in badges:
             extra_prefix += "[VIP] "
 
         if 'custom-reward-id' in message.tags:
