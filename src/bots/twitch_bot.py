@@ -220,15 +220,15 @@ class TwitchBot(commands.Bot, ABC):
         :return:
         """
         stream_list = await self.fetch_streams(user_logins=[channel.name])
-        assert len(stream_list) == 1, 'Stream is not on.'
+        assert len(stream_list) == 1, f'{channel.name} stream is not on.'
         stream = stream_list[0]
-        assert stream.get('game_name') == 'osu!', 'Stream is not playing osu!'
+        assert stream.get('game_name') == 'osu!', f'{channel.name} stream is not playing osu!'
 
         return
 
     def check_channel_enabled(self, channel_name):
         enabled = self.users_db.get_enabled_status(twitch_username=channel_name)
-        assert enabled, 'Channel not open for requests'
+        assert enabled, f'Channel:{channel_name} is not open for requests'
 
     def _check_user_cooldown(self, author: Chatter):
         """
