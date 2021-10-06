@@ -388,10 +388,8 @@ class TwitchBot(commands.Bot, ABC):
     async def update_users(self):
         logger.info('Started updating user routine')
         user_details = self.users_db.get_all_users()
-        #channel_ids = [ch['twitch_id'] for ch in user_details]
-        #channel_details = await self.fetch_users(ids=channel_ids)
-        channel_ids = [ch['twitch_username'] for ch in user_details]
-        channel_details = await self.fetch_users(names=channel_ids)
+        channel_ids = [ch['twitch_id'] for ch in user_details]
+        channel_details = await self.fetch_users(ids=channel_ids)
 
         # Remove banned twitch users from database
         if len(user_details) != len(channel_details):
