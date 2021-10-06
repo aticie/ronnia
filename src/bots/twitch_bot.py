@@ -219,7 +219,7 @@ class TwitchBot(commands.Bot, ABC):
         :param channel: Channel of the message
         :return:
         """
-        stream_list = await self._http.get_streams(user_logins=[channel.name])
+        stream_list = await self.fetch_streams(user_logins=[channel.name])
         assert len(stream_list) == 1, 'Stream is not on.'
         stream = stream_list[0]
         assert stream.get('game_name') == 'osu!', 'Stream is not playing osu!'

@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - There are no unreleased changes.
+## [1.4.7] - 2021-10-06
+### Fixed
+- Unauthorized error from twitch when requesting the streamer's game title.
 
 ## [1.4.6] - 2021-09-23
 ### Fixed
@@ -100,7 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests to some twitch bot methods.
 - Changelog
 
-[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.6...HEAD
+[Unreleased]: https://github.com/aticie/ronnia/compare/v1.4.7...HEAD
+[1.4.7]: https://github.com/aticie/ronnia/compare/v1.4.6...v1.4.7
 [1.4.6]: https://github.com/aticie/ronnia/compare/v1.4.5...v1.4.6
 [1.4.5]: https://github.com/aticie/ronnia/compare/v1.4.4...v1.4.5
 [1.4.4]: https://github.com/aticie/ronnia/compare/v1.4.3...v1.4.4
