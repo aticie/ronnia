@@ -1,4 +1,3 @@
-import asyncio
 import datetime
 import logging
 import os
@@ -6,7 +5,7 @@ import re
 import time
 from abc import ABC
 from threading import Thread
-from typing import AnyStr, Tuple, Union, List
+from typing import AnyStr, Tuple, Union
 
 import aiohttp
 from twitchio import Message, Channel, Chatter
@@ -389,8 +388,25 @@ class TwitchBot(commands.Bot, ABC):
     async def update_users(self):
         logger.info('Started updating user routine')
         user_details = self.users_db.get_all_users()
-        channel_ids = [ch['twitch_id'] for ch in user_details]
-        channel_details = await self.fetch_users(ids=channel_ids)
+        #channel_ids = [ch['twitch_id'] for ch in user_details]
+        #channel_details = await self.fetch_users(ids=channel_ids)
+        channel_ids = [ch['twitch_username'] for ch in user_details]
+        channel_details = await self.fetch_users(names=channel_ids)
+
+        # Remove banned twitch users from database
+        if len(user_details) != len(channel_details):
+            logger.warning('There\'s a banned user.')
+            logger.info(f'Users in database vs from twitch api: {len(user_details)} - {len(channel_details)}.')
+            banned_users = set([user['twitch_id'] for user in user_details]).difference(
+                set([str(user.id) for user in channel_details]))
+            logger.info(f'Banned user ids: {banned_users}')
+            new_user_details = []
+            for user in user_details:
+                if user['twitch_id'] in banned_users:
+                    self.users_db.remove_user(user['twitch_username'])
+                else:
+                    new_user_details.append(user)
+            user_details = new_user_details.copy()
 
         user_details.sort(key=lambda x: int(x['twitch_id']))
         channel_details.sort(key=lambda x: x.id)
@@ -403,6 +419,10 @@ class TwitchBot(commands.Bot, ABC):
                 osu_details = {'user_id': db_user['osu_id'],
                                'username': db_user['osu_username']}
 
+            # Remove banned osu! users from database
+            if osu_details is None:
+                self.users_db.remove_user(twitch_username=db_user['twitch_username'])
+                continue
             new_twitch_username = new_twitch_user.name.lower()
             new_osu_username = osu_details['username'].lower().replace(' ', '_')
             twitch_id = new_twitch_user.id
