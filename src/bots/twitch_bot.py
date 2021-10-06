@@ -222,7 +222,7 @@ class TwitchBot(commands.Bot, ABC):
         stream_list = await self.fetch_streams(user_logins=[channel.name])
         assert len(stream_list) == 1, f'{channel.name} stream is not on.'
         stream = stream_list[0]
-        assert stream.get('game_name') == 'osu!', f'{channel.name} stream is not playing osu!'
+        assert stream.game_name == 'osu!', f'{channel.name} stream is not playing osu!'
 
         return
 
