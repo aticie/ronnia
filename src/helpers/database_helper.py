@@ -15,6 +15,7 @@ class BaseDatabase:
                                     check_same_thread=False,
                                     detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute('pragma journal_mode=wal')
         self.c = self.conn.cursor()
 
     def dispose(self):

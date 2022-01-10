@@ -1,10 +1,10 @@
 import asyncio
+import datetime
 import json
+import logging
 import os
 import time
-import logging
 from typing import Union
-from datetime import datetime
 
 import aiohttp
 
@@ -17,7 +17,7 @@ class OsuApi:
 
     def __init__(self, messages_db: StatisticsDatabase):
         self._osu_api_key = os.getenv('OSU_API_KEY')
-        self._last_request_time = datetime.now()
+        self._last_request_time = datetime.datetime.now() - datetime.timedelta(seconds=100)
         self._cooldown_seconds = 1
         self._messages_db = messages_db
 
@@ -68,11 +68,11 @@ class OsuApi:
         return r
 
     def _wait_for_rate_limit(self):
-        now = datetime.now()
+        now = datetime.datetime.now()
         time_passed = now - self._last_request_time
         if time_passed.total_seconds() < self._cooldown_seconds:
             time.sleep(self._cooldown_seconds - time_passed.total_seconds())
 
-        self._last_request_time = datetime.now()
+        self._last_request_time = datetime.datetime.now()
 
         return
