@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - There are no unreleased changes.
+
+
 ## [1.4.7] - 2021-10-06
 ### Fixed
 - Unauthorized error from twitch when requesting the streamer's game title.

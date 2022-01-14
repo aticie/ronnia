@@ -363,7 +363,12 @@ class TwitchBot(commands.Bot, ABC):
 
         logger.debug(f'Populating users: {self.initial_channel_ids}')
         # Get channel names from ids
-        channel_names = await self.fetch_users(ids=self.initial_channel_ids)
+        list_batcher = lambda sample_list, chunk_size: [sample_list[i:i + chunk_size] for i in
+                                               range(0, len(sample_list), chunk_size)]
+
+        channel_names = []
+        for batch in list_batcher(self.initial_channel_ids, 100):
+            channel_names.extend(await self.fetch_users(ids=batch))
 
         channels_to_join = [ch.name for ch in channel_names]
 
