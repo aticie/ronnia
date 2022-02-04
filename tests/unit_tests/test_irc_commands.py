@@ -4,10 +4,10 @@ from unittest.mock import patch, MagicMock
 from bots.irc_bot import IrcBot
 
 
-class TestIrcBot(unittest.TestCase):
+class TestIrcBot(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
-    def setUpClass(cls) -> None:
+    async def asyncSetUp(cls) -> None:
         with patch('bots.irc_bot.UserDatabase') as mock:
             with patch('bots.irc_bot.StatisticsDatabase') as mock:
                 cls.event = MagicMock()

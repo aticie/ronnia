@@ -31,7 +31,7 @@ class OsuApi:
         except IndexError:
             logger.debug(f'No beatmap found. Api returned: \n {result}')
             if result is not None:
-                self._messages_db.add_error(error_type='osu_beatmap_error', error_text=json.dumps(result))
+                await self._messages_db.add_error(error_type='osu_beatmap_error', error_text=json.dumps(result))
             return None
 
     async def get_user_info(self, username: Union[str, int]):
@@ -50,7 +50,7 @@ class OsuApi:
         except IndexError:
             logger.debug(f'No user found. Api returned: \n {result}')
             if result is not None:
-                self._messages_db.add_error(error_type='osu_user_error', error_text=json.dumps(result))
+                await self._messages_db.add_error(error_type='osu_user_error', error_text=json.dumps(result))
             return None
 
     async def _get_endpoint(self, params: dict, endpoint: str):
@@ -61,10 +61,10 @@ class OsuApi:
                 try:
                     r = await response.json()
                 except asyncio.TimeoutError as e:
-                    self._messages_db.add_error(error_type='osu_timeout_error', error_text=None)
+                    await self._messages_db.add_error(error_type='osu_timeout_error', error_text=None)
                     return None
 
-        self._messages_db.add_api_usage(endpoint)
+        await self._messages_db.add_api_usage(endpoint)
         return r
 
     def _wait_for_rate_limit(self):

@@ -1,11 +1,10 @@
 import datetime
 import logging
 import os
-import re
 import time
 from abc import ABC
 from threading import Thread
-from typing import AnyStr, Tuple, Union
+from typing import AnyStr, Tuple, Union, List
 
 import aiohttp
 from twitchio import Message, Channel, Chatter
@@ -30,15 +29,13 @@ class TwitchBot(commands.Bot, ABC):
                            "-1": 'WIP',
                            "-2": 'Graveyard'}
 
-    def __init__(self):
+    def __init__(self, initial_channel_ids: List[int]):
         self.users_db = UserDatabase()
-        self.users_db.initialize()
-
         self.messages_db = StatisticsDatabase()
-        self.messages_db.initialize()
 
-        self.all_user_details = self.users_db.get_all_users()
-        self.initial_channel_ids = [user['twitch_id'] for user in self.all_user_details]
+        self.initial_channel_ids = initial_channel_ids
+        self.all_user_details = []
+
         args = {
             'token': os.getenv('TMI_TOKEN'),
             'client_id': os.getenv('CLIENT_ID'),
@@ -51,9 +48,7 @@ class TwitchBot(commands.Bot, ABC):
         self.osu_api = OsuApi(self.messages_db)
         self.user_last_request = {}
         self.irc_bot = IrcBot("#osu", os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
-
-        p = Thread(target=self.irc_bot.start)
-        p.start()
+        self.irc_bot_thread = Thread(target=self.irc_bot.start)
 
         self.join_channels_first_time = True
 
@@ -78,32 +73,32 @@ class TwitchBot(commands.Bot, ABC):
 
         await self.handle_commands(message)
         try:
-            self.check_channel_enabled(message.channel.name)
+            await self.check_channel_enabled(message.channel.name)
             await self.handle_request(message)
         except AssertionError as e:
             logger.debug(f'Check unsuccessful: {e}')
-            self.messages_db.add_error('internal_check', str(e))
+            await self.messages_db.add_error('internal_check', str(e))
 
     async def handle_request(self, message: Message):
         logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
-            self._check_user_cooldown(message.author)
+            await self._check_user_cooldown(message.author)
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
                 await self._update_channel(message)
                 # If user has enabled echo setting, send twitch chat a message
-                if self.users_db.get_echo_status(twitch_username=message.channel.name):
+                if await self.users_db.get_echo_status(twitch_username=message.channel.name):
                     await self._send_twitch_message(message, beatmap_info)
 
                 await self._send_irc_message(message, beatmap_info, given_mods)
-                self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['beatmap_id']),
-                                             requested_channel_name=message.channel.name,
-                                             requester_channel_name=message.author.name,
-                                             mods=given_mods)
+                await self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['beatmap_id']),
+                                                   requested_channel_name=message.channel.name,
+                                                   requester_channel_name=message.author.name,
+                                                   mods=given_mods)
 
-    def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
+    async def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
         if not is_updated:
             message_txt_path = os.path.join(os.getenv('DB_DIR'), 'update_message.txt')
             if os.path.exists(message_txt_path):
@@ -112,14 +107,14 @@ class TwitchBot(commands.Bot, ABC):
                 self.irc_bot.send_message(osu_username, update_message)
             else:
                 logger.warning(f'Looking for {message_txt_path}, but it does not exist!')
-            self.users_db.set_channel_updated(twitch_username)
+            await self.users_db.set_channel_updated(twitch_username)
         return
 
-    def check_beatmap_star_rating(self, message: Message, beatmap_info):
+    async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         twitch_username = message.channel.name
         requester_name = message.author.name
         diff_rating = float(beatmap_info['difficultyrating'])
-        range_low, range_high = self.users_db.get_range_setting(twitch_username=twitch_username, setting_key='sr')
+        range_low, range_high = await self.users_db.get_range_setting(twitch_username=twitch_username, setting_key='sr')
 
         if range_low == -1 or range_high == -1:
             return
@@ -131,39 +126,39 @@ class TwitchBot(commands.Bot, ABC):
         return
 
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
-        test_status = self.users_db.get_test_status(message.channel.name)
+        test_status = await self.users_db.get_test_status(message.channel.name)
         if not test_status:
-            self.check_sub_only_mode(message)
-            self.check_cp_only_mode(message)
-            self.check_user_excluded(message)
-            self.check_if_author_is_broadcaster(message)
+            await self.check_sub_only_mode(message)
+            await self.check_cp_only_mode(message)
+            await self.check_user_excluded(message)
+            await self.check_if_author_is_broadcaster(message)
             await self.check_if_streaming_osu(message.channel)
 
             try:
-                self.check_beatmap_star_rating(message, beatmap_info)
+                await self.check_beatmap_star_rating(message, beatmap_info)
             except AssertionError as e:
                 await message.channel.send(str(e))
                 raise AssertionError
 
-    def check_user_excluded(self, message: Message):
-        excluded_users = self.users_db.get_excluded_users(twitch_username=message.channel.name, return_mode='list')
+    async def check_user_excluded(self, message: Message):
+        excluded_users = await self.users_db.get_excluded_users(twitch_username=message.channel.name, return_mode='list')
         assert message.author.name.lower() not in excluded_users, f'{message.author.name} is excluded'
 
-    def check_sub_only_mode(self, message: Message):
-        is_sub_only = self.users_db.get_setting('sub-only', message.channel.name)
+    async def check_sub_only_mode(self, message: Message):
+        is_sub_only = await self.users_db.get_setting('sub-only', message.channel.name)
         if is_sub_only:
             assert message.author.is_mod or message.author.is_subscriber != '0' or 'vip' in message.author.badges, \
                 'Subscriber only request mode is active.'
 
-    def check_cp_only_mode(self, message):
-        is_cp_only = self.users_db.get_setting('cp-only', message.channel.name)
+    async def check_cp_only_mode(self, message):
+        is_cp_only = await self.users_db.get_setting('cp-only', message.channel.name)
         if is_cp_only:
             assert 'custom-reward-id' in message.tags, 'Channel Points only mode is active.'
         return
 
     async def event_command_error(self, ctx, error):
         logger.error(error)
-        self.messages_db.add_error(error_type='twitch_command_error', error_text=str(error))
+        await self.messages_db.add_error(error_type='twitch_command_error', error_text=str(error))
         pass
 
     async def _update_channel(self, message: Message):
@@ -173,15 +168,16 @@ class TwitchBot(commands.Bot, ABC):
 
         logger.info('Updating user with the latest news!')
         # Get current channel details from db
-        channel_details = self.users_db.get_user_from_twitch_username(twitch_username=message.channel.name)
+        channel_details = await self.users_db.get_user_from_twitch_username(twitch_username=message.channel.name)
         twitch_username = channel_details['twitch_username']
         is_channel_updated = channel_details['enabled']
-        self.inform_user_on_updates(channel_details['osu_username'], twitch_username, is_channel_updated)
+        await self.inform_user_on_updates(channel_details['osu_username'], twitch_username, is_channel_updated)
         return
 
     async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_user_id=None, twitch_username=None):
 
-        assert twitch_user_id is not None or twitch_username is not None, 'Twitch user id or twitch username must be given.'
+        assert twitch_user_id is not None or twitch_username is not None, \
+            'Twitch user id or twitch username must be given.'
         if osu_user_id_or_name.isdigit():
             # Handle ids in the string form
             osu_user_id_or_name = int(osu_user_id_or_name)
@@ -196,7 +192,7 @@ class TwitchBot(commands.Bot, ABC):
         return osu_user_info, twitch_info
 
     @staticmethod
-    def check_if_author_is_broadcaster(message: Message):
+    async def check_if_author_is_broadcaster(message: Message):
 
         assert message.author.name != message.channel.name, 'Author is broadcaster and not in test mode.'
 
@@ -208,7 +204,7 @@ class TwitchBot(commands.Bot, ABC):
         :param ctx: Message context
         :return:
         """
-        user = self.users_db.get_user_from_twitch_username(ctx.author.name)
+        user = await self.users_db.get_user_from_twitch_username(ctx.author.name)
         assert user is not None, 'User does not exist'
         assert ctx.message.channel.name == ctx.author.name, 'Message is not in author\'s channel'
 
@@ -225,11 +221,11 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    def check_channel_enabled(self, channel_name):
-        enabled = self.users_db.get_enabled_status(twitch_username=channel_name)
+    async def check_channel_enabled(self, channel_name):
+        enabled = await self.users_db.get_enabled_status(twitch_username=channel_name)
         assert enabled, f'Channel:{channel_name} is not open for requests'
 
-    def _check_user_cooldown(self, author: Chatter):
+    async def _check_user_cooldown(self, author: Chatter):
         """
         Check if user is on cooldown, raise an exception if the user is on request cooldown.
         :param author: Twitch user object
@@ -238,7 +234,7 @@ class TwitchBot(commands.Bot, ABC):
         author_id = author.id
         time_right_now = datetime.datetime.now()
 
-        self._prune_cooldowns(time_right_now)
+        await self._prune_cooldowns(time_right_now)
 
         if author_id not in self.user_last_request:
             self.user_last_request[author_id] = time_right_now
@@ -251,7 +247,7 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    def _prune_cooldowns(self, time_right_now: datetime.datetime):
+    async def _prune_cooldowns(self, time_right_now: datetime.datetime):
         """
         Prunes users on that are on cooldown list so it doesn't get too cluttered.
         :param time_right_now:
@@ -278,7 +274,7 @@ class TwitchBot(commands.Bot, ABC):
         """
         irc_message = await self._prepare_irc_message(message, beatmap_info, given_mods)
 
-        irc_target_channel = self.users_db.get_user_from_twitch_username(message.channel.name)['osu_username']
+        irc_target_channel = (await self.users_db.get_user_from_twitch_username(message.channel.name))['osu_username']
         self.irc_bot.send_message(irc_target_channel, irc_message)
         return
 
@@ -359,12 +355,19 @@ class TwitchBot(commands.Bot, ABC):
 
         self.main_prefix = self._prefix
 
-        logger.info(f'Ready | {self.nick}')
+        await self.users_db.initialize()
+        await self.messages_db.initialize()
+
+        logger.info(f'Successfully initialized databases!')
+
+        # TODO: Fix here
+        # self.all_user_details = await self.users_db.get_all_users()
+        # self.initial_channel_ids = [user['twitch_id'] for user in self.all_user_details]
 
         logger.debug(f'Populating users: {self.initial_channel_ids}')
         # Get channel names from ids
         list_batcher = lambda sample_list, chunk_size: [sample_list[i:i + chunk_size] for i in
-                                               range(0, len(sample_list), chunk_size)]
+                                                        range(0, len(sample_list), chunk_size)]
 
         channel_names = []
         for batch in list_batcher(self.initial_channel_ids, 100):
@@ -388,11 +391,14 @@ class TwitchBot(commands.Bot, ABC):
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)
+            logger.debug(f'Successfully loaded: {extension}')
+
+        logger.info(f'Ready | {self.nick}')
 
     @routines.routine(hours=1)
     async def update_users(self):
         logger.info('Started updating user routine')
-        user_details = self.users_db.get_all_users()
+        user_details = await self.users_db.get_all_users()
         channel_ids = [ch['twitch_id'] for ch in user_details]
         channel_details = await self.fetch_users(ids=channel_ids)
 
@@ -406,7 +412,7 @@ class TwitchBot(commands.Bot, ABC):
             new_user_details = []
             for user in user_details:
                 if user['twitch_id'] in banned_users:
-                    self.users_db.remove_user(user['twitch_username'])
+                    await self.users_db.remove_user(user['twitch_username'])
                 else:
                     new_user_details.append(user)
             user_details = new_user_details.copy()
@@ -424,7 +430,7 @@ class TwitchBot(commands.Bot, ABC):
 
             # Remove banned osu! users from database
             if osu_details is None:
-                self.users_db.remove_user(twitch_username=db_user['twitch_username'])
+                await self.users_db.remove_user(twitch_username=db_user['twitch_username'])
                 continue
             new_twitch_username = new_twitch_user.name.lower()
             new_osu_username = osu_details['username'].lower().replace(' ', '_')
@@ -435,10 +441,10 @@ class TwitchBot(commands.Bot, ABC):
                 logger.info(f'Username change:')
                 logger.info(f'osu! old: {db_user["osu_username"]} - new: {new_osu_username}')
                 logger.info(f'Twitch old: {db_user["twitch_username"]} - new: {new_twitch_username}')
-                self.users_db.update_user(new_twitch_username=new_twitch_username,
-                                          new_osu_username=new_osu_username,
-                                          twitch_id=twitch_id,
-                                          osu_user_id=osu_user_id)
+                await self.users_db.update_user(new_twitch_username=new_twitch_username,
+                                                new_osu_username=new_osu_username,
+                                                twitch_id=twitch_id,
+                                                osu_user_id=osu_user_id)
 
     @routines.routine(hours=1)
     async def join_channels_routine(self):
@@ -446,11 +452,27 @@ class TwitchBot(commands.Bot, ABC):
         if self.join_channels_first_time:
             self.join_channels_first_time = False
             return
-        all_user_details = self.users_db.get_all_users()
+        all_user_details = await self.users_db.get_all_users()
         twitch_users = [user['twitch_username'] for user in all_user_details]
         logger.debug(f'Joining: {twitch_users}')
         await self.join_channels(twitch_users)
 
-    async def part_channel(self, entry):
-        channel = re.sub("[#]", "", entry).lower()
-        await self._connection.send(f"PART #{channel}\r\n")
+    async def close(self):
+        logger.info('Closing bot')
+        self.update_users.cancel()
+        self.join_channels_routine.cancel()
+        await self.users_db.close()
+        await self.messages_db.close()
+        self._connection._keeper.cancel()
+        self._connection.is_ready.clear()
+
+        futures = self._connection._fetch_futures()
+
+        for fut in futures:
+            fut.cancel()
+
+        if self._connection._websocket:
+            await self._connection._websocket.close()
+        if self._connection._client._http.session:
+            await self._connection._client._http.session.close()
+        self._connection._loop.stop()

@@ -56,7 +56,7 @@ class AdminCog(commands.Cog):
     @commands.command(name="status")
     async def get_active_channels(self, ctx: Context):
 
-        all_users = self.bot.users_db.get_all_users()
+        all_users = await self.bot.users_db.get_all_users()
 
         not_joined = []
         for user in all_users:

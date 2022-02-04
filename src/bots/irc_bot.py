@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from typing import Union
 
@@ -26,10 +27,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                                             recon=reconnect_strategy)
         self.channel = channel
         self.users_db = UserDatabase()
-        self.users_db.initialize()
-
         self.messages_db = StatisticsDatabase()
-        self.messages_db.initialize()
+        self._loop = asyncio.get_event_loop()
 
         self.message_lock = Lock()
 
@@ -45,6 +44,9 @@ class IrcBot(irc.bot.SingleServerIRCBot):
 
     def on_welcome(self, c: ServerConnection, e: Event):
         logger.info(f"Successfully joined irc!")
+        self._loop.run_until_complete(self.users_db.initialize())
+        self._loop.run_until_complete(self.messages_db.initialize())
+        logger.info(f"Successfully initialized databases!")
         c.join(self.channel)
 
     def send_message(self, target: str, cmd: str):

@@ -15,5 +15,5 @@ logger.addHandler(ch)
 logger.propagate = False
 
 if __name__ == "__main__":
-    bot = TwitchBot()
+    bot = TwitchBot([])
     bot.run()
