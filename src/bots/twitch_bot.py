@@ -62,6 +62,7 @@ class TwitchBot(commands.Bot, ABC):
         self.join_channels_first_time = True
 
     async def servicebus_message_receiver(self):
+        logger.debug(f'Starting service bus message receiver')
         receiver = self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name)
         async for message in receiver:
             logger.info(f'Received sign-up message: {message}')
