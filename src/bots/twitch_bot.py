@@ -48,8 +48,8 @@ class TwitchBot(commands.Bot, ABC):
 
         args = {
             'token': os.getenv('TMI_TOKEN'),
-            'client_id': os.getenv('CLIENT_ID'),
-            'client_secret': os.getenv('CLIENT_SECRET'),
+            'client_id': os.getenv('TWITCH_CLIENT_ID'),
+            'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
             'prefix': os.getenv('BOT_PREFIX')
         }
         super().__init__(**args)
@@ -102,8 +102,8 @@ class TwitchBot(commands.Bot, ABC):
 
     @staticmethod
     async def _get_access_token():
-        client_id = os.getenv('CLIENT_ID'),
-        client_secret = os.getenv('CLIENT_SECRET')
+        client_id = os.getenv('TWITCH_CLIENT_ID'),
+        client_secret = os.getenv('TWITCH_CLIENT_SECRET')
         grant_type = 'client_credentials'
         scope = 'chat:read chat:edit'
         payload = {'client_id': client_id,

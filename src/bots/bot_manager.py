@@ -89,7 +89,7 @@ class BotManager:
         self.join_lock = Lock()
         self.instance_message_queue = None
 
-        self.twitch_client = TwitchAPI(os.getenv('CLIENT_ID'), os.getenv('CLIENT_SECRET'))
+        self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
 
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONN_STRING')
