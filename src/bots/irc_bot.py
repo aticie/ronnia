@@ -30,7 +30,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
 
-        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONN_STRING')
+        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
         self.listen_queue_name = 'twitch-to-irc'
         self._loop = asyncio.get_event_loop()

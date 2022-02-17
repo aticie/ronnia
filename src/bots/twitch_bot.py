@@ -38,7 +38,7 @@ class TwitchBot(commands.Bot, ABC):
 
         self.environment = os.getenv('ENVIRONMENT')
         self.initial_channel_ids = initial_channel_ids
-        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONN_STRING')
+        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
         self.signup_queue_name = 'bot-signups'
         self.signup_reply_queue_name = 'bot-signups-reply'

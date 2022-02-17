@@ -94,7 +94,7 @@ class BotManager:
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
 
-        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONN_STRING')
+        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_webserver_queue_name = 'webserver-signups'
         self.servicebus_webserver_reply_queue_name = 'webserver-signups-reply'
         self.servicebus_bot_queue_name = 'bot-signups'
