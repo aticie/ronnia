@@ -8,7 +8,6 @@ from typing import List
 
 import requests
 from azure.core.exceptions import ResourceNotFoundError
-from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
@@ -122,7 +121,7 @@ class BotManager:
 
     def start(self):
         self._loop.run_until_complete(self.initialize_queues())
-
+        logger.info("Queues initialized")
         all_users = self.users_db.execute('SELECT * FROM users;').fetchall()
         all_user_twitch_ids = [user[4] for user in all_users]
         streaming_user_ids = [user['user_id'] for user in self.twitch_client.get_streams(all_user_twitch_ids)]
@@ -131,11 +130,13 @@ class BotManager:
             if user_id not in streaming_user_ids:
                 streaming_user_ids.append(user_id)
 
+        logger.info(f"Collected users: {len(streaming_user_ids)}")
         self.irc_process.start()
-
+        logger.info("IRC bot started")
         for user_id_list in batcher(streaming_user_ids, 100):
             p = TwitchProcess(user_id_list, self.join_lock)
             p.start()
+            logger.info(f"Started bot instance for {len(user_id_list)} users")
             self.bot_processes.append(p)
 
     async def initialize_queues(self):
