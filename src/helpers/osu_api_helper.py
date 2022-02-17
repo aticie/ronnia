@@ -3,7 +3,6 @@ import datetime
 import json
 import logging
 import os
-import time
 from typing import Union
 
 import aiohttp
@@ -54,7 +53,7 @@ class OsuApi:
             return None
 
     async def _get_endpoint(self, params: dict, endpoint: str):
-        self._wait_for_rate_limit()
+        await self._wait_for_rate_limit()
         timeout = aiohttp.ClientTimeout(total=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(f'http://osu.ppy.sh/api/{endpoint}', params=params) as response:
@@ -67,11 +66,11 @@ class OsuApi:
         await self._messages_db.add_api_usage(endpoint)
         return r
 
-    def _wait_for_rate_limit(self):
+    async def _wait_for_rate_limit(self):
         now = datetime.datetime.now()
         time_passed = now - self._last_request_time
         if time_passed.total_seconds() < self._cooldown_seconds:
-            time.sleep(self._cooldown_seconds - time_passed.total_seconds())
+            await asyncio.sleep(self._cooldown_seconds - time_passed.total_seconds())
 
         self._last_request_time = datetime.datetime.now()
 

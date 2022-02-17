@@ -1,17 +1,18 @@
 import asyncio
+import json
+import os
 import sqlite3
 from typing import Union
 
 import attr
-import logging
-from threading import Lock
-
 import irc.bot
+from azure.servicebus.aio import ServiceBusClient
 from irc.client import Event, ServerConnection
 
 from helpers.database_helper import UserDatabase, StatisticsDatabase
+from helpers.logger import RonniaLogger
 
-logger = logging.getLogger('ronnia')
+logger = RonniaLogger(__name__)
 
 
 @attr.s
@@ -28,19 +29,29 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.channel = channel
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
-        self._loop = asyncio.get_event_loop()
 
-        self.message_lock = Lock()
+        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONN_STRING')
+        self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
+        self.listen_queue_name = 'twitch-to-irc'
+        self._loop = asyncio.get_event_loop()
 
         self._commands = {'disable': self.disable_requests_on_channel,
                           'echo': self.toggle_notifications,
                           'feedback': self.toggle_notifications,
                           'enable': self.enable_requests_on_channel,
-                          'register': self.register_bot_on_channel,
                           'help': self.show_help_message,
                           'setsr': self.set_sr_rating
                           }
         self.connection.set_rate_limit(1)
+
+    async def receive_servicebus_queue(self):
+        receiver = self.servicebus_client.get_queue_receiver(queue_name=self.listen_queue_name)
+        async for message in receiver:
+            logger.info(f'Received message from service bus: {str(message)}')
+            message_dict = json.loads(str(message))
+            target_channel = message_dict['target_channel']
+            message_contents = message_dict['message']
+            self.send_message(target_channel, message_contents)
 
     def on_welcome(self, c: ServerConnection, e: Event):
         logger.info(f"Successfully joined irc!")
@@ -73,21 +84,10 @@ class IrcBot(irc.bot.SingleServerIRCBot):
 
         # Check if the user is registered
         existing_user = self.users_db.get_user_from_osu_username(db_nick)
-        if existing_user is None and cmd == 'register':
+        if existing_user is None:
             self.send_message(e.source.nick,
-                              f'Hello! Thanks for your interest in this bot! '
-                              f'But, registering for the bot automatically is not supported currently. '
-                              f'I\'m hosting this bot with the free tier compute engine... '
-                              f'So, if it gets too many requests it might blow up! '
-                              f'That\'s why I\'m manually allowing requests right now. '
-                              f'(Check out the project page if you haven\'t already.)'
-                              f'[https://github.com/aticie/ronnia] '
-                              f'Contact me on discord and I can enable it for you! heyronii#9925')
+                              f'Please register your osu! account (from here)[https://ronnia.me/].')
             return
-        elif existing_user is None:
-            self.send_message(e.source.nick, f'Sorry, you are not registered. '
-                                             f'(Check out the project page for details.)'
-                                             f'[https://github.com/aticie/ronnia]')
         else:
             # Check if command is valid
             try:
@@ -110,16 +110,6 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'I\'ve disabled requests for now. '
                           f'If you want to re-enable requests, type !enable anytime.')
         self.messages_db.add_command('disable', 'osu_irc', event.source.nick)
-
-    def register_bot_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
-        """
-        Registers bot on twitch channel
-        :param event: Event of the current message
-        :param user_details: User Details Sqlite row factory
-
-        Currently not supported... TODO: Register user -> ask twitch
-        """
-        logger.debug(f'Register bot on channel: {user_details}')
 
     def enable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
@@ -160,7 +150,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.send_message(event.source.nick,
                           f'Check out the (project page)[https://github.com/aticie/ronnia] for more information. '
                           f'List of available commands are (listed here)'
-                          f'[https://github.com/aticie/ronnia/wiki/Commands].')
+                          f'[https://github.com/aticie/ronnia/wiki/Commands]. '
+                          f'(Click here)[https://ronnia.me/ to access your dashboard. )')
         self.messages_db.add_command('help', 'osu_irc', event.source.nick)
 
     def set_sr_rating(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):

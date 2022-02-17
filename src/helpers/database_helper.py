@@ -16,6 +16,7 @@ class BaseDatabase:
         self.conn = await aiosqlite.connect(self.db_path,
                                             check_same_thread=False,
                                             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        await self.conn.execute('PRAGMA journal_mode = DELETE')
         self.conn.row_factory = aiosqlite.Row
         self.c = await self.conn.cursor()
 
@@ -393,7 +394,16 @@ class UserDatabase(BaseDatabase):
         await self.conn.commit()
         return range_low, range_high
 
-    async def get_all_users(self, limit: int = 100, offset: int = 0) -> List[sqlite3.Row]:
+    async def get_all_user_count(self) -> List[sqlite3.Row]:
+        """
+        Gets all user count in users table
+        :return:
+        """
+        result = await self.c.execute("SELECT COUNT(*) FROM users;")
+        value = await result.fetchone()
+        return value[0]
+
+    async def get_users(self, limit: int = 100, offset: int = 0) -> List[sqlite3.Row]:
         """
         Gets all users in db
         :return:
