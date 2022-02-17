@@ -1,19 +1,11 @@
-import logging
-import os
+import asyncio
 
-from bots.twitch_bot import TwitchBot
+from bots.bot_manager import BotManager
+from helpers.logger import RonniaLogger
 
-logger = logging.getLogger('ronnia')
-logger.setLevel(os.getenv('LOG_LEVEL').upper())
-loggers_formatter = logging.Formatter(
-    '%(asctime)s | %(levelname)s | %(process)d | %(name)s | %(funcName)s | %(message)s',
-    datefmt='%d/%m/%Y %I:%M:%S')
-
-ch = logging.StreamHandler()
-ch.setFormatter(loggers_formatter)
-logger.addHandler(ch)
-logger.propagate = False
+logger = RonniaLogger(__name__)
 
 if __name__ == "__main__":
-    bot = TwitchBot([])
-    bot.run()
+    bot_manager = BotManager()
+    bot_manager.start()
+    asyncio.run(bot_manager.run_service_bus_receiver())

@@ -16,6 +16,8 @@ from bots.irc_bot import IrcBot
 from bots.twitch_bot import TwitchBot
 from helpers.logger import RonniaLogger
 
+logger = RonniaLogger(__name__)
+
 
 def batcher(iterable, batch_size):
     iterator = iter(iterable)
@@ -168,11 +170,3 @@ class BotManager:
             sender = sb_client.get_queue_sender(queue_name=self.servicebus_bot_queue_name)
             logger.debug(f'Sending message to bot: {message}')
             await sender.send_messages(message)
-
-
-if __name__ == '__main__':
-    logger = RonniaLogger(__name__)
-
-    bot_manager = BotManager()
-    bot_manager.start()
-    asyncio.run(bot_manager.run_service_bus_receiver())
