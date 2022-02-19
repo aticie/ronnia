@@ -142,7 +142,7 @@ class BotManager:
         for user_id_list in batcher(streaming_user_ids, 100):
             p = TwitchProcess(user_id_list, self.join_lock)
             p.start()
-            logger.info(f"Started bot instance for {len(user_id_list)} users")
+            logger.info(f"Started Twitch bot instance for {len(user_id_list)} users")
             self.bot_processes.append(p)
 
     async def initialize_queues(self):

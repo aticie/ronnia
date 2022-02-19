@@ -52,6 +52,7 @@ class TwitchBot(commands.Bot, ABC):
             'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
             'prefix': os.getenv('BOT_PREFIX')
         }
+        logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
 
         self._join_lock = join_lock
