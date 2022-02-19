@@ -8,6 +8,7 @@ from typing import List
 
 import requests
 from azure.core.exceptions import ResourceNotFoundError
+from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
@@ -88,7 +89,6 @@ class BotManager:
     def __init__(self, ):
         self.users_db = sqlite3.connect(os.path.join(os.getenv('DB_DIR'), 'users.db'))
         self.join_lock = Lock()
-        self.instance_message_queue = None
 
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
@@ -114,12 +114,18 @@ class BotManager:
         self.servicebus_mgmt = ServiceBusAdministrationClient.from_connection_string(self.servicebus_connection_string)
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
 
-        self.bot_instances = []
+        self.create_new_instance: bool = False
+
         self.bot_processes = []
 
         self.irc_process = IRCProcess()
 
     def start(self):
+        """
+        Starts the bot manager.
+
+        Creates an IRCBot process and multiple TwitchBot processes.
+        """
         self._loop.run_until_complete(self.initialize_queues())
         logger.info("Queues initialized")
         all_users = self.users_db.execute('SELECT * FROM users;').fetchall()
@@ -150,22 +156,55 @@ class BotManager:
             except ResourceNotFoundError:
                 await self.servicebus_mgmt.create_queue(queue_name, **queue_properties)
 
-    async def run_service_bus_receiver(self):
+    async def bot_queue_receiver(self):
+        """
+        Receives messages from bot reply queue
+        """
+        async with self.servicebus_client.get_queue_receiver(self.servicebus_bot_reply_queue_name) as receiver:
+            async for message in receiver:
+                logger.info(f"Received message from bot reply queue: {str(message)}")
+                await self.process_bot_reply(message)
+                await receiver.complete_message(message)
+
+    async def process_bot_reply(self, message: ServiceBusMessage):
+        """
+        Processes bot reply messages
+        """
+        message_contents = str(message)
+        if message_contents == 'bot-full':
+            logger.info('Bot is full, starting new instance')
+            self.create_new_instance = True
+        else:
+            logger.info(f'Bot reply message not recognized: {message_contents}')
+
+        return
+
+    async def webserver_receiver(self):
         """
         Creates the receiver for the webserver queue
         Forwards incoming messages to the bot instance
         Replies to the webserver with a reply queue
         """
-        receiver = self.servicebus_client.get_queue_receiver(queue_name=self.servicebus_webserver_queue_name)
-        logger.info('Started servicebus receiver, listening for messages...')
-        async for message in receiver:
-            await self.receive_and_parse_message(message)
-            await receiver.complete_message(message)
+        async with self.servicebus_client.get_queue_receiver(
+                queue_name=self.servicebus_webserver_queue_name) as receiver:
+            logger.info('Started servicebus receiver, listening for messages...')
+            async for message in receiver:
+                await self.parse_and_send_message(message)
+                await receiver.complete_message(message)
 
-    async def receive_and_parse_message(self, message):
+    async def parse_and_send_message(self, message):
         """
-        Receive a message from the webserver signup queue and parse it, forward it to bot queue.
+        Receive a message from the webserver signup queue and parse it.
+
+        Decide whether to send the message to the bot, or create a new TwitchBot instance.
         """
+        if self.create_new_instance:
+            p = TwitchProcess([], self.join_lock)
+            p.start()
+            self.bot_processes.append(p)
+            logger.info(f"Started a new bot instance. This is the {len(self.bot_processes)}th instance.")
+            self.create_new_instance = False
+
         logger.info(f'Received signup message: {message}')
         async with ServiceBusClient.from_connection_string(self.servicebus_connection_string) as sb_client:
             sender = sb_client.get_queue_sender(queue_name=self.servicebus_bot_queue_name)

@@ -62,6 +62,14 @@ class TwitchBot(commands.Bot, ABC):
         self.join_channels_first_time = True
 
     async def servicebus_message_receiver(self):
+        """
+        Start a queue listener for messages from the website sign-up.
+        """
+        # Each instance of bot can only have one 100 users.
+        if len(self.initial_channel_ids) == 100:
+            logger.info('Reached 100 members, stopped listening to sign-up queue.')
+            return
+
         logger.debug(f'Starting service bus message receiver')
         receiver = self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name)
         async for message in receiver:
@@ -74,6 +82,12 @@ class TwitchBot(commands.Bot, ABC):
                 sender = servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name)
                 logger.info(f'Sending reply message: {reply_message}')
                 await sender.send_messages(reply_message)
+
+                if len(self.initial_channel_ids) == 100:
+                    logger.info('Reached 100 members, sending manager signal to create a new process.')
+                    bot_full_message = ServiceBusMessage("bot-full")
+                    await sender.send_messages(bot_full_message)
+                    return
 
     async def receive_and_parse_message(self, message):
         """
