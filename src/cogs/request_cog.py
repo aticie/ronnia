@@ -16,25 +16,25 @@ class RequestCog(commands.Cog):
 
     @commands.command(name="disable")
     async def disable_channel(self, ctx):
-        self.bot.users_db.disable_channel(ctx.author.name)
-        self.bot.messages_db.add_command('disable', 'twitch', ctx.author.name)
+        await self.bot.users_db.disable_channel(ctx.author.name)
+        await self.bot.messages_db.add_command('disable', 'twitch', ctx.author.name)
         await ctx.send(f"Disabled requests! If you want to enable requests, type {self.bot.main_prefix}enable.")
 
     @commands.command(name="enable")
     async def enable_channel(self, ctx):
-        self.bot.users_db.enable_channel(ctx.author.name)
-        self.bot.messages_db.add_command('enable', 'twitch', ctx.author.name)
+        await self.bot.users_db.enable_channel(ctx.author.name)
+        await self.bot.messages_db.add_command('enable', 'twitch', ctx.author.name)
         await ctx.send(f"Enabled requests! If you want to disable requests, type {self.bot.main_prefix}disable.")
 
     @commands.command(name="echo", aliases=["feedback"])
     async def toggle_feedback(self, ctx):
-        new_echo_status = self.bot.users_db.toggle_echo(ctx.author.name)
+        new_echo_status = await self.bot.users_db.toggle_echo(ctx.author.name)
         if new_echo_status is False:
             await ctx.send("Disabled feedback message after requests!")
         else:
             await ctx.send("Enabled feedback message after requests!")
 
-        self.bot.messages_db.add_command('echo', 'twitch', ctx.author.name)
+        await self.bot.messages_db.add_command('echo', 'twitch', ctx.author.name)
 
     @commands.command(name="help", aliases=["h"])
     async def show_help_message(self, ctx):
@@ -42,7 +42,7 @@ class RequestCog(commands.Cog):
 
     @commands.command(name="sub-only")
     async def sub_only(self, ctx):
-        new_value = self.bot.users_db.toggle_sub_only(ctx.author.name)
+        new_value = await self.bot.users_db.toggle_sub_only(ctx.author.name)
         if new_value:
             await ctx.send(
                 f"Enabled sub-only mode on the channel! Type {self.bot.main_prefix}sub-only again to disable.")
@@ -66,7 +66,7 @@ class RequestCog(commands.Cog):
             return
 
         await ctx.send(f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
-        self.bot.messages_db.add_command('sr_rating', 'twitch', ctx.author.name)
+        await self.bot.messages_db.add_command('sr_rating', 'twitch', ctx.author.name)
 
 
 def prepare(bot: TwitchBot):

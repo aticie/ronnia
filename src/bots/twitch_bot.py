@@ -177,7 +177,7 @@ class TwitchBot(commands.Bot, ABC):
 
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = await self.users_db.get_test_status(message.channel.name)
-        if not test_status or self.environment != 'testing':
+        if not test_status and self.environment != 'testing':
             await self.check_sub_only_mode(message)
             await self.check_cp_only_mode(message)
             await self.check_user_excluded(message)

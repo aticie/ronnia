@@ -14,6 +14,6 @@ class RonniaLogger(object):
         ch.setFormatter(loggers_formatter)
         logger.addHandler(ch)
 
-        logger.propagate = False
+        logger.propagate = True
 
         return logger

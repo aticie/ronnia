@@ -2,7 +2,7 @@ import os
 import shutil
 from unittest import IsolatedAsyncioTestCase
 
-from helpers.database_helper import UserDatabase
+from helpers.database_aio import UserDatabaseAio
 
 
 class TestDatabase(IsolatedAsyncioTestCase):
@@ -15,7 +15,7 @@ class TestDatabase(IsolatedAsyncioTestCase):
         if os.path.exists(db_path):
             os.remove(db_path)
         shutil.copyfile(test_db_path, db_path)
-        self.db = UserDatabase(db_path=db_path)
+        self.db = UserDatabaseAio(db_path=db_path)
 
     async def asyncSetUp(self) -> None:
         await self.db.initialize()

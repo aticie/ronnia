@@ -33,6 +33,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
         self.listen_queue_name = 'twitch-to-irc'
+
         self._loop = asyncio.get_event_loop()
 
         self._commands = {'disable': self.disable_requests_on_channel,
@@ -44,7 +45,18 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           }
         self.connection.set_rate_limit(1)
 
+    def start(self):
+        self._connect()
+
+        self._loop.run_until_complete(self.users_db.initialize())
+        self._loop.run_until_complete(self.messages_db.initialize())
+        logger.info(f"Successfully initialized databases!")
+        servicebus_task = self._loop.create_task(self.receive_servicebus_queue())
+        super_start_coro = self._loop.run_in_executor(None, super().start)
+        self._loop.run_until_complete(asyncio.gather(servicebus_task, super_start_coro))
+
     async def receive_servicebus_queue(self):
+        logger.info('Starting to listen to queue')
         receiver = self.servicebus_client.get_queue_receiver(queue_name=self.listen_queue_name)
         async for message in receiver:
             logger.info(f'Received message from service bus: {str(message)}')
@@ -54,11 +66,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
             self.send_message(target_channel, message_contents)
 
     def on_welcome(self, c: ServerConnection, e: Event):
-        logger.info(f"Successfully joined irc!")
-        self._loop.run_until_complete(self.users_db.initialize())
-        self._loop.run_until_complete(self.messages_db.initialize())
-        logger.info(f"Successfully initialized databases!")
         c.join(self.channel)
+        logger.info(f"Joined channel {self.channel}")
 
     def send_message(self, target: str, cmd: str):
         target = target.replace(" ", "_")
@@ -66,6 +75,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.connection.privmsg(target, cmd)
 
     def on_privmsg(self, c: ServerConnection, e: Event):
+        logger.debug(f'Received message from irc: {e}')
         self.do_command(e)
 
     def do_command(self, e: Event):
@@ -105,11 +115,11 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         twitch_username = user_details['twitch_username']
         osu_username = user_details['osu_username']
         logger.debug(f'Disable requests on channel: {osu_username}')
-        self.users_db.disable_channel(twitch_username)
+        self._loop.run_until_complete(self.users_db.disable_channel(twitch_username))
         self.send_message(event.source.nick,
                           f'I\'ve disabled requests for now. '
                           f'If you want to re-enable requests, type !enable anytime.')
-        self.messages_db.add_command('disable', 'osu_irc', event.source.nick)
+        self._loop.run_until_complete(self.messages_db.add_command('disable', 'osu_irc', event.source.nick))
 
     def enable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
@@ -118,10 +128,10 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         twitch_username = user_details['twitch_username']
         logger.debug(f'Enable requests on channel - Current user details: {user_details}')
-        self.users_db.enable_channel(twitch_username)
+        self._loop.run_until_complete(self.users_db.enable_channel(twitch_username))
         self.send_message(event.source.nick,
                           f'I\'ve enabled requests. Have fun!')
-        self.messages_db.add_command('enable', 'osu_irc', event.source.nick)
+        self._loop.run_until_complete(self.messages_db.add_command('enable', 'osu_irc', event.source.nick))
 
     def toggle_notifications(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
@@ -130,14 +140,14 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         """
         twitch_username = user_details['twitch_username']
         logger.debug(f'Toggle notifications on channel: {event.source.nick}')
-        new_echo_status = self.users_db.toggle_echo(twitch_username)
+        new_echo_status = self._loop.run_until_complete(self.users_db.toggle_echo(twitch_username))
         if new_echo_status is True:
             self.send_message(event.source.nick, f'I\'ve enabled the beatmap request '
                                                  f'information feedback on your twitch chat!')
         else:
             self.send_message(event.source.nick, f'I\'ve disabled the beatmap request '
                                                  f'information feedback on your channel.')
-        self.messages_db.add_command('echo', 'osu_irc', event.source.nick)
+        self._loop.run_until_complete(self.messages_db.add_command('echo', 'osu_irc', event.source.nick))
         pass
 
     def show_help_message(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
@@ -152,7 +162,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'List of available commands are (listed here)'
                           f'[https://github.com/aticie/ronnia/wiki/Commands]. '
                           f'(Click here)[https://ronnia.me/ to access your dashboard. )')
-        self.messages_db.add_command('help', 'osu_irc', event.source.nick)
+        self._loop.run_until_complete(self.messages_db.add_command('help', 'osu_irc', event.source.nick))
 
     def set_sr_rating(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         sr_text = ' '.join(args)
@@ -164,10 +174,11 @@ class IrcBot(irc.bot.SingleServerIRCBot):
 
         twitch_username = user_details['twitch_username']
         try:
-            new_low, new_high = self.users_db.set_sr_rating(twitch_username=twitch_username,
-                                                            **attr.asdict(range_input))
+            new_low, new_high = self._loop.run_until_complete(
+                self.users_db.set_sr_rating(twitch_username=twitch_username,
+                                            **attr.asdict(range_input)))
         except AssertionError as e:
             self.send_message(event.source.nick, e)
             return
         self.send_message(event.source.nick, f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
-        self.messages_db.add_command('sr_rating', 'osu_irc', event.source.nick)
+        self._loop.run_until_complete(self.messages_db.add_command('sr_rating', 'osu_irc', event.source.nick))
