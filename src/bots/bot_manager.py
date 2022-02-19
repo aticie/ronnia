@@ -184,7 +184,7 @@ class BotManager:
                 async with ServiceBusClient.from_connection_string(self.servicebus_connection_string) as sb_client:
                     async with sb_client.get_queue_sender(
                             queue_name=self.servicebus_webserver_reply_queue_name) as sender:
-                        logger.debug(f'Sending message to bot: {message}')
+                        logger.debug(f'Sending message to {self.servicebus_webserver_reply_queue_name}: {message}')
                         await sender.send_messages(message)
             except JSONDecodeError:
                 logger.error(f"Failed to decode bot reply message: {message_contents}")

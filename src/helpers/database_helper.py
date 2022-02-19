@@ -99,13 +99,13 @@ class UserDatabase(BaseDatabase):
 
         await self.conn.commit()
 
+        await self.define_setting('enable', 1, 'Enables the bot.')
         await self.define_setting('echo', 1,
-                                  'Setting for the feedback message sent to twitch channel on beatmap request.')
-        await self.define_setting('enable', 1, 'Setting to enable beatmap requests channel-wide.')
-        await self.define_setting('sub-only', 0, 'Setting for sub-only requests mode.')
-        await self.define_setting('cp-only', 0, 'Setting for channel points only requests mode.')
-        await self.define_setting('test', 0, 'Enables test mode on the channel.')
-        await self.define_range_setting('sr', -1, -1, 'Set star rating limit for requests.')
+                                  'Enables Twitch chat acknowledge message.')
+        await self.define_setting('sub-only', 0, 'Subscribers only request mode.')
+        await self.define_setting('cp-only', 0, 'Channel Points only request mode.')
+        await self.define_setting('test', 0, 'Enables test mode.')
+        await self.define_range_setting('sr', -1, -1, 'Star rating limit for requests.')
 
     async def set_channel_updated(self, twitch_username: str):
         await self.c.execute(f'UPDATE users SET enabled=? WHERE twitch_username=?', (1, twitch_username))
@@ -203,8 +203,11 @@ class UserDatabase(BaseDatabase):
         if setting is None:
             await self.c.execute(f"INSERT INTO settings (key, default_value, description) VALUES (?, ?, ?)",
                                  (key, default_value, description))
-            await self.conn.commit()
-        return
+        else:
+            await self.c.execute(f"UPDATE settings SET default_value=?1, description=?2 WHERE key=?3",
+                                 (default_value, description, key))
+
+        return await self.conn.commit()
 
     async def define_range_setting(self, key: str, default_low: float, default_high: float, description: str) -> None:
         """
