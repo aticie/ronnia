@@ -113,7 +113,6 @@ class TwitchBot(commands.Bot, ABC):
         return ServiceBusMessage(json.dumps(message_dict))
 
     def run(self):
-        self.loop.create_task(self.servicebus_message_receiver())
         super().run()
 
     @staticmethod
@@ -449,4 +448,5 @@ class TwitchBot(commands.Bot, ABC):
             self.load_module(extension)
             logger.debug(f'Successfully loaded: {extension}')
 
+        self.loop.create_task(self.servicebus_message_receiver())
         logger.info(f'Ready | {self.nick}')
