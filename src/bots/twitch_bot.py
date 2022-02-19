@@ -72,23 +72,23 @@ class TwitchBot(commands.Bot, ABC):
             return
 
         logger.debug(f'Starting service bus message receiver')
-        receiver = self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name)
-        async for message in receiver:
-            logger.info(f'Received sign-up message: {message}')
-            reply_message = await self.receive_and_parse_message(message)
-            await receiver.complete_message(message)
+        async with self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name) as receiver:
+            async for message in receiver:
+                logger.info(f'Received sign-up message: {message}')
+                reply_message = await self.receive_and_parse_message(message)
+                await receiver.complete_message(message)
 
-            async with ServiceBusClient.from_connection_string(
-                    conn_str=self.servicebus_connection_string) as servicebus_client:
-                sender = servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name)
-                logger.info(f'Sending reply message: {reply_message}')
-                await sender.send_messages(reply_message)
+                async with ServiceBusClient.from_connection_string(
+                        conn_str=self.servicebus_connection_string) as servicebus_client:
+                    async with servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name) as sender:
+                        logger.info(f'Sending reply message: {reply_message}')
+                        await sender.send_messages(reply_message)
 
-                if len(self.initial_channel_ids) == 100:
-                    logger.info('Reached 100 members, sending manager signal to create a new process.')
-                    bot_full_message = ServiceBusMessage("bot-full")
-                    await sender.send_messages(bot_full_message)
-                    return
+                        if len(self.initial_channel_ids) == 100:
+                            logger.info('Reached 100 members, sending manager signal to create a new process.')
+                            bot_full_message = ServiceBusMessage("bot-full")
+                            await sender.send_messages(bot_full_message)
+                            return
 
     async def receive_and_parse_message(self, message):
         """
@@ -104,6 +104,7 @@ class TwitchBot(commands.Bot, ABC):
         osu_username = message_dict['osu_username']
         osu_id = message_dict['osu_id']
         twitch_id = message_dict['twitch_id']
+
         await self.users_db.add_user(twitch_username=twitch_username,
                                      twitch_id=twitch_id,
                                      osu_username=osu_username,

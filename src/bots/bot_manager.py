@@ -1,8 +1,10 @@
 import asyncio
 import datetime
+import json
 import os
 import sqlite3
 from itertools import islice
+from json import JSONDecodeError
 from multiprocessing import Process, Lock
 from typing import List
 
@@ -161,6 +163,7 @@ class BotManager:
         Receives messages from bot reply queue
         """
         async with self.servicebus_client.get_queue_receiver(self.servicebus_bot_reply_queue_name) as receiver:
+            logger.info(f"Receiver started for {self.servicebus_bot_reply_queue_name}")
             async for message in receiver:
                 logger.info(f"Received message from bot reply queue: {str(message)}")
                 await self.process_bot_reply(message)
@@ -175,7 +178,16 @@ class BotManager:
             logger.info('Bot is full, starting new instance')
             self.create_new_instance = True
         else:
-            logger.info(f'Bot reply message not recognized: {message_contents}')
+            try:
+                # Check if message is a valid json
+                json.loads(message_contents)
+                async with ServiceBusClient.from_connection_string(self.servicebus_connection_string) as sb_client:
+                    async with sb_client.get_queue_sender(
+                            queue_name=self.servicebus_webserver_reply_queue_name) as sender:
+                        logger.debug(f'Sending message to bot: {message}')
+                        await sender.send_messages(message)
+            except JSONDecodeError:
+                logger.error(f"Failed to decode bot reply message: {message_contents}")
 
         return
 
@@ -207,6 +219,6 @@ class BotManager:
 
         logger.info(f'Received signup message: {message}')
         async with ServiceBusClient.from_connection_string(self.servicebus_connection_string) as sb_client:
-            sender = sb_client.get_queue_sender(queue_name=self.servicebus_bot_queue_name)
-            logger.debug(f'Sending message to bot: {message}')
-            await sender.send_messages(message)
+            async with sb_client.get_queue_sender(queue_name=self.servicebus_bot_queue_name) as sender:
+                logger.debug(f'Sending message to bot: {message}')
+                await sender.send_messages(message)
