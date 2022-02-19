@@ -108,7 +108,7 @@ class TwitchBot(commands.Bot, ABC):
                                      osu_username=osu_username,
                                      osu_user_id=osu_id)
         user_db_details = await self.users_db.get_user_from_twitch_username(twitch_username)
-        await self.join_channels(twitch_username)
+        await self.join_channels([twitch_username])
         message_dict['user_id'] = user_db_details['user_id']
         return ServiceBusMessage(json.dumps(message_dict))
 
