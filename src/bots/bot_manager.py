@@ -140,12 +140,25 @@ class BotManager:
 
         logger.info(f"Collected users: {len(streaming_user_ids)}")
         self.irc_process.start()
+        self.bot_processes.append(self.irc_process)
         logger.info("IRC bot started")
         for user_id_list in batcher(streaming_user_ids, 100):
             p = TwitchProcess(user_id_list, self.join_lock)
             p.start()
             logger.info(f"Started Twitch bot instance for {len(user_id_list)} users")
             self.bot_processes.append(p)
+
+    async def process_handler(self):
+        """
+        Checks the status of the processes and restarts them if necessary.
+        """
+        while True:
+            await asyncio.sleep(5)
+            for p in self.bot_processes:
+                if not p.is_alive():
+                    logger.info(f"Bot process {p.bot} died, restarting")
+                    p.start()
+                    logger.info(f"Bot process {p.bot} restarted")
 
     async def initialize_queues(self):
         """

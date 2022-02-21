@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import traceback
 from typing import Union
 
 import attr
@@ -74,9 +75,13 @@ class IrcBot(irc.bot.SingleServerIRCBot):
 
     def on_privmsg(self, c: ServerConnection, e: Event):
         logger.debug(f'Received message from irc: {e}')
-        self.do_command(e)
+        try:
+            self._loop.create_task(self.do_command(e))
+        except Exception as exp:
+            logger.error(f'Error while processing command {e}: {exp}')
+            traceback.print_exc()
 
-    def do_command(self, e: Event):
+    async def do_command(self, e: Event):
         # Check if command starts with !
         cmd = e.arguments[0]
         if not cmd.startswith('!'):
@@ -91,7 +96,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         db_nick = e.source.nick.lower()
 
         # Check if the user is registered
-        existing_user = self.users_db.get_user_from_osu_username(db_nick)
+        existing_user = await self.users_db.get_user_from_osu_username(db_nick)
         if existing_user is None:
             self.send_message(e.source.nick,
                               f'Please register your osu! account (from here)[https://ronnia.me/].')
@@ -102,9 +107,8 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                 self._commands[cmd](e, *args, user_details=existing_user)
             except KeyError:
                 self.send_message(e.source.nick, f'Sorry, I couldn\'t understand what {cmd} means')
-                pass
 
-    def disable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
+    async def disable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Disables requests on twitch channel
         :param event: Event of the current message
@@ -113,42 +117,42 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         twitch_username = user_details['twitch_username']
         osu_username = user_details['osu_username']
         logger.debug(f'Disable requests on channel: {osu_username}')
-        self._loop.run_until_complete(self.users_db.disable_channel(twitch_username))
+        await self.users_db.disable_channel(twitch_username)
         self.send_message(event.source.nick,
                           f'I\'ve disabled requests for now. '
                           f'If you want to re-enable requests, type !enable anytime.')
-        self._loop.run_until_complete(self.messages_db.add_command('disable', 'osu_irc', event.source.nick))
+        await self.messages_db.add_command('disable', 'osu_irc', event.source.nick)
 
-    def enable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
+    async def enable_requests_on_channel(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Enables requests on twitch channel
         :param user_details: User Details Sqlite row factory
         """
         twitch_username = user_details['twitch_username']
         logger.debug(f'Enable requests on channel - Current user details: {user_details}')
-        self._loop.run_until_complete(self.users_db.enable_channel(twitch_username))
+        await self.users_db.enable_channel(twitch_username)
         self.send_message(event.source.nick,
                           f'I\'ve enabled requests. Have fun!')
-        self._loop.run_until_complete(self.messages_db.add_command('enable', 'osu_irc', event.source.nick))
+        await self.messages_db.add_command('enable', 'osu_irc', event.source.nick)
 
-    def toggle_notifications(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
+    async def toggle_notifications(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Toggles echo notifications on twitch channel when requesting beatmaps
         :param user_details: User Details Sqlite row factory
         """
         twitch_username = user_details['twitch_username']
         logger.debug(f'Toggle notifications on channel: {event.source.nick}')
-        new_echo_status = self._loop.run_until_complete(self.users_db.toggle_echo(twitch_username))
+        new_echo_status = await self.users_db.toggle_echo(twitch_username)
         if new_echo_status is True:
             self.send_message(event.source.nick, f'I\'ve enabled the beatmap request '
                                                  f'information feedback on your twitch chat!')
         else:
             self.send_message(event.source.nick, f'I\'ve disabled the beatmap request '
                                                  f'information feedback on your channel.')
-        self._loop.run_until_complete(self.messages_db.add_command('echo', 'osu_irc', event.source.nick))
+        await self.messages_db.add_command('echo', 'osu_irc', event.source.nick)
         pass
 
-    def show_help_message(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
+    async def show_help_message(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         """
         Shows help message to user
         :param user_details: User Details Sqlite row factory
@@ -160,9 +164,9 @@ class IrcBot(irc.bot.SingleServerIRCBot):
                           f'List of available commands are (listed here)'
                           f'[https://github.com/aticie/ronnia/wiki/Commands]. '
                           f'(Click here)[https://ronnia.me/ to access your dashboard. )')
-        self._loop.run_until_complete(self.messages_db.add_command('help', 'osu_irc', event.source.nick))
+        await self.messages_db.add_command('help', 'osu_irc', event.source.nick)
 
-    def set_sr_rating(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
+    async def set_sr_rating(self, event: Event, *args, user_details: Union[dict, sqlite3.Row]):
         sr_text = ' '.join(args)
         try:
             range_input = RangeInput(*(sr_text.split('-')))
@@ -172,11 +176,10 @@ class IrcBot(irc.bot.SingleServerIRCBot):
 
         twitch_username = user_details['twitch_username']
         try:
-            new_low, new_high = self._loop.run_until_complete(
-                self.users_db.set_sr_rating(twitch_username=twitch_username,
-                                            **attr.asdict(range_input)))
+            new_low, new_high = await self.users_db.set_sr_rating(twitch_username=twitch_username,
+                                                                  **attr.asdict(range_input))
         except AssertionError as e:
             self.send_message(event.source.nick, e)
             return
         self.send_message(event.source.nick, f'Changed star rating range between: {new_low:.1f} - {new_high:.1f}')
-        self._loop.run_until_complete(self.messages_db.add_command('sr_rating', 'osu_irc', event.source.nick))
+        await self.messages_db.add_command('sr_rating', 'osu_irc', event.source.nick)
