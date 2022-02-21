@@ -36,7 +36,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self.listen_queue_name = 'twitch-to-irc'
 
         self._loop = asyncio.get_event_loop()
-        self.environment = os.getenv('ENVIRONMENT')
+        self.environment = os.getenv('ENVIRONMENT').lower()
 
         self._commands = {'disable': self.disable_requests_on_channel,
                           'echo': self.toggle_notifications,
@@ -83,7 +83,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
             traceback.print_exc()
 
     async def do_command(self, e: Event):
-        if self.environment == 'TESTING':
+        if self.environment == 'testing':
             return
 
         # Check if command starts with !
