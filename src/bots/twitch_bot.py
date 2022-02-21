@@ -1,7 +1,9 @@
 import datetime
 import json
 import os
+import sqlite3
 import time
+import traceback
 from abc import ABC
 from multiprocessing import Lock
 from typing import AnyStr, Tuple, Union, List
@@ -9,8 +11,8 @@ from typing import AnyStr, Tuple, Union, List
 import aiohttp
 from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
-from twitchio import Message, Channel, Chatter
-from twitchio.ext import commands
+from twitchio import Message, Channel, Chatter, User
+from twitchio.ext import commands, routines
 
 from helpers.beatmap_link_parser import parse_beatmap_link
 from helpers.database_helper import UserDatabase, StatisticsDatabase
@@ -36,16 +38,6 @@ class TwitchBot(commands.Bot, ABC):
         self.messages_db = StatisticsDatabase()
         self.osu_api = OsuApi(self.messages_db)
 
-        self.environment = os.getenv('ENVIRONMENT')
-        self.initial_channel_ids = initial_channel_ids
-        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
-        self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
-        self.signup_queue_name = 'bot-signups'
-        self.signup_reply_queue_name = 'bot-signups-reply'
-        self.twitch_to_irc_queue_name = 'twitch-to-irc'
-        self.all_user_details = []
-        self.channel_names = []
-
         args = {
             'token': os.getenv('TMI_TOKEN'),
             'client_id': os.getenv('TWITCH_CLIENT_ID'),
@@ -54,6 +46,16 @@ class TwitchBot(commands.Bot, ABC):
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
+
+        self.environment = os.getenv('ENVIRONMENT')
+        self.connected_channel_ids = initial_channel_ids
+        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
+        self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
+        self.signup_queue_name = 'bot-signups'
+        self.signup_reply_queue_name = 'bot-signups-reply'
+        self.twitch_to_irc_queue_name = 'twitch-to-irc'
+        self.all_user_details = []
+        self.channel_names = []
 
         self._join_lock = join_lock
 
@@ -67,7 +69,7 @@ class TwitchBot(commands.Bot, ABC):
         Start a queue listener for messages from the website sign-up.
         """
         # Each instance of bot can only have one 100 users.
-        if len(self.initial_channel_ids) == 100:
+        if len(self.connected_channel_ids) == 100:
             logger.info('Reached 100 members, stopped listening to sign-up queue.')
             return
 
@@ -84,7 +86,7 @@ class TwitchBot(commands.Bot, ABC):
                         logger.info(f'Sending reply message: {reply_message}')
                         await sender.send_messages(reply_message)
 
-                        if len(self.initial_channel_ids) == 100:
+                        if len(self.connected_channel_ids) == 100:
                             logger.info('Reached 100 members, sending manager signal to create a new process.')
                             bot_full_message = ServiceBusMessage("bot-full")
                             await sender.send_messages(bot_full_message)
@@ -105,6 +107,7 @@ class TwitchBot(commands.Bot, ABC):
         osu_id = message_dict['osu_id']
         twitch_id = message_dict['twitch_id']
 
+        self.connected_channel_ids.append(twitch_id)
         await self.users_db.add_user(twitch_username=twitch_username,
                                      twitch_id=twitch_id,
                                      osu_username=osu_username,
@@ -434,8 +437,8 @@ class TwitchBot(commands.Bot, ABC):
 
         logger.info(f'Successfully initialized databases!')
 
-        logger.debug(f'Populating users: {self.initial_channel_ids}')
-        self.channel_names = await self.fetch_users(ids=self.initial_channel_ids)
+        logger.debug(f'Populating users: {self.connected_channel_ids}')
+        self.channel_names = await self.fetch_users(ids=self.connected_channel_ids)
         channels_to_join = [ch.name for ch in self.channel_names]
 
         logger.debug(f'Joining channels: {channels_to_join}')
@@ -451,4 +454,70 @@ class TwitchBot(commands.Bot, ABC):
             logger.debug(f'Successfully loaded: {extension}')
 
         self.loop.create_task(self.servicebus_message_receiver())
+        self.routine_update_user_information.start(stop_on_error=False)
         logger.info(f'Ready | {self.nick}')
+
+    @routines.routine(hours=1)
+    async def routine_update_user_information(self):
+        """
+        Checks and updates user information changes. This routine runs every hour.
+        :return:
+        """
+        logger.debug('Updating user information...')
+        connected_users = await self.users_db.get_multiple_users(self.connected_channel_ids)
+        twitch_users = await self.fetch_users(ids=self.connected_channel_ids)
+        twitch_users_by_id = {user.id: user for user in twitch_users}
+
+        if len(twitch_users) != len(connected_users):
+            connected_users = await self.handle_banned_users(connected_users, twitch_users)
+
+        for user in connected_users:
+            osu_info = await self.osu_api.get_user_info(user['osu_username'])
+            twitch_info = twitch_users_by_id[int(user['twitch_id'])]
+            await self.update_user_db_info(user, osu_info, twitch_info)
+
+    @routine_update_user_information.error
+    async def routine_update_user_information_error(error: Exception):
+        logger.error(f'Error while updating user information: {error}')
+        traceback.print_exc()
+
+    async def update_user_db_info(self, user: dict, osu_info: dict, twitch_info: User):
+        """
+        Update user information in database
+        :param user: User to update
+        :param osu_info: Osu! user info
+        :param twitch_info: Twitch user info
+        :return:
+        """
+        osu_user_id = osu_info['user_id']
+        osu_username = osu_info['username']
+        twitch_name = twitch_info.name
+        twitch_id = twitch_info.id
+        await self.users_db.update_user(new_twitch_username=twitch_name, new_osu_username=osu_username,
+                                        osu_user_id=osu_user_id, twitch_id=twitch_id)
+        logger.info(
+            f'Updated user information for {user["twitch_username"]}: '
+            f'{osu_username} | {twitch_name} | {twitch_id} | {osu_user_id}')
+
+    async def handle_banned_users(self, connected_users: List[sqlite3.Row], twitch_users: List[User]) -> \
+            List[sqlite3.Row]:
+        """
+        Removes banned users from self.connected_channel_ids and updates the database.
+        :param connected_users: List of connected users
+        :param twitch_users: List of twitch users
+        :return:
+        """
+        logger.debug('Handling banned users...')
+        twitch_user_ids = [str(user.id) for user in twitch_users]
+        existing_users = []
+        # Run through connected users and check if they are in the list of twitch users
+        for connected_user in connected_users:
+            if connected_user['twitch_id'] not in twitch_user_ids:
+                logger.debug(f'{connected_user["twitch_username"]} does not exist anymore!')
+                self.connected_channel_ids.remove(connected_user['twitch_id'])
+                await self.users_db.remove_user(connected_user['twitch_username'])
+            else:
+                existing_users.append(connected_user)
+
+        logger.debug(f'{len(existing_users)} users are still connected.')
+        return existing_users

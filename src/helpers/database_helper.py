@@ -166,6 +166,17 @@ class UserDatabase(BaseDatabase):
         await self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
         await self.conn.commit()
 
+    async def get_multiple_users(self, twitch_ids: List[int]) -> List[sqlite3.Row]:
+        """
+        Gets multiple users from database
+        :param twitch_ids: List of twitch ids
+        :return: List of users
+        """
+        query = f"SELECT * FROM users WHERE twitch_id IN ({','.join('?' for i in twitch_ids)})"
+        result = await self.c.execute(query, twitch_ids)
+        users = await result.fetchall()
+        return users
+
     async def get_user_from_osu_username(self, osu_username: str) -> sqlite3.Row:
         """
         Gets the user details from database using osu username
