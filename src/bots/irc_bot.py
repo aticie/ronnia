@@ -104,7 +104,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         else:
             # Check if command is valid
             try:
-                self._commands[cmd](e, *args, user_details=existing_user)
+                await self._commands[cmd](e, *args, user_details=existing_user)
             except KeyError:
                 self.send_message(e.source.nick, f'Sorry, I couldn\'t understand what {cmd} means')
 
