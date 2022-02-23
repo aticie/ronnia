@@ -10,7 +10,11 @@
 
 Ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the streamer's in-game messages.
 
-# [Ronnia Dashboard](https://github.com/aticie/ronnia-web)
+# Usage✍️
+
+### [Sign-up for the testing version from here!](https://testing.ronnia.me/)
+
+# [Ronnia Dashboard](https://github.com/aticie/ronnia-web) 📋
 
 Ronnia Dashboard is available at https://ronnia.me/
 
@@ -22,14 +26,6 @@ I am using [Azure Service Bus](https://azure.microsoft.com/en-us/services/servic
 very useful when scaling up the user limit of the bot. If you are not familiar with it and want to host the bot yourself,
 you can use the self-host implementation from [this repository](https://github.com/aticie/ronnia-selfhost). It's much 
 easier to use and has built binaries.
-
-## Usage✍️
-
-### [Sign-ups for the testing version are available](https://testing.ronnia.me/)
-
-After signing up you can:
-
-[Check out the commands that you can use!](https://github.com/aticie/ronnia/wiki/Commands)
 
 ## FAQ 🙋❓
 
