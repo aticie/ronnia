@@ -29,7 +29,7 @@ class AdminCog(commands.Cog):
 
         twitch_id = twitch_user_info[0].id
         osu_user_id = osu_user_info['user_id']
-        self.bot.users_db.add_user(osu_username=osu_username, twitch_username=twitch_username,
+        await self.bot.users_db.add_user(osu_username=osu_username, twitch_username=twitch_username,
                                    twitch_id=twitch_id, osu_user_id=osu_user_id)
         await self.bot.join_channels([twitch_username])
         logger.info(f'Adding {twitch_username} - {osu_username} to user database!')
@@ -40,7 +40,7 @@ class AdminCog(commands.Cog):
 
         twitch_username = args[0].lower()
 
-        self.bot.users_db.remove_user(twitch_username=twitch_username)
+        await self.bot.users_db.remove_user(twitch_username=twitch_username)
         await self.bot.part_channel([twitch_username])
         await ctx.send(f'Removed {twitch_username}.')
         logger.info(f'Removed {twitch_username}!')
