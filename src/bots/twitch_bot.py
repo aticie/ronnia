@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -16,11 +17,10 @@ from twitchio.ext import commands, routines
 
 from helpers.beatmap_link_parser import parse_beatmap_link
 from helpers.database_helper import UserDatabase, StatisticsDatabase
-from helpers.logger import RonniaLogger
 from helpers.osu_api_helper import OsuApi
 from helpers.utils import convert_seconds_to_readable
 
-logger = RonniaLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class TwitchBot(commands.Bot, ABC):

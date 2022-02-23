@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import traceback
@@ -11,9 +12,8 @@ from azure.servicebus.aio import ServiceBusClient
 from irc.client import Event, ServerConnection
 
 from helpers.database_helper import UserDatabase, StatisticsDatabase
-from helpers.logger import RonniaLogger
 
-logger = RonniaLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @attr.s
@@ -23,11 +23,10 @@ class RangeInput(object):
 
 
 class IrcBot(irc.bot.SingleServerIRCBot):
-    def __init__(self, channel, nickname, server, port=6667, password=None):
+    def __init__(self, nickname, server, port=6667, password=None):
         reconnect_strategy = irc.bot.ExponentialBackoff(min_interval=5, max_interval=30)
         irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname,
                                             recon=reconnect_strategy)
-        self.channel = channel
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
 
@@ -66,8 +65,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
             self.send_message(target_channel, message_contents)
 
     def on_welcome(self, c: ServerConnection, e: Event):
-        c.join(self.channel)
-        logger.info(f"Joined channel {self.channel}")
+        logger.info(f"Successfully connected to osu! irc as: {self._nickname}")
 
     def send_message(self, target: str, cmd: str):
         target = target.replace(" ", "_")

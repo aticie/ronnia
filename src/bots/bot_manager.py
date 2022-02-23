@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import logging
 import os
 import sqlite3
 from itertools import islice
@@ -16,9 +17,8 @@ from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
 from bots.irc_bot import IrcBot
 from bots.twitch_bot import TwitchBot
-from helpers.logger import RonniaLogger
 
-logger = RonniaLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def batcher(iterable, batch_size):
@@ -80,7 +80,7 @@ class IRCProcess(Process):
         self.bot = None
 
     def initialize(self) -> None:
-        self.bot = IrcBot("#osu", os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
+        self.bot = IrcBot(os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
 
     def run(self) -> None:
         self.initialize()
@@ -114,7 +114,8 @@ class BotManager:
                                   }
 
         self.servicebus_mgmt = ServiceBusAdministrationClient.from_connection_string(self.servicebus_connection_string)
-        self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
+        self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string,
+                                                                         logging_enable=True)
 
         self.create_new_instance: bool = False
 
@@ -175,12 +176,16 @@ class BotManager:
         """
         Receives messages from bot reply queue
         """
-        async with self.servicebus_client.get_queue_receiver(self.servicebus_bot_reply_queue_name) as receiver:
-            logger.info(f"Receiver started for {self.servicebus_bot_reply_queue_name}")
-            async for message in receiver:
-                logger.info(f"Received message from bot reply queue: {str(message)}")
-                await self.process_bot_reply(message)
-                await receiver.complete_message(message)
+        while True:
+            async with self.servicebus_client.get_queue_receiver(self.servicebus_bot_reply_queue_name) as receiver:
+                logger.info(f"Receiver started for {self.servicebus_bot_reply_queue_name}")
+                async for message in receiver:
+                    logger.info(f"Received message from bot reply queue: {str(message)}")
+                    await self.process_bot_reply(message)
+                    await receiver.complete_message(message)
+
+                logger.error('Exited bot reply receiver for unknown reason.')
+                logger.error(f'{receiver.__dict__}')
 
     async def process_bot_reply(self, message: ServiceBusMessage):
         """
@@ -210,12 +215,16 @@ class BotManager:
         Forwards incoming messages to the bot instance
         Replies to the webserver with a reply queue
         """
-        async with self.servicebus_client.get_queue_receiver(
-                queue_name=self.servicebus_webserver_queue_name) as receiver:
-            logger.info('Started servicebus receiver, listening for messages...')
-            async for message in receiver:
-                await self.parse_and_send_message(message)
-                await receiver.complete_message(message)
+        while True:
+            async with self.servicebus_client.get_queue_receiver(
+                    queue_name=self.servicebus_webserver_queue_name) as receiver:
+                logger.info('Started servicebus receiver, listening for messages...')
+                async for message in receiver:
+                    await self.parse_and_send_message(message)
+                    await receiver.complete_message(message)
+
+                logger.error(f'Exited webserver receiver for unknown reason.')
+                logger.error(f'{receiver.__dict__}')
 
     async def parse_and_send_message(self, message):
         """

@@ -4,7 +4,10 @@ import os
 
 class RonniaLogger(object):
     def __new__(cls, name, *args, **kwargs):
-        logger = logging.getLogger(name)
+        if os.getenv('ENVIRONMENT') == 'testing':
+            logger = logging.getLogger()
+        else:
+            logger = logging.getLogger(name)
         logger.setLevel(os.getenv('LOG_LEVEL', 'INFO').upper())
         loggers_formatter = logging.Formatter(
             '%(asctime)s | %(levelname)s | %(process)d | %(name)s | %(funcName)s | %(message)s',
