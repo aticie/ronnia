@@ -405,20 +405,16 @@ class TwitchBot(commands.Bot, ABC):
         difficultyrating = float(beatmap_info['difficultyrating'])
         beatmap_id = beatmap_info['beatmap_id']
         beatmap_length = convert_seconds_to_readable(beatmap_info['hit_length'])
-        beatmap_info = f"[http://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] ({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
+        beatmap_info = f"[https://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] " \
+                       f"({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
         extra_postfix = ""
         extra_prefix = ""
 
-        # TODO: Check if this issue is fixed in next twitchio
-        try:
-            badges = message.author.badges
-        except ValueError:
-            badges = []
+        badges = message.author.badges
 
         if message.author.is_mod:
             extra_prefix += "[MOD] "
-        elif message.author.is_subscriber != '0':
-            # TODO: Check if this conditional changed in the next releases of tio
+        elif message.author.is_subscriber:
             extra_prefix += "[SUB] "
         elif 'vip' in badges:
             extra_prefix += "[VIP] "

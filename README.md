@@ -10,7 +10,7 @@
 
 Ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the streamer's in-game messages.
 
-# Ronnia Dashboard - https://github.com/aticie/ronnia-web
+# [Ronnia Dashboard](https://github.com/aticie/ronnia-web)
 
 Ronnia Dashboard is available at https://ronnia.me/
 
@@ -18,14 +18,14 @@ Registered streamers can now change their settings from website instead of IRC c
 
 ## Disclaimer 📝
 
-Currently, the bot runs under my personal account `heyronii`. I'm planning to change its name to `Ronnia` when I can get
-a bot account on osu!. The only criteria I haven't met is the 6 months criteria. (Running since 2021/02/19)
+I am using [Azure Service Bus](https://azure.microsoft.com/en-us/services/service-bus/) in this project. I found it 
+very useful when scaling up the user limit of the bot. If you are not familiar with it and want to host the bot yourself,
+you can use the self-host implementation from [this repository](https://github.com/aticie/ronnia-selfhost). It's much 
+easier to use and has built binaries.
 
 ## Usage✍️
 
-### Sign-ups are closed until I fix an issue with Twitch.
-
-Right now, the bot gets randomly disconnected from channels due to [this issue](https://discuss.dev.twitch.tv/t/verified-bot-randomly-disconnected/28927). I'm working on fixing it, until then I can't allow any more people sign-up because if I do, the disconnects will occur more frequently.
+### [Sign-ups for the testing version are available](https://testing.ronnia.me/)
 
 After signing up you can:
 
@@ -40,6 +40,8 @@ After signing up you can:
 - Streamer must be playing osu!
 - You should not request more than 1 map per 30 seconds.
 - Make sure you are not the streamer. (Some streamers have self-np bots)
+
+**These restrictions are not applied to the testing version.** 
 
 **Q:** How do I get this bot on my channel?
 
@@ -75,40 +77,9 @@ Library requirements can be installed with:
 
 ### Hosting the bot
 
-To host the bot, clone this repository. Create a .env file at the root folder with the following environment variables:
+Please use the self-host version of the bot. 
 
-```dosini
-TMI_TOKEN=****  # Get your credentials from here https://twitchapps.com/tmi/
-CLIENT_ID=****  # Get these from https://dev.twitch.tv/console
-CLIENT_SECRET=****
-BOT_NICK=heyronii  # Change this to your Twitch username
-BOT_PREFIX=!  # Twitch and osu! bot prefix for commands
-OSU_USERNAME=heyronii  # Change this to your osu! username
-IRC_PASSWORD=****  # Get yours from here: https://osu.ppy.sh/p/irc
-OSU_API_KEY=****  # Get yours from here: https://osu.ppy.sh/p/api
-LOG_LEVEL=INFO  # https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here
-DB_DIR=mount/  # Change this to a folder that you can store .db files in
-```
-
-Run:
-
-`python main.py`
-
-The bot will be listening to messages on your channel. You can add your osu account with using twitch chat:
-
-`!adduser <twitch_username> <osu_username>`
-
-If you want to enable test mode, you can use:
-
-`!test <twitch_username>`
-
-Test mode:
-- allows the broadcaster to request beatmaps
-- allows beatmap requests when stream is offline
-- allows excluded users to request beatmaps
-- disables 30 sec cooldown
-- ignores sub-only, channel points only modes
-- ignores star rating limits
+https://github.com/aticie/ronnia-selfhost
 
 ### Docker 🐳
 #### Build and Run
@@ -116,23 +87,38 @@ To use docker either build dockerfile and supply a .env file for running:
 
 `docker build -t ronnia-bot .`and `docker run --name ronnia --env-file .env ronnia-bot`
 
-#### Docker Hub releases
+#### ~~Docker Hub Releases [Deprecated]~~
 
-Releases from 1.1.0 and onwards are published to Docker hub automatically. 
-[You can find the repository here.](https://hub.docker.com/r/eatici/ronnia)
+Releases from 1.1.0 and onwards are published to Docker hub automatically.
 
-Use the release tag you want to use in docker-compose with the given template. 
+I changed the cloud build provider to [Google Cloud Build](https://cloud.google.com/docs/build/quickstart-build). 
+Versions 2.0.0 and above will be published to Google Cloud Container Registry automatically.
 
-```yaml
-...
-services:
-  ronnia-bot:
-    build: .
-    image: eatici/ronnia:release-v1.x.x <- change the tag here!
+Environment variables required to run both the bot and the website are:
+
 ```
+OSU_CLIENT_ID=****  # Create a client from osu! settings 
+OSU_CLIENT_SECRET=****
+OSU_REDIRECT_URI=****
+OSU_USERNAME=heyronii  # Change this to your osu! username
+OSU_API_KEY=****  # Get yours from here: https://osu.ppy.sh/p/api
+IRC_PASSWORD=****  # Get yours from here: https://osu.ppy.sh/p/irc
 
-Set the fields in `<>` tags according to your setup. For examples look at [Hosting the bot](https://github.com/aticie/ronnia#hosting-the-bot).
+TWITCH_CLIENT_ID=****  # Get these from https://dev.twitch.tv/console
+TWITCH_CLIENT_SECRET=****
+TWITCH_REDIRECT_URI=****
+TMI_TOKEN=****  # Get your credentials from here https://twitchapps.com/tmi/
+BOT_NICK=ronnia_testing  # Change this to your Twitch username
+BOT_PREFIX=!  # Twitch and osu! bot prefix for commands
 
-Run the bot:
+JWT_SECRET_KEY=****  # Create a random key, doesn't matter what it is
+JWT_ALGORITHM=HS256
 
-`docker-compose up -d`
+SERVICE_BUS_CONNECTION_STR=Endpoint=sb://... # Get yours from azure portal: https://azure.microsoft.com/en-us/services/service-bus/
+
+PUBLISH_PORT=9000 
+DB_DIR=/mount
+ENVIRONMENT=testing  # testing or production
+PYTHONUNBUFFERED=1
+LOG_LEVEL=DEBUG  # https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here
+```
