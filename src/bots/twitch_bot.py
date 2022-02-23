@@ -136,6 +136,7 @@ class TwitchBot(commands.Bot, ABC):
         return response_json['access_token']
 
     async def event_message(self, message: Message):
+        logger.debug(f"{message.channel.name} - {message.author.name}: {message.content}")
         if message.author is None:
             return
 
@@ -148,7 +149,6 @@ class TwitchBot(commands.Bot, ABC):
             await self.messages_db.add_error('internal_check', str(e))
 
     async def handle_request(self, message: Message):
-        logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
             await self._check_user_cooldown(message.author)
