@@ -75,7 +75,7 @@ class TwitchBot(commands.Bot, ABC):
             logger.info('Reached 100 members, stopped listening to sign-up queue.')
             return
 
-        logger.debug(f'Starting service bus message receiver')
+        logger.info(f'Starting service bus message receiver')
         while True:
             try:
                 async with self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name) as receiver:
@@ -87,11 +87,11 @@ class TwitchBot(commands.Bot, ABC):
                         async with ServiceBusClient.from_connection_string(
                                 conn_str=self.servicebus_connection_string) as servicebus_client:
                             async with servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name) as sender:
-                                logger.info(f'Sending reply message: {reply_message}')
+                                logger.info(f'Sending reply message to sign-up queue: {reply_message}')
                                 await sender.send_messages(reply_message)
 
                                 if len(self.connected_channel_ids) == 100:
-                                    logger.info('Reached 100 members, sending manager signal to create a new process.')
+                                    logger.warning('Reached 100 members, sending manager signal to create a new process.')
                                     bot_full_message = ServiceBusMessage("bot-full")
                                     await sender.send_messages(bot_full_message)
                                     return
@@ -145,16 +145,17 @@ class TwitchBot(commands.Bot, ABC):
         return response_json['access_token']
 
     async def event_message(self, message: Message):
-        logger.debug(f"{message.channel.name} - {message.author.name}: {message.content}")
         if message.author is None:
+            logger.info(f"{message.channel.name}: {message.content}")
             return
+        logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
 
         await self.handle_commands(message)
         try:
             await self.check_channel_enabled(message.channel.name)
             await self.handle_request(message)
         except AssertionError as e:
-            logger.debug(f'Check unsuccessful: {e}')
+            logger.info(f'Check unsuccessful: {e}')
             await self.messages_db.add_error('internal_check', str(e))
 
     async def handle_request(self, message: Message):
@@ -164,7 +165,6 @@ class TwitchBot(commands.Bot, ABC):
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
-                await self._update_channel(message)
                 # If user has enabled echo setting, send twitch chat a message
                 if await self.users_db.get_echo_status(twitch_username=message.channel.name):
                     await self._send_twitch_message(message, beatmap_info)
@@ -174,18 +174,6 @@ class TwitchBot(commands.Bot, ABC):
                                                    requested_channel_name=message.channel.name,
                                                    requester_channel_name=message.author.name,
                                                    mods=given_mods)
-
-    async def inform_user_on_updates(self, osu_username: str, twitch_username: str, is_updated: bool):
-        if not is_updated:
-            message_txt_path = os.path.join(os.getenv('DB_DIR'), 'update_message.txt')
-            if os.path.exists(message_txt_path):
-                with open(message_txt_path) as f:
-                    update_message = f.read().strip()
-                await self._send_irc_message(osu_username, update_message)
-            else:
-                logger.warning(f'Looking for {message_txt_path}, but it does not exist!')
-            await self.users_db.set_channel_updated(twitch_username)
-        return
 
     async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         twitch_username = message.channel.name
@@ -238,19 +226,6 @@ class TwitchBot(commands.Bot, ABC):
         logger.error(error)
         await self.messages_db.add_error(error_type='twitch_command_error', error_text=str(error))
         pass
-
-    async def _update_channel(self, message: Message):
-        """
-        Updates the user about news
-        """
-
-        logger.info('Updating user with the latest news!')
-        # Get current channel details from db
-        channel_details = await self.users_db.get_user_from_twitch_username(twitch_username=message.channel.name)
-        twitch_username = channel_details['twitch_username']
-        is_channel_updated = channel_details['enabled']
-        await self.inform_user_on_updates(channel_details['osu_username'], twitch_username, is_channel_updated)
-        return
 
     async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_user_id=None, twitch_username=None):
 
@@ -362,7 +337,7 @@ class TwitchBot(commands.Bot, ABC):
             sender = sb_client.get_queue_sender(queue_name=self.twitch_to_irc_queue_name)
             msg = ServiceBusMessage(message)
             await sender.send_messages(msg)
-            logger.debug(f'Sending message from twitch to irc: {message}')
+            logger.info(f'Sending message from twitch to irc: {message}')
 
     @staticmethod
     async def _send_twitch_message(message: Message, beatmap_info: dict):
@@ -392,10 +367,10 @@ class TwitchBot(commands.Bot, ABC):
         for candidate_link in content.split(' '):
             result, mods = parse_beatmap_link(candidate_link, content)
             if result:
-                logger.debug(f"Found beatmap id: {result}")
+                logger.info(f"Found beatmap id: {result}")
                 return mods, result
         else:
-            logger.debug("Couldn't find beatmap in message")
+            logger.info("Couldn't find beatmap in message")
             return None, None
 
     async def _prepare_irc_message(self, message: Message, beatmap_info: dict, given_mods: str):
@@ -440,13 +415,13 @@ class TwitchBot(commands.Bot, ABC):
         await self.users_db.initialize()
         await self.messages_db.initialize()
 
-        logger.info(f'Successfully initialized databases!')
+        logger.debug(f'Successfully initialized databases!')
 
         logger.debug(f'Populating users: {self.connected_channel_ids}')
         self.channel_names = await self.fetch_users(ids=self.connected_channel_ids)
         channels_to_join = [ch.name for ch in self.channel_names]
 
-        logger.debug(f'Joining channels: {channels_to_join}')
+        logger.info(f'Joining channels: {channels_to_join}')
         # Join channels
         channel_join_start = time.time()
         await self.join_channels(channels_to_join)
@@ -456,7 +431,7 @@ class TwitchBot(commands.Bot, ABC):
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)
-            logger.debug(f'Successfully loaded: {extension}')
+            logger.info(f'Successfully loaded: {extension}')
 
         self.loop.create_task(self.servicebus_message_receiver())
         self.routine_update_user_information.start(stop_on_error=False)
@@ -518,11 +493,11 @@ class TwitchBot(commands.Bot, ABC):
         # Run through connected users and check if they are in the list of twitch users
         for connected_user in connected_users:
             if connected_user['twitch_id'] not in twitch_user_ids:
-                logger.debug(f'{connected_user["twitch_username"]} does not exist anymore!')
+                logger.info(f'{connected_user["twitch_username"]} does not exist anymore!')
                 self.connected_channel_ids.remove(connected_user['twitch_id'])
                 await self.users_db.remove_user(connected_user['twitch_username'])
             else:
                 existing_users.append(connected_user)
 
-        logger.debug(f'{len(existing_users)} users are still connected.')
+        logger.info(f'{len(existing_users)} users are still connected.')
         return existing_users

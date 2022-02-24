@@ -50,7 +50,7 @@ class IrcBot(irc.bot.SingleServerIRCBot):
     def start(self):
         self._loop.run_until_complete(self.users_db.initialize())
         self._loop.run_until_complete(self.messages_db.initialize())
-        logger.info(f"Successfully initialized databases!")
+        logger.debug(f"Successfully initialized databases!")
         servicebus_task = self._loop.create_task(self.receive_servicebus_queue())
         super_start_future = self._loop.run_in_executor(None, super().start)
         self._loop.run_until_complete(asyncio.gather(servicebus_task, super_start_future, loop=self._loop))
