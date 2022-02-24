@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import logging
@@ -12,6 +13,7 @@ from typing import AnyStr, Tuple, Union, List
 import aiohttp
 from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
+from azure.servicebus.exceptions import ServiceBusError
 from twitchio import Message, Channel, Chatter, User
 from twitchio.ext import commands, routines
 
@@ -74,23 +76,30 @@ class TwitchBot(commands.Bot, ABC):
             return
 
         logger.debug(f'Starting service bus message receiver')
-        async with self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name) as receiver:
-            async for message in receiver:
-                logger.info(f'Received sign-up message: {message}')
-                reply_message = await self.receive_and_parse_message(message)
-                await receiver.complete_message(message)
+        while True:
+            try:
+                async with self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name) as receiver:
+                    async for message in receiver:
+                        logger.info(f'Received sign-up message: {message}')
+                        reply_message = await self.receive_and_parse_message(message)
+                        await receiver.complete_message(message)
 
-                async with ServiceBusClient.from_connection_string(
-                        conn_str=self.servicebus_connection_string) as servicebus_client:
-                    async with servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name) as sender:
-                        logger.info(f'Sending reply message: {reply_message}')
-                        await sender.send_messages(reply_message)
+                        async with ServiceBusClient.from_connection_string(
+                                conn_str=self.servicebus_connection_string) as servicebus_client:
+                            async with servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name) as sender:
+                                logger.info(f'Sending reply message: {reply_message}')
+                                await sender.send_messages(reply_message)
 
-                        if len(self.connected_channel_ids) == 100:
-                            logger.info('Reached 100 members, sending manager signal to create a new process.')
-                            bot_full_message = ServiceBusMessage("bot-full")
-                            await sender.send_messages(bot_full_message)
-                            return
+                                if len(self.connected_channel_ids) == 100:
+                                    logger.info('Reached 100 members, sending manager signal to create a new process.')
+                                    bot_full_message = ServiceBusMessage("bot-full")
+                                    await sender.send_messages(bot_full_message)
+                                    return
+            except ServiceBusError as e:
+                logger.error(f'Twitch bot receiver error: {e}')
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(5)
+
 
     async def receive_and_parse_message(self, message):
         """

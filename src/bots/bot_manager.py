@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import traceback
 from itertools import islice
 from json import JSONDecodeError
 from multiprocessing import Process, Lock
@@ -12,6 +13,7 @@ from typing import List
 import requests
 from azure.core.exceptions import ResourceNotFoundError
 from azure.servicebus import ServiceBusMessage
+from azure.servicebus.exceptions import ServiceBusError
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
@@ -177,15 +179,20 @@ class BotManager:
         Receives messages from bot reply queue
         """
         while True:
-            async with self.servicebus_client.get_queue_receiver(self.servicebus_bot_reply_queue_name) as receiver:
-                logger.info(f"Receiver started for {self.servicebus_bot_reply_queue_name}")
-                async for message in receiver:
-                    logger.info(f"Received message from bot reply queue: {str(message)}")
-                    await self.process_bot_reply(message)
-                    await receiver.complete_message(message)
+            try:
+                async with self.servicebus_client.get_queue_receiver(self.servicebus_bot_reply_queue_name) as receiver:
+                    logger.info(f"Receiver started for {self.servicebus_bot_reply_queue_name}")
+                    async for message in receiver:
+                        logger.info(f"Received message from bot reply queue: {str(message)}")
+                        await self.process_bot_reply(message)
+                        await receiver.complete_message(message)
 
-                logger.error('Exited bot reply receiver for unknown reason.')
-                logger.error(f'{receiver.__dict__}')
+                    logger.error('Exited bot reply receiver for unknown reason.')
+                    logger.error(f'{receiver.__dict__}')
+            except ServiceBusError as e:
+                logger.error(f"Error in bot reply receiver: {e}")
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(5)
 
     async def process_bot_reply(self, message: ServiceBusMessage):
         """
@@ -216,15 +223,20 @@ class BotManager:
         Replies to the webserver with a reply queue
         """
         while True:
-            async with self.servicebus_client.get_queue_receiver(
-                    queue_name=self.servicebus_webserver_queue_name) as receiver:
-                logger.info('Started servicebus receiver, listening for messages...')
-                async for message in receiver:
-                    await self.parse_and_send_message(message)
-                    await receiver.complete_message(message)
+            try:
+                async with self.servicebus_client.get_queue_receiver(
+                        queue_name=self.servicebus_webserver_queue_name) as receiver:
+                    logger.info('Started servicebus receiver, listening for messages...')
+                    async for message in receiver:
+                        await self.parse_and_send_message(message)
+                        await receiver.complete_message(message)
 
-                logger.error(f'Exited webserver receiver for unknown reason.')
-                logger.error(f'{receiver.__dict__}')
+                    logger.error(f'Exited webserver receiver for unknown reason.')
+                    logger.error(f'{receiver.__dict__}')
+            except ServiceBusError as e:
+                logger.error(f"Error in webserver receiver: {e}")
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(5)
 
     async def parse_and_send_message(self, message):
         """

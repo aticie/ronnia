@@ -9,6 +9,7 @@ from typing import Union
 import attr
 import irc.bot
 from azure.servicebus.aio import ServiceBusClient
+from azure.servicebus.exceptions import ServiceBusError
 from irc.client import Event, ServerConnection
 
 from helpers.database_helper import UserDatabase, StatisticsDatabase
@@ -55,14 +56,20 @@ class IrcBot(irc.bot.SingleServerIRCBot):
         self._loop.run_until_complete(asyncio.gather(servicebus_task, super_start_future, loop=self._loop))
 
     async def receive_servicebus_queue(self):
-        logger.info('Starting to listen to queue')
-        receiver = self.servicebus_client.get_queue_receiver(queue_name=self.listen_queue_name)
-        async for message in receiver:
-            logger.info(f'Received message from service bus: {str(message)}')
-            message_dict = json.loads(str(message))
-            target_channel = message_dict['target_channel']
-            message_contents = message_dict['message']
-            self.send_message(target_channel, message_contents)
+        while True:
+            try:
+                logger.info('Starting to listen to queue')
+                receiver = self.servicebus_client.get_queue_receiver(queue_name=self.listen_queue_name)
+                async for message in receiver:
+                    logger.info(f'Received message from service bus: {str(message)}')
+                    message_dict = json.loads(str(message))
+                    target_channel = message_dict['target_channel']
+                    message_contents = message_dict['message']
+                    self.send_message(target_channel, message_contents)
+            except ServiceBusError as e:
+                logger.error(f'Error with the irc-bot receiver: {e}')
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(5)
 
     def on_welcome(self, c: ServerConnection, e: Event):
         logger.info(f"Successfully connected to osu! irc as: {self._nickname}")
