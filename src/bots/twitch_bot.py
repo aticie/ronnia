@@ -56,8 +56,6 @@ class TwitchBot(commands.Bot, ABC):
         self.signup_queue_name = 'bot-signups'
         self.signup_reply_queue_name = 'bot-signups-reply'
         self.twitch_to_irc_queue_name = 'twitch-to-irc'
-        self.all_user_details = []
-        self.channel_names = []
 
         self._join_lock = join_lock
 
@@ -65,6 +63,10 @@ class TwitchBot(commands.Bot, ABC):
         self.user_last_request = {}
 
         self.join_channels_first_time = True
+
+    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
+        with self._join_lock:
+            await super(TwitchBot, self).join_channels(channels)
 
     async def servicebus_message_receiver(self):
         """
@@ -418,15 +420,16 @@ class TwitchBot(commands.Bot, ABC):
         logger.debug(f'Successfully initialized databases!')
 
         logger.debug(f'Populating users: {self.connected_channel_ids}')
-        self.channel_names = await self.fetch_users(ids=self.connected_channel_ids)
-        channels_to_join = [ch.name for ch in self.channel_names]
+        channel_names = await self.fetch_users(ids=self.connected_channel_ids)
+        channels_to_join = [ch.name for ch in channel_names]
 
         logger.info(f'Joining channels: {channels_to_join}')
         # Join channels
         channel_join_start = time.time()
         await self.join_channels(channels_to_join)
 
-        logger.debug(f'Joined all channels after {time.time() - channel_join_start:.2f}s')
+        logger.info(f'Joined {len(self.connected_channels)} after {time.time() - channel_join_start:.2f}s')
+        logger.info(f'Connected channels: {self.connected_channels}')
 
         initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
         for extension in initial_extensions:
@@ -435,7 +438,26 @@ class TwitchBot(commands.Bot, ABC):
 
         self.loop.create_task(self.servicebus_message_receiver())
         self.routine_update_user_information.start(stop_on_error=False)
+        self.routine_show_connected_channels.start(stop_on_error=False)
+        self.routine_join_channels.start(stop_on_error=False)
+
+        logger.info(f'Successfully initialized bot!')
         logger.info(f'Ready | {self.nick}')
+
+    @routines.routine(seconds=10)
+    async def routine_show_connected_channels(self):
+        logger.info(f'Connected to channels: {self.connected_channels}')
+
+    @routines.routine(hours=1)
+    async def routine_join_channels(self):
+        logger.debug('Started join channels routine')
+        if self.join_channels_first_time:
+            self.join_channels_first_time = False
+            return
+        all_user_details = await self.users_db.get_multiple_users(twitch_ids=self.connected_channel_ids)
+        twitch_users = [user['twitch_username'] for user in all_user_details]
+        logger.debug(f'Joining: {twitch_users}')
+        await self.join_channels(twitch_users)
 
     @routines.routine(hours=1)
     async def routine_update_user_information(self):
