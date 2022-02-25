@@ -161,7 +161,6 @@ class TwitchBot(commands.Bot, ABC):
     async def handle_request(self, message: Message):
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
-            await self._check_user_cooldown(message.author)
             beatmap_info = await self.osu_api.get_beatmap_info(api_params)
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
@@ -195,6 +194,7 @@ class TwitchBot(commands.Bot, ABC):
         if not test_status and self.environment != 'testing':
             await self.check_if_author_is_broadcaster(message)
             await self.check_if_streaming_osu(message.channel)
+            await self._check_user_cooldown(message.author)
 
         await self.check_sub_only_mode(message)
         await self.check_cp_only_mode(message)
