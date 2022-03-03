@@ -120,3 +120,11 @@ ENVIRONMENT=testing  # testing or production
 PYTHONUNBUFFERED=1
 LOG_LEVEL=DEBUG  # https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here
 ```
+
+### Tests
+
+To run the tests, you need to add the `src` folder to the PYTHONPATH variable. You can do this by adding:
+
+`sys.path.insert(0, 'src')`
+
+to `run.py`.
