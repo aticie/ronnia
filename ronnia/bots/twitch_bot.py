@@ -17,10 +17,10 @@ from azure.servicebus.exceptions import ServiceBusError
 from twitchio import Message, Channel, Chatter, User
 from twitchio.ext import commands, routines
 
-from helpers.beatmap_link_parser import parse_beatmap_link
-from helpers.database_helper import UserDatabase, StatisticsDatabase
-from helpers.osu_api_helper import OsuApi
-from helpers.utils import convert_seconds_to_readable
+from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
+from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
+from ronnia.helpers.osu_api_helper import OsuApi
+from ronnia.helpers.utils import convert_seconds_to_readable
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +88,14 @@ class TwitchBot(commands.Bot, ABC):
 
                         async with ServiceBusClient.from_connection_string(
                                 conn_str=self.servicebus_connection_string) as servicebus_client:
-                            async with servicebus_client.get_queue_sender(queue_name=self.signup_reply_queue_name) as sender:
+                            async with servicebus_client.get_queue_sender(
+                                    queue_name=self.signup_reply_queue_name) as sender:
                                 logger.info(f'Sending reply message to sign-up queue: {reply_message}')
                                 await sender.send_messages(reply_message)
 
                                 if len(self.connected_channel_ids) == 100:
-                                    logger.warning('Reached 100 members, sending manager signal to create a new process.')
+                                    logger.warning(
+                                        'Reached 100 members, sending manager signal to create a new process.')
                                     bot_full_message = ServiceBusMessage("bot-full")
                                     await sender.send_messages(bot_full_message)
                                     return
@@ -101,7 +103,6 @@ class TwitchBot(commands.Bot, ABC):
                 logger.error(f'Twitch bot receiver error: {e}')
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(5)
-
 
     async def receive_and_parse_message(self, message):
         """

@@ -17,8 +17,8 @@ from azure.servicebus.exceptions import ServiceBusError
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
-from bots.irc_bot import IrcBot
-from bots.twitch_bot import TwitchBot
+from ronnia.bots.irc_bot import IrcBot
+from ronnia.bots.twitch_bot import TwitchBot
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ import os
 from twitchio.ext import commands
 from twitchio.ext.commands import Context
 
-from bots.twitch_bot import TwitchBot
+from ronnia.bots.twitch_bot import TwitchBot
 
 logger = logging.getLogger('ronnia')
 

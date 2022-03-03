@@ -1,7 +1,7 @@
 import attr
 from twitchio.ext import commands
 
-from bots.twitch_bot import TwitchBot
+from ronnia.bots.twitch_bot import TwitchBot
 
 
 @attr.s

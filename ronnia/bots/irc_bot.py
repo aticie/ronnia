@@ -12,7 +12,7 @@ from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.exceptions import ServiceBusError
 from irc.client import Event, ServerConnection
 
-from helpers.database_helper import UserDatabase, StatisticsDatabase
+from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 
 logger = logging.getLogger(__name__)
 

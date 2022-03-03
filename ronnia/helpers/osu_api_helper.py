@@ -7,7 +7,7 @@ from typing import Union
 
 import aiohttp
 
-from helpers.database_helper import StatisticsDatabase
+from ronnia.helpers.database_helper import StatisticsDatabase
 
 logger = logging.getLogger('ronnia')
 

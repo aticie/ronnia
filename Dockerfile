@@ -1,8 +1,8 @@
 FROM python:3.9.10-slim
 
-COPY src /src
+COPY ronnia /ronnia
 
-WORKDIR /src
+WORKDIR /ronnia
 
 RUN pip install -r requirements.txt
 
