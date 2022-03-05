@@ -66,6 +66,8 @@ class TwitchBot(commands.Bot, ABC):
 
     async def join_channels(self, channels: Union[List[str], Tuple[str]]):
         with self._join_lock:
+            # Wait for 10 seconds to be sure that we don't hit twitch's rate limit
+            await asyncio.sleep(10)
             await super(TwitchBot, self).join_channels(channels)
 
     async def servicebus_message_receiver(self):
@@ -445,20 +447,23 @@ class TwitchBot(commands.Bot, ABC):
         logger.info(f'Successfully initialized bot!')
         logger.info(f'Ready | {self.nick}')
 
-    @routines.routine(seconds=10)
+    @routines.routine(minutes=1)
     async def routine_show_connected_channels(self):
-        logger.info(f'Connected to channels: {self.connected_channels}')
+        connected_channel_names = [channel.name for channel in self.connected_channels]
+        logger.info(f'Connected channels: {connected_channel_names}')
 
     @routines.routine(hours=1)
     async def routine_join_channels(self):
-        logger.debug('Started join channels routine')
+        logger.info('Started join channels routine')
         if self.join_channels_first_time:
             self.join_channels_first_time = False
             return
         all_user_details = await self.users_db.get_multiple_users(twitch_ids=self.connected_channel_ids)
-        twitch_users = [user['twitch_username'] for user in all_user_details]
-        logger.debug(f'Joining: {twitch_users}')
-        await self.join_channels(twitch_users)
+        twitch_users = {user['twitch_username'] for user in all_user_details}
+        connected_channels = {chan.name for chan in self.connected_channels}
+        channels_to_join = list(twitch_users - connected_channels)
+        logger.info(f'Joining channels: {channels_to_join}')
+        await self.join_channels(channels_to_join)
 
     @routines.routine(hours=1)
     async def routine_update_user_information(self):
@@ -466,7 +471,7 @@ class TwitchBot(commands.Bot, ABC):
         Checks and updates user information changes. This routine runs every hour.
         :return:
         """
-        logger.debug('Updating user information...')
+        logger.info('Started user information update routine')
         connected_users = await self.users_db.get_multiple_users(self.connected_channel_ids)
         twitch_users = await self.fetch_users(ids=self.connected_channel_ids)
         twitch_users_by_id = {user.id: user for user in twitch_users}
