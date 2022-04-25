@@ -1,6 +1,6 @@
 import unittest
 
-from helpers.beatmap_link_parser import parse_single_beatmap, parse_beatmapset, get_mod_from_text
+from ronnia.helpers.beatmap_link_parser import parse_single_beatmap, parse_beatmapset, get_mod_from_text
 
 
 class TestBeatmapLinkParser(unittest.TestCase):
@@ -128,7 +128,6 @@ class TestBeatmapLinkParser(unittest.TestCase):
 
             self.assertEqual(expected_mods_int, mods_int)
             self.assertEqual(expected_mods_text, mods_text)
-
 
     def test_get_mod_from_text_returns_omits_multiple_of_same_mods(self):
         expected_mods_int = 64 + 8

@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from bots.twitch_bot import TwitchBot
+from ronnia.bots.twitch_bot import TwitchBot
 
 
 def Any(cls):

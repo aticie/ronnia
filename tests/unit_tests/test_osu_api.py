@@ -3,7 +3,7 @@ import time
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from helpers.osu_api_helper import OsuApi
+from ronnia.helpers.osu_api_helper import OsuApi
 
 
 class AsyncContextManagerMock(MagicMock):
@@ -28,7 +28,7 @@ class TestOsuApi(IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        statistics_db = MagicMock()
+        statistics_db = AsyncMock()
         cls.api = OsuApi(statistics_db)
         cls.api._cooldown_seconds = 0.1
 
@@ -68,51 +68,45 @@ class TestOsuApi(IsolatedAsyncioTestCase):
                                       'packs': None, 'max_combo': '887', 'diff_aim': '4.01978', 'diff_speed': '3.26121',
                                       'difficultyrating': '7.65575'}]
 
-    @patch('helpers.osu_api_helper.OsuApi._get_endpoint')
-    async def test_get_beatmap_info_returns_beatmap_dict(self, mock_get_endpoint: AsyncMock):
+    async def test_get_beatmap_info_returns_beatmap_dict(self):
         beatmap_id = '3311346'
         required_beatmap_info = {'beatmap_id': '3311346',
                                  'beatmapset_id': '1621894'}
 
-        mock_get_endpoint.return_value = self.mock_beatmap_response
+        self.api._get_endpoint = AsyncMock(return_value=self.mock_beatmap_response)
         beatmap_info = await self.api.get_beatmap_info({'b': beatmap_id})
         self.assertIsInstance(beatmap_info, dict)
 
         # Assert dict contains subset
         self.assertEqual(beatmap_info, beatmap_info | required_beatmap_info)
 
-    @patch('helpers.osu_api_helper.OsuApi._get_endpoint')
-    async def test_get_beatmap_info_returns_none_if_beatmap_id_not_found(self, mock_get_endpoint: AsyncMock):
+    async def test_get_beatmap_info_returns_none_if_beatmap_id_not_found(self):
         beatmap_id = '12345'
-        mock_get_endpoint.return_value = []
+        self.api._get_endpoint = AsyncMock(return_value=[])
         beatmap_info = await self.api.get_beatmap_info({'b': beatmap_id})
         self.assertIsNone(beatmap_info)
 
-    @patch('helpers.osu_api_helper.OsuApi._get_endpoint')
-    async def test_get_user_info_accepts_string_input(self, mock_get_endpoint: AsyncMock):
-        mock_get_endpoint.return_value = self.mock_user_response
+    async def test_get_user_info_accepts_string_input(self):
+        self.api._get_endpoint = AsyncMock(return_value=self.mock_user_response)
         await self.api.get_user_info('heyronii')
-        mock_get_endpoint.assert_called_once_with({'u': 'heyronii',
-                                                   'k': self.api._osu_api_key,
-                                                   'type': 'string'}, 'get_user')
+        self.api._get_endpoint.assert_called_once_with({'u': 'heyronii',
+                                                        'k': self.api._osu_api_key,
+                                                        'type': 'string'}, 'get_user')
 
-    @patch('helpers.osu_api_helper.OsuApi._get_endpoint')
-    async def test_get_user_info_accepts_integer_input(self, mock_get_endpoint: AsyncMock):
-        mock_get_endpoint.return_value = self.mock_user_response
+    async def test_get_user_info_accepts_integer_input(self):
+        self.api._get_endpoint = AsyncMock(return_value=self.mock_user_response)
         await self.api.get_user_info(5642779)
-        mock_get_endpoint.assert_called_once_with({'u': 5642779,
+        self.api._get_endpoint.assert_called_once_with({'u': 5642779,
                                                    'k': self.api._osu_api_key,
                                                    'type': 'id'}, 'get_user')
 
-    @patch('helpers.osu_api_helper.OsuApi._get_endpoint')
-    async def test_get_user_info_returns_user_dict(self, mock_get_endpoint: AsyncMock):
-        mock_get_endpoint.return_value = self.mock_user_response
+    async def test_get_user_info_returns_user_dict(self):
+        self.api._get_endpoint = AsyncMock(return_value=self.mock_user_response)
         user_info = await self.api.get_user_info(5642779)
         self.assertIsInstance(user_info, dict)
 
-    @patch('helpers.osu_api_helper.OsuApi._get_endpoint')
-    async def test_get_user_info_returns_none_if_user_not_found(self, mock_get_endpoint: AsyncMock):
-        mock_get_endpoint.return_value = []
+    async def test_get_user_info_returns_none_if_user_not_found(self):
+        self.api._get_endpoint = AsyncMock(return_value=[])
         user_info = await self.api.get_user_info(4)
         self.assertIsNone(user_info)
 

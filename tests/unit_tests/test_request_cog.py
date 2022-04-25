@@ -1,15 +1,16 @@
-import asyncio
 import unittest
 from asyncio import Future
 from unittest.mock import MagicMock, call, AsyncMock
 
-from cogs.request_cog import RequestCog
+from ronnia.cogs.request_cog import RequestCog
 
 
 class TestRequestCog(unittest.IsolatedAsyncioTestCase):
+    ctx = None
+    bot = None
 
     @classmethod
-    def setUp(cls) -> None:
+    def asyncSetUp(cls) -> None:
         cls.bot = MagicMock()
 
         cls.ctx = MagicMock()
@@ -17,18 +18,15 @@ class TestRequestCog(unittest.IsolatedAsyncioTestCase):
         cls.ctx.send = AsyncMock()
         cls.ctx.send.return_value = Future()
         cls.ctx.send.return_value.set_result('')
+        cls.bot.users_db.disable_channel = AsyncMock()
+        cls.cog = RequestCog(cls.bot)
 
     async def test_disable_channel_calls_db_disable(self):
-        self.bot.users_db.disable_channel = MagicMock()
-
-        cog = RequestCog(self.bot)
-
-        await cog.disable_channel._callback(cog, self.ctx)
-
+        await self.cog.disable_channel._callback(self.cog, self.ctx)
         self.bot.users_db.disable_channel.assert_called_once_with('test_user')
 
     async def test_enable_channel_calls_db_enable(self):
-        self.bot.users_db.enable_channel = MagicMock()
+        self.bot.users_db.enable_channel = AsyncMock()
 
         cog = RequestCog(self.bot)
 
@@ -37,7 +35,7 @@ class TestRequestCog(unittest.IsolatedAsyncioTestCase):
         self.bot.users_db.enable_channel.assert_called_once_with('test_user')
 
     async def test_toggle_feedback_calls_db_toggle_echo(self):
-        self.bot.users_db.toggle_echo = MagicMock()
+        self.bot.users_db.toggle_echo = AsyncMock()
         self.bot.users_db.toggle_echo.return_value = False
 
         cog = RequestCog(self.bot)
@@ -52,7 +50,7 @@ class TestRequestCog(unittest.IsolatedAsyncioTestCase):
         self.bot.users_db.toggle_echo.assert_has_calls([call('test_user'), call('test_user')])
 
     async def test_sub_only_calls_db_toggle_sub_only(self):
-        self.bot.users_db.toggle_sub_only = MagicMock()
+        self.bot.users_db.toggle_sub_only = AsyncMock()
         self.bot.users_db.toggle_sub_only.return_value = False
 
         cog = RequestCog(self.bot)
