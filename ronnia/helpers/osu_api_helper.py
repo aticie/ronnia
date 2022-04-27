@@ -1,7 +1,7 @@
 import asyncio
 import datetime
 import logging
-from typing import Union, Dict, Optional
+from typing import Union, Dict, Optional, Tuple, Any
 
 import aiohttp
 from multidict import CIMultiDict
@@ -80,7 +80,7 @@ class OsuApiV2(BaseOsuApiV2):
         super().__init__(client_id, client_secret)
         self._scopes = 'public'
 
-    async def get_beatmap(self, beatmap_id: int) -> Dict:
+    async def get_beatmap(self, beatmap_id: int) -> Tuple[Dict, Dict]:
         """
         Gets beatmap data for the specified beatmap ID.
         :param beatmap_id: The ID of the beatmap.
@@ -89,11 +89,15 @@ class OsuApiV2(BaseOsuApiV2):
         This endpoint returns a single beatmap dict.
         """
         logger.debug(f'Requesting beatmap information for id: {beatmap_id}')
-        return await self._get_endpoint(f'beatmaps/{beatmap_id}')
+        beatmap_info = await self._get_endpoint(f'beatmaps/{beatmap_id}')
+        beatmapset_info = beatmap_info['beatmapset']
+        return beatmap_info, beatmapset_info
 
-    async def get_beatmapset(self, beatmapset_id: int) -> Dict:
+    async def get_beatmapset(self, beatmapset_id: int) -> Tuple[Dict, Dict]:
         logger.debug(f'Requesting beatmapset information for id: {beatmapset_id}')
-        return await self._get_endpoint(f'beatmapsets/{beatmapset_id}')
+        beatmapset_info = await self._get_endpoint(f'beatmapsets/{beatmapset_id}')
+        beatmap_info = beatmapset_info['beatmaps'][0]
+        return beatmap_info, beatmapset_info
 
     async def get_beatmap_attributes(self, beatmap_id: int, mods: Optional[str] = None) -> Dict:
         """

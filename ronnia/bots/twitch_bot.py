@@ -17,7 +17,7 @@ from azure.servicebus.exceptions import ServiceBusError
 from twitchio import Message, Channel, Chatter, User
 from twitchio.ext import commands, routines
 
-from helpers.globals import OSU_API_V2, OSU_CHAT_API_V2
+from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
@@ -27,19 +27,12 @@ logger = logging.getLogger(__name__)
 
 class TwitchBot(commands.Bot, ABC):
     PER_REQUEST_COOLDOWN = 30  # each request has 30 seconds cooldown
-    BEATMAP_STATUS_DICT = {"0": 'Pending',
-                           "1": 'Ranked',
-                           "2": 'Approved',
-                           "3": 'Qualified',
-                           "4": 'Loved',
-                           "-1": 'WIP',
-                           "-2": 'Graveyard'}
 
     def __init__(self, initial_channel_ids: List[int], join_lock: Lock):
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
-        self.osu_api = OSU_API_V2
-        self.osu_chat_api = OSU_CHAT_API_V2
+        self.osu_api = OsuApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
+        self.osu_chat_api = OsuChatApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
 
         args = {
             'token': os.getenv('TMI_TOKEN'),
@@ -56,7 +49,6 @@ class TwitchBot(commands.Bot, ABC):
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
         self.signup_queue_name = 'bot-signups'
         self.signup_reply_queue_name = 'bot-signups-reply'
-        self.twitch_to_irc_queue_name = 'twitch-to-irc'
 
         self._join_lock = join_lock
 
@@ -168,18 +160,23 @@ class TwitchBot(commands.Bot, ABC):
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
             if 's' in api_params:
-                beatmap_info = await self.osu_api.get_beatmapset(api_params['s'])
+                beatmap_info, beatmapset_info = await self.osu_api.get_beatmapset(api_params['s'])
             else:
-                beatmap_info = await self.osu_api.get_beatmap(api_params['b'])
+                beatmap_info, beatmapset_info = await self.osu_api.get_beatmap(api_params['b'])
 
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
                 # If user has enabled echo setting, send twitch chat a message
                 if await self.users_db.get_echo_status(twitch_username=message.channel.name):
-                    await self._send_twitch_message(message, beatmap_info)
+                    await self._send_twitch_message(message=message,
+                                                    beatmap_info=beatmap_info,
+                                                    beatmapset_info=beatmapset_info)
 
-                await self._send_beatmap_to_irc(message, beatmap_info, given_mods)
-                await self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['beatmap_id']),
+                await self._send_beatmap_to_irc(message=message,
+                                                beatmap_info=beatmap_info,
+                                                beatmapset_info=beatmapset_info,
+                                                given_mods=given_mods)
+                await self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['id']),
                                                    requested_channel_name=message.channel.name,
                                                    requester_channel_name=message.author.name,
                                                    mods=given_mods)
@@ -310,7 +307,7 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    async def _send_beatmap_to_irc(self, message: Message, beatmap_info: dict, given_mods: str):
+    async def _send_beatmap_to_irc(self, message: Message, beatmap_info: dict, beatmapset_info: dict, given_mods: str):
         """
         Sends the beatmap request message to osu!irc bot
         :param message: Twitch Message object
@@ -318,30 +315,24 @@ class TwitchBot(commands.Bot, ABC):
         :param given_mods: String of mods if they are requested, empty string instead
         :return:
         """
-        irc_message = await self._prepare_irc_message(message, beatmap_info, given_mods)
-        irc_target_channel = (await self.users_db.get_user_from_twitch_username(message.channel.name))['osu_username']
-        await self._send_irc_message(irc_message, irc_target_channel)
-
+        irc_message = await self._prepare_irc_message(message=message,
+                                                      beatmap_info=beatmap_info,
+                                                      beatmapset_info=beatmapset_info,
+                                                      given_mods=given_mods)
+        target_id = (await self.users_db.get_user_from_twitch_username(message.channel.name))['osu_id']
+        await self.osu_chat_api.send_message(target_id=target_id, message=irc_message)
         return
 
-    async def _send_irc_message(self, irc_message: str, irc_target_channel):
-        message = json.dumps({'message': irc_message, 'target_channel': irc_target_channel})
-        async with ServiceBusClient.from_connection_string(self.servicebus_connection_string) as sb_client:
-            sender = sb_client.get_queue_sender(queue_name=self.twitch_to_irc_queue_name)
-            msg = ServiceBusMessage(message)
-            await sender.send_messages(msg)
-            logger.info(f'Sending message from twitch to irc: {message}')
-
     @staticmethod
-    async def _send_twitch_message(message: Message, beatmap_info: dict):
+    async def _send_twitch_message(message: Message, beatmapset_info: dict, beatmap_info: dict):
         """
         Sends twitch feedback message
         :param message: Twitch Message object
         :param beatmap_info: Dictionary containing beatmap information from osu! api
         :return:
         """
-        artist = beatmap_info['artist']
-        title = beatmap_info['title']
+        artist = beatmapset_info['artist']
+        title = beatmapset_info['title']
         version = beatmap_info['version']
         bmap_info_text = f"{artist} - {title} [{version}]"
         await message.channel.send(f"{bmap_info_text} - Request sent!")
@@ -366,7 +357,7 @@ class TwitchBot(commands.Bot, ABC):
             logger.info("Couldn't find beatmap in message")
             return None, None
 
-    async def _prepare_irc_message(self, message: Message, beatmap_info: dict, given_mods: str):
+    async def _prepare_irc_message(self, message: Message, beatmap_info: dict, beatmapset_info: dict, given_mods: str):
         """
         Prepare beatmap request message to send to osu!irc.
         :param message: Twitch message
@@ -374,13 +365,13 @@ class TwitchBot(commands.Bot, ABC):
         :param given_mods: Mods as string
         :return:
         """
-        artist = beatmap_info['artist']
-        title = beatmap_info['title']
+        artist = beatmapset_info['artist']
+        title = beatmapset_info['title']
         version = beatmap_info['version']
         bpm = beatmap_info['bpm']
-        beatmap_status = self.BEATMAP_STATUS_DICT[beatmap_info['approved']]
-        difficultyrating = float(beatmap_info['difficultyrating'])
-        beatmap_id = beatmap_info['beatmap_id']
+        beatmap_status = str(beatmap_info['status']).capitalize()
+        difficultyrating = float(beatmap_info['difficulty_rating'])
+        beatmap_id = beatmap_info['id']
         beatmap_length = convert_seconds_to_readable(beatmap_info['hit_length'])
         beatmap_info = f"[https://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] " \
                        f"({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
@@ -485,7 +476,7 @@ class TwitchBot(commands.Bot, ABC):
         :param twitch_info: Twitch user info
         :return:
         """
-        osu_user_id = osu_info['user_id']
+        osu_user_id = osu_info['id']
         osu_username = osu_info['username']
         twitch_name = twitch_info.name
         twitch_id = twitch_info.id

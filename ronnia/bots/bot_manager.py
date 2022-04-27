@@ -17,7 +17,6 @@ from azure.servicebus.exceptions import ServiceBusError
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
-from ronnia.bots.irc_bot import IrcBot
 from ronnia.bots.twitch_bot import TwitchBot
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,7 @@ class TwitchAPI:
 
 
 class TwitchProcess(Process):
-    def __init__(self, user_list: List[str], join_lock: Lock):
+    def __init__(self, user_list: List[int], join_lock: Lock):
         super().__init__()
         self.join_lock = join_lock
         self.user_list = user_list
@@ -74,19 +73,6 @@ class TwitchProcess(Process):
     def run(self) -> None:
         self.initialize()
         self.bot.run()
-
-
-class IRCProcess(Process):
-    def __init__(self):
-        super().__init__()
-        self.bot = None
-
-    def initialize(self) -> None:
-        self.bot = IrcBot(os.getenv('OSU_USERNAME'), "irc.ppy.sh", password=os.getenv("IRC_PASSWORD"))
-
-    def run(self) -> None:
-        self.initialize()
-        self.bot.start()
 
 
 class BotManager:
@@ -111,8 +97,6 @@ class BotManager:
                                                   'default_message_time_to_live': datetime.timedelta(seconds=10)},
                                   'bot-signups-reply': {'max_delivery_count': 100,
                                                         'default_message_time_to_live': datetime.timedelta(seconds=10)},
-                                  'twitch-to-irc': {'max_delivery_count': 100,
-                                                    'default_message_time_to_live': datetime.timedelta(seconds=10)},
                                   }
 
         self.servicebus_mgmt = ServiceBusAdministrationClient.from_connection_string(self.servicebus_connection_string)
@@ -122,8 +106,6 @@ class BotManager:
         self.create_new_instance: bool = False
 
         self.bot_processes = []
-
-        self.irc_process = IRCProcess()
 
     def start(self):
         """
@@ -142,9 +124,6 @@ class BotManager:
                 streaming_user_ids.append(user_id)
 
         logger.info(f"Collected users: {len(streaming_user_ids)}")
-        self.irc_process.start()
-        self.bot_processes.append(self.irc_process)
-        logger.info("IRC bot started")
         for user_id_list in batcher(streaming_user_ids, 100):
             p = TwitchProcess(user_id_list, self.join_lock)
             p.start()
