@@ -1,77 +1,145 @@
 import asyncio
 import datetime
-import json
 import logging
-import os
-from typing import Union
+from typing import Union, Dict, Optional
 
 import aiohttp
-
-from ronnia.helpers.database_helper import StatisticsDatabase
+from multidict import CIMultiDict
 
 logger = logging.getLogger('ronnia')
 
 
-class OsuApi:
+class BaseOsuApiV2(aiohttp.ClientSession):
+    """Async wrapper for osu! api v2"""
 
-    def __init__(self, messages_db: StatisticsDatabase):
-        self._osu_api_key = os.getenv('OSU_API_KEY')
-        self._last_request_time = datetime.datetime.now() - datetime.timedelta(seconds=100)
-        self._cooldown_seconds = 1
-        self._messages_db = messages_db
+    def __init__(self, client_id: str, client_secret: str):
+        super().__init__()
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._api_base_url = 'https://osu.ppy.sh/api/v2/'
+        self._scopes = None
 
-    async def get_beatmap_info(self, api_params: dict):
-        endpoint = 'get_beatmaps'
-        params = {"k": self._osu_api_key}
-        merged_params = {**params, **api_params}
-        result = await self._get_endpoint(merged_params, endpoint)
-        try:
-            return result[0]
-        except IndexError:
-            logger.debug(f'No beatmap found. Api returned: \n {result}')
-            if result is not None:
-                await self._messages_db.add_error(error_type='osu_beatmap_error', error_text=json.dumps(result))
-            return None
+        self._access_token = None
+        self._access_token_obtain_date = None
+        self._access_token_expire_date = None
 
-    async def get_user_info(self, username: Union[str, int]):
-        endpoint = 'get_user'
-        params = {"k": self._osu_api_key,
-                  "u": username}
+        self._last_request_time = datetime.datetime.now() - datetime.timedelta(weeks=100)
+        self._cooldown_seconds = .5
 
-        if isinstance(username, str):
-            params["type"] = "string"
-        elif isinstance(username, int):
-            params["type"] = "id"
+    async def _check_token_expired(self):
+        return datetime.datetime.now() + datetime.timedelta(minutes=1) > self._access_token_expire_date
 
-        result = await self._get_endpoint(params, endpoint)
-        try:
-            return result[0]
-        except IndexError:
-            logger.debug(f'No user found. Api returned: \n {result}')
-            if result is not None:
-                await self._messages_db.add_error(error_type='osu_user_error', error_text=json.dumps(result))
-            return None
+    async def _get_access_token(self):
+        params = {'client_id': self._client_id,
+                  'client_secret': self._client_secret,
+                  'grant_type': 'client_credentials',
+                  'scope': self._scopes}
 
-    async def _get_endpoint(self, params: dict, endpoint: str):
-        await self._wait_for_rate_limit()
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f'http://osu.ppy.sh/api/{endpoint}', params=params) as response:
-                try:
-                    r = await response.json()
-                except asyncio.TimeoutError as e:
-                    await self._messages_db.add_error(error_type='osu_timeout_error', error_text=None)
-                    return None
+        async with aiohttp.ClientSession() as c:
+            async with c.post('https://osu.ppy.sh/oauth/token', json=params) as r:
+                token_response = await r.json()
 
-        await self._messages_db.add_api_usage(endpoint)
-        return r
+        self._access_token = token_response['access_token']
 
-    async def _wait_for_rate_limit(self):
-        now = datetime.datetime.now()
-        time_passed = now - self._last_request_time
-        if time_passed.total_seconds() < self._cooldown_seconds:
-            await asyncio.sleep(self._cooldown_seconds - time_passed.total_seconds())
+        self._access_token_obtain_date = datetime.datetime.now()
+        self._access_token_expire_date = self._access_token_obtain_date + datetime.timedelta(
+            seconds=token_response['expires_in'])
+
+        self._default_headers = CIMultiDict({'Authorization': f'Bearer {self._access_token}'})
+
+    async def _get_endpoint(self, endpoint: str, params: dict = None):
+        await self.wait_cooldown()
+
+        async with self.get(f'{self._api_base_url}{endpoint}', params=params) as resp:
+            contents = await resp.json()
 
         self._last_request_time = datetime.datetime.now()
 
-        return
+        return contents
+
+    async def _post_endpoint(self, endpoint: str, data: dict, params: dict = None):
+        await self.wait_cooldown()
+
+        async with self.post(f'{self._api_base_url}{endpoint}', params=params, json=data) as resp:
+            contents = await resp.json()
+
+        self._last_request_time = datetime.datetime.now()
+
+        return contents
+
+    async def wait_cooldown(self):
+        if self._access_token is None or await self._check_token_expired():
+            await self._get_access_token()
+        seconds_since_last_request = (datetime.datetime.now() - self._last_request_time).total_seconds()
+        if seconds_since_last_request < self._cooldown_seconds:
+            await asyncio.sleep(self._cooldown_seconds - seconds_since_last_request)
+
+
+class OsuApiV2(BaseOsuApiV2):
+    def __init__(self, client_id: str, client_secret: str):
+        super().__init__(client_id, client_secret)
+        self._scopes = 'public'
+
+    async def get_beatmap(self, beatmap_id: int) -> Dict:
+        """
+        Gets beatmap data for the specified beatmap ID.
+        :param beatmap_id: The ID of the beatmap.
+        :return: Returns Beatmap object.
+
+        This endpoint returns a single beatmap dict.
+        """
+        logger.debug(f'Requesting beatmap information for id: {beatmap_id}')
+        return await self._get_endpoint(f'beatmaps/{beatmap_id}')
+
+    async def get_beatmapset(self, beatmapset_id: int) -> Dict:
+        logger.debug(f'Requesting beatmapset information for id: {beatmapset_id}')
+        return await self._get_endpoint(f'beatmapsets/{beatmapset_id}')
+
+    async def get_beatmap_attributes(self, beatmap_id: int, mods: Optional[str] = None) -> Dict:
+        """
+        Gets beatmap data for the specified beatmap ID.
+        :param beatmap_id: The ID of the beatmap.
+        :return: Returns Beatmap object.
+
+        This endpoint returns a single beatmap dict.
+        """
+        logger.debug(f'Requesting beatmap information for id: {beatmap_id}')
+        data = {'mods': mods}
+        return await self._post_endpoint(f'beatmaps/{beatmap_id}/attributes', data=data)
+
+    async def get_user_info(self, user_id: Union[str, int], game_mode: Optional[str] = None,
+                            key: Optional[str] = 'id') -> Dict:
+        """
+        This endpoint returns the detail of specified user.
+        It's highly recommended to pass key parameter to avoid getting unexpected result
+        (mainly when looking up user with numeric username or nonexistent user id).
+        :param user_id: Id or username of the user.
+        :param key: Type of user passed in url parameter.
+                    Can be either id or username to limit lookup by their respective type.
+                    Passing empty or invalid value will result in id lookup followed by username lookup if not found.
+        :param game_mode: GameMode. User default mode will be used if not specified.
+        :return:
+        """
+        logger.debug(f'Requesting user information for user: {user_id}')
+        params = {'key': key}
+        endpoint = f'users/{user_id}/{game_mode}' if game_mode else f'users/{user_id}'
+        return await self._get_endpoint(endpoint=endpoint, params=params)
+
+
+class OsuChatApiV2(BaseOsuApiV2):
+    def __init__(self, client_id: str, client_secret: str):
+        super().__init__(client_id, client_secret)
+        self._scopes = 'delegate chat.write'
+
+    async def send_message(self, target_id: int, message: str, is_action: bool = False):
+        """
+        This endpoint allows you to create a new PM channel.
+        :param target_id: user_id of user to start PM with
+        :param message: message to send
+        :param is_action: whether the message is an action
+        """
+        data = {'target_id': target_id,
+                'message': message,
+                'is_action': is_action}
+        await self._post_endpoint(endpoint='chat/new', data=data)
+

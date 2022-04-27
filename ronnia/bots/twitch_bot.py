@@ -17,9 +17,9 @@ from azure.servicebus.exceptions import ServiceBusError
 from twitchio import Message, Channel, Chatter, User
 from twitchio.ext import commands, routines
 
+from helpers.globals import OSU_API_V2, OSU_CHAT_API_V2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
-from ronnia.helpers.osu_api_helper import OsuApi
 from ronnia.helpers.utils import convert_seconds_to_readable
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,8 @@ class TwitchBot(commands.Bot, ABC):
     def __init__(self, initial_channel_ids: List[int], join_lock: Lock):
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
-        self.osu_api = OsuApi(self.messages_db)
+        self.osu_api = OSU_API_V2
+        self.osu_chat_api = OSU_CHAT_API_V2
 
         args = {
             'token': os.getenv('TMI_TOKEN'),
@@ -166,7 +167,11 @@ class TwitchBot(commands.Bot, ABC):
     async def handle_request(self, message: Message):
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
-            beatmap_info = await self.osu_api.get_beatmap_info(api_params)
+            if 's' in api_params:
+                beatmap_info = await self.osu_api.get_beatmapset(api_params['s'])
+            else:
+                beatmap_info = await self.osu_api.get_beatmap(api_params['b'])
+
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
                 # If user has enabled echo setting, send twitch chat a message
@@ -182,7 +187,7 @@ class TwitchBot(commands.Bot, ABC):
     async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         twitch_username = message.channel.name
         requester_name = message.author.name
-        diff_rating = float(beatmap_info['difficultyrating'])
+        diff_rating = float(beatmap_info['difficulty_rating'])
         range_low, range_high = await self.users_db.get_range_setting(twitch_username=twitch_username, setting_key='sr')
 
         if range_low == -1 or range_high == -1:
@@ -231,23 +236,6 @@ class TwitchBot(commands.Bot, ABC):
         logger.error(error)
         await self.messages_db.add_error(error_type='twitch_command_error', error_text=str(error))
         pass
-
-    async def get_osu_and_twitch_details(self, osu_user_id_or_name, twitch_user_id=None, twitch_username=None):
-
-        assert twitch_user_id is not None or twitch_username is not None, \
-            'Twitch user id or twitch username must be given.'
-        if osu_user_id_or_name.isdigit():
-            # Handle ids in the string form
-            osu_user_id_or_name = int(osu_user_id_or_name)
-
-        # Get osu! username from osu! api (usernames can change)
-        osu_user_info = await self.osu_api.get_user_info(osu_user_id_or_name)
-        # Get twitch username from twitch api
-        if twitch_user_id is None:
-            twitch_info = await self.fetch_users(names=[twitch_username])
-        else:
-            twitch_info = await self.fetch_users(ids=[twitch_user_id])
-        return osu_user_info, twitch_info
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
@@ -480,7 +468,7 @@ class TwitchBot(commands.Bot, ABC):
             connected_users = await self.handle_banned_users(connected_users, twitch_users)
 
         for user in connected_users:
-            osu_info = await self.osu_api.get_user_info(user['osu_username'])
+            osu_info = await self.osu_api.get_user_info(user['osu_id'])
             twitch_info = twitch_users_by_id[int(user['twitch_id'])]
             await self.update_user_db_info(user, osu_info, twitch_info)
 
@@ -489,7 +477,7 @@ class TwitchBot(commands.Bot, ABC):
         logger.error(f'Error while updating user information: {error}')
         traceback.print_exc()
 
-    async def update_user_db_info(self, user: dict, osu_info: dict, twitch_info: User):
+    async def update_user_db_info(self, user: sqlite3.Row, osu_info: dict, twitch_info: User):
         """
         Update user information in database
         :param user: User to update

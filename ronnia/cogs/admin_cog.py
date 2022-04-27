@@ -19,22 +19,6 @@ class AdminCog(commands.Cog):
             return False
         return True
 
-    @commands.command(name="adduser")
-    async def add_user_to_db(self, ctx: Context, *args):
-        twitch_username = args[0].lower()
-        osu_username = args[1].lower()
-
-        osu_user_info, twitch_user_info = await self.bot.get_osu_and_twitch_details(osu_user_id_or_name=osu_username,
-                                                                                    twitch_username=twitch_username)
-
-        twitch_id = twitch_user_info[0].id
-        osu_user_id = osu_user_info['user_id']
-        await self.bot.users_db.add_user(osu_username=osu_username, twitch_username=twitch_username,
-                                         twitch_id=twitch_id, osu_user_id=osu_user_id)
-        await self.bot.join_channels([twitch_username])
-        logger.info(f'Adding {twitch_username} - {osu_username} to user database!')
-        await ctx.send(f'Added {twitch_username} -> {osu_username}.')
-
     @commands.command(name="test")
     async def toggle_test_for_user(self, ctx: Context, *args):
         twitch_username = args[0].lower()
