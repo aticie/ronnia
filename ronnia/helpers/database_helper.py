@@ -16,6 +16,7 @@ class BaseDatabase:
         self.conn = await aiosqlite.connect(self.db_path,
                                             check_same_thread=False,
                                             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        await self.conn.execute('PRAGMA journal_mode = DELETE')
         self.conn.row_factory = aiosqlite.Row
         self.c = await self.conn.cursor()
 
@@ -98,13 +99,13 @@ class UserDatabase(BaseDatabase):
 
         await self.conn.commit()
 
+        await self.define_setting('enable', 1, 'Enables the bot.')
         await self.define_setting('echo', 1,
-                                  'Setting for the feedback message sent to twitch channel on beatmap request.')
-        await self.define_setting('enable', 1, 'Setting to enable beatmap requests channel-wide.')
-        await self.define_setting('sub-only', 0, 'Setting for sub-only requests mode.')
-        await self.define_setting('cp-only', 0, 'Setting for channel points only requests mode.')
-        await self.define_setting('test', 0, 'Enables test mode on the channel.')
-        await self.define_range_setting('sr', -1, -1, 'Set star rating limit for requests.')
+                                  'Enables Twitch chat acknowledge message.')
+        await self.define_setting('sub-only', 0, 'Subscribers only request mode.')
+        await self.define_setting('cp-only', 0, 'Channel Points only request mode.')
+        await self.define_setting('test', 0, 'Enables test mode.')
+        await self.define_range_setting('sr', -1, -1, 'Star rating limit for requests.')
 
     async def set_channel_updated(self, twitch_username: str):
         await self.c.execute(f'UPDATE users SET enabled=? WHERE twitch_username=?', (1, twitch_username))
@@ -165,6 +166,17 @@ class UserDatabase(BaseDatabase):
         await self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
         await self.conn.commit()
 
+    async def get_multiple_users(self, twitch_ids: List[int]) -> List[sqlite3.Row]:
+        """
+        Gets multiple users from database
+        :param twitch_ids: List of twitch ids
+        :return: List of users
+        """
+        query = f"SELECT * FROM users WHERE twitch_id IN ({','.join('?' for i in twitch_ids)})"
+        result = await self.c.execute(query, twitch_ids)
+        users = await result.fetchall()
+        return users
+
     async def get_user_from_osu_username(self, osu_username: str) -> sqlite3.Row:
         """
         Gets the user details from database using osu username
@@ -202,8 +214,11 @@ class UserDatabase(BaseDatabase):
         if setting is None:
             await self.c.execute(f"INSERT INTO settings (key, default_value, description) VALUES (?, ?, ?)",
                                  (key, default_value, description))
-            await self.conn.commit()
-        return
+        else:
+            await self.c.execute(f"UPDATE settings SET default_value=?1, description=?2 WHERE key=?3",
+                                 (default_value, description, key))
+
+        return await self.conn.commit()
 
     async def define_range_setting(self, key: str, default_low: float, default_high: float, description: str) -> None:
         """
@@ -393,7 +408,16 @@ class UserDatabase(BaseDatabase):
         await self.conn.commit()
         return range_low, range_high
 
-    async def get_all_users(self, limit: int = 100, offset: int = 0) -> List[sqlite3.Row]:
+    async def get_all_user_count(self) -> List[sqlite3.Row]:
+        """
+        Gets all user count in users table
+        :return:
+        """
+        result = await self.c.execute("SELECT COUNT(*) FROM users;")
+        value = await result.fetchone()
+        return value[0]
+
+    async def get_users(self, limit: int = 100, offset: int = 0) -> List[sqlite3.Row]:
         """
         Gets all users in db
         :return:

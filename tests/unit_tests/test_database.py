@@ -2,7 +2,7 @@ import os
 import shutil
 from unittest import IsolatedAsyncioTestCase
 
-from helpers.database_helper import UserDatabase
+from ronnia.helpers.database_helper import UserDatabase
 
 
 class TestDatabase(IsolatedAsyncioTestCase):

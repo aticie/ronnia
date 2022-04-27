@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from bots.twitch_bot import TwitchBot
+from ronnia.bots.twitch_bot import TwitchBot
 
 
 def Any(cls):
@@ -93,7 +93,7 @@ class TestTwitchBot(unittest.IsolatedAsyncioTestCase):
 
         send_irc_message_return_value = asyncio.Future()
         send_irc_message_return_value.set_result(None)
-        self.bot._send_irc_message = MagicMock(return_value=send_irc_message_return_value)
+        self.bot._send_beatmap_to_irc = MagicMock(return_value=send_irc_message_return_value)
 
         self.bot._check_message_contains_beatmap_link = MagicMock(return_value=(0, 'test_beatmap_id'))
 
@@ -128,7 +128,7 @@ class TestTwitchBot(unittest.IsolatedAsyncioTestCase):
 
         send_irc_message_return_value = asyncio.Future()
         send_irc_message_return_value.set_result(None)
-        self.bot._send_irc_message = MagicMock(return_value=send_irc_message_return_value)
+        self.bot._send_beatmap_to_irc = MagicMock(return_value=send_irc_message_return_value)
 
         self.bot._check_user_cooldown = MagicMock()
 
@@ -155,7 +155,7 @@ class TestTwitchBot(unittest.IsolatedAsyncioTestCase):
 
         send_irc_message_return_value = asyncio.Future()
         send_irc_message_return_value.set_result(None)
-        self.bot._send_irc_message = MagicMock(return_value=send_irc_message_return_value)
+        self.bot._send_beatmap_to_irc = MagicMock(return_value=send_irc_message_return_value)
 
         self.bot._check_user_cooldown = MagicMock()
 
@@ -241,7 +241,7 @@ class TestTwitchBot(unittest.IsolatedAsyncioTestCase):
         _prepare_irc_message_return_value.set_result(None)
         self.bot._prepare_irc_message = MagicMock(return_value=_prepare_irc_message_return_value)
 
-        await self.bot._send_irc_message(msg, beatmap_info, mods)
+        await self.bot._send_beatmap_to_irc(msg, beatmap_info, mods)
         self.bot.irc_bot.send_message.assert_called_once()
 
     async def test__send_irc_message_calls__prepare_irc_message(self):
@@ -257,7 +257,7 @@ class TestTwitchBot(unittest.IsolatedAsyncioTestCase):
         _prepare_irc_message_return_value.set_result(None)
         self.bot._prepare_irc_message = AsyncMock(return_value=_prepare_irc_message_return_value)
 
-        await self.bot._send_irc_message(msg, beatmap_info, mods)
+        await self.bot._send_beatmap_to_irc(msg, beatmap_info, mods)
         self.bot._prepare_irc_message.assert_called_once()
 
     async def test_event_ready_calls_fetch_users(self):
