@@ -413,7 +413,7 @@ class TwitchBot(commands.Bot, ABC):
         logger.info(f'Joined {len(self.connected_channels)} after {time.time() - channel_join_start:.2f}s')
         logger.info(f'Connected channels: {self.connected_channels}')
 
-        initial_extensions = ['cogs.request_cog', 'cogs.admin_cog']
+        initial_extensions = ['cogs.admin_cog']
         for extension in initial_extensions:
             self.load_module(extension)
             logger.info(f'Successfully loaded: {extension}')

@@ -473,7 +473,7 @@ class UserDatabase(BaseDatabase):
             excluded_users = value['excluded_user']
 
             if return_mode == 'list':
-                excluded_users = excluded_users.split(',')
+                excluded_users = list(map(str.lower, map(str.strip, excluded_users.split(','))))
 
         return excluded_users
 

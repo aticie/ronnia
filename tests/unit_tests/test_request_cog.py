@@ -2,8 +2,6 @@ import unittest
 from asyncio import Future
 from unittest.mock import MagicMock, call, AsyncMock
 
-from ronnia.cogs.request_cog import RequestCog
-
 
 class TestRequestCog(unittest.IsolatedAsyncioTestCase):
     ctx = None
