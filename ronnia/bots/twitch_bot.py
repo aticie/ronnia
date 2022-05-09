@@ -59,8 +59,6 @@ class TwitchBot(commands.Bot, ABC):
 
     async def join_channels(self, channels: Union[List[str], Tuple[str]]):
         with self._join_lock:
-            # Wait for 10 seconds to be sure that we don't hit twitch's rate limit
-            await asyncio.sleep(10)
             await super(TwitchBot, self).join_channels(channels)
 
     async def servicebus_message_receiver(self):
@@ -232,6 +230,10 @@ class TwitchBot(commands.Bot, ABC):
     async def event_command_error(self, ctx, error):
         logger.error(error)
         await self.messages_db.add_error(error_type='twitch_command_error', error_text=str(error))
+
+    async def event_error(self, error: Exception, data: str = None):
+        logger.error(error, data)
+        await super(TwitchBot, self).event_error(error, data)
         pass
 
     @staticmethod
