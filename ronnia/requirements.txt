@@ -1,4 +1,4 @@
-twitchio==2.1.5
 irc>=19.0.0,<21.0.0
+twitchio==2.2.0
 aiosqlite==0.17.0
 azure-servicebus==7.6.0

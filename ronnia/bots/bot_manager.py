@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 import traceback
 from itertools import islice
 from json import JSONDecodeError
@@ -105,7 +106,7 @@ class BotManager:
 
         self.create_new_instance: bool = False
 
-        self.bot_processes = []
+        self.bot_processes = {}
 
     def start(self):
         """
@@ -128,7 +129,9 @@ class BotManager:
             p = TwitchProcess(user_id_list, self.join_lock)
             p.start()
             logger.info(f"Started Twitch bot instance for {len(user_id_list)} users")
-            self.bot_processes.append(p)
+            self.bot_processes[p] = user_id_list
+            # 20 join rate per 10 seconds
+            time.sleep(50.5)
 
     async def process_handler(self):
         """

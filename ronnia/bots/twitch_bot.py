@@ -38,7 +38,8 @@ class TwitchBot(commands.Bot, ABC):
             'token': os.getenv('TMI_TOKEN'),
             'client_id': os.getenv('TWITCH_CLIENT_ID'),
             'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
-            'prefix': os.getenv('BOT_PREFIX')
+            'prefix': os.getenv('BOT_PREFIX'),
+            'initial_channels': [os.getenv('BOT_NICK')]
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
@@ -118,7 +119,8 @@ class TwitchBot(commands.Bot, ABC):
                                      osu_username=osu_username,
                                      osu_user_id=osu_id)
         user_db_details = await self.users_db.get_user_from_twitch_username(twitch_username)
-        await self.join_channels([twitch_username])
+        with self._join_lock:
+            asyncio.create_task(self._connection._join_channel(twitch_username))
         message_dict['user_id'] = user_db_details['user_id']
         return ServiceBusMessage(json.dumps(message_dict))
 
