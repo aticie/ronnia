@@ -14,9 +14,9 @@ from typing import List
 import requests
 from azure.core.exceptions import ResourceNotFoundError
 from azure.servicebus import ServiceBusMessage
-from azure.servicebus.exceptions import ServiceBusError
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.aio.management import ServiceBusAdministrationClient
+from azure.servicebus.exceptions import ServiceBusError
 
 from ronnia.bots.twitch_bot import TwitchBot
 
@@ -84,6 +84,9 @@ class BotManager:
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
 
+        self.user_per_instance = 100
+        self.sleep_after_instance = (self.user_per_instance // 20 + 1) * 10
+
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_webserver_queue_name = 'webserver-signups'
         self.servicebus_webserver_reply_queue_name = 'webserver-signups-reply'
@@ -125,13 +128,13 @@ class BotManager:
                 streaming_user_ids.append(user_id)
 
         logger.info(f"Collected users: {len(streaming_user_ids)}")
-        for user_id_list in batcher(streaming_user_ids, 100):
+        for user_id_list in batcher(streaming_user_ids, self.user_per_instance):
             p = TwitchProcess(user_id_list, self.join_lock)
             p.start()
             logger.info(f"Started Twitch bot instance for {len(user_id_list)} users")
             self.bot_processes[p] = user_id_list
             # 20 join rate per 10 seconds
-            time.sleep(55.5)
+            time.sleep(self.sleep_after_instance)
 
     async def process_handler(self):
         """

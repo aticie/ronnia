@@ -1,4 +1,4 @@
 irc>=19.0.0,<21.0.0
-git+https://github.com/chillymosh/TwitchIO@join_channels_fix
+twitchio==2.1.5
 aiosqlite==0.17.0
 azure-servicebus==7.6.0

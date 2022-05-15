@@ -21,6 +21,7 @@ from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
+from websocket.ws import RetryableWSConnection
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +34,29 @@ class TwitchBot(commands.Bot, ABC):
         self.messages_db = StatisticsDatabase()
         self.osu_api = OsuApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
         self.osu_chat_api = OsuChatApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
+        self.channels_join_failed = []
 
+        token = os.getenv('TMI_TOKEN').replace("oauth:", "")
         args = {
-            'token': os.getenv('TMI_TOKEN'),
+            'token': token,
             'client_id': os.getenv('TWITCH_CLIENT_ID'),
             'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
             'prefix': os.getenv('BOT_PREFIX'),
-            'initial_channels': [os.getenv('BOT_NICK')]
+            'heartbeat': 20
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
+
+        conn_args = {
+            'token': token,
+            'initial_channels': [os.getenv('BOT_NICK')],
+            'heartbeat': 30
+        }
+        self._connection = RetryableWSConnection(
+            client=self,
+            loop=self.loop,
+            **conn_args
+        )
 
         self.environment = os.getenv('ENVIRONMENT')
         self.connected_channel_ids = initial_channel_ids
@@ -57,6 +71,7 @@ class TwitchBot(commands.Bot, ABC):
         self.user_last_request = {}
 
         self.join_channels_first_time = True
+        self.max_users = 100
 
     async def join_channels(self, channels: Union[List[str], Tuple[str]]):
         with self._join_lock:
@@ -66,9 +81,9 @@ class TwitchBot(commands.Bot, ABC):
         """
         Start a queue listener for messages from the website sign-up.
         """
-        # Each instance of bot can only have one 100 users.
-        if len(self.connected_channel_ids) == 100:
-            logger.info('Reached 100 members, stopped listening to sign-up queue.')
+        # Each instance of bot can only have one 50 users.
+        if len(self.connected_channel_ids) == self.max_users:
+            logger.info(f'Reached {self.max_users} members, stopped listening to sign-up queue.')
             return
 
         logger.info(f'Starting service bus message receiver')
@@ -142,19 +157,19 @@ class TwitchBot(commands.Bot, ABC):
                 response_json = await resp.json()
         return response_json['access_token']
 
-    async def event_message(self, message: Message):
-        if message.author is None:
-            logger.info(f"{message.channel.name}: {message.content}")
-            return
-        logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
-
-        await self.handle_commands(message)
-        try:
-            await self.check_channel_enabled(message.channel.name)
-            await self.handle_request(message)
-        except AssertionError as e:
-            logger.info(f'Check unsuccessful: {e}')
-            await self.messages_db.add_error('internal_check', str(e))
+    # async def event_message(self, message: Message):
+    #     if message.author is None:
+    #         logger.info(f"{message.channel.name}: {message.content}")
+    #         return
+    #     logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
+    #
+    #     await self.handle_commands(message)
+    #     try:
+    #         await self.check_channel_enabled(message.channel.name)
+    #         await self.handle_request(message)
+    #     except AssertionError as e:
+    #         logger.info(f'Check unsuccessful: {e}')
+    #         await self.messages_db.add_error('internal_check', str(e))
 
     async def handle_request(self, message: Message):
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
@@ -435,7 +450,7 @@ class TwitchBot(commands.Bot, ABC):
         connected_channel_names = [channel.name for channel in self.connected_channels]
         logger.info(f'Connected channels: {connected_channel_names}')
 
-    @routines.routine(hours=1)
+    @routines.routine(minutes=2)
     async def routine_join_channels(self):
         logger.info('Started join channels routine')
         if self.join_channels_first_time:
@@ -444,8 +459,14 @@ class TwitchBot(commands.Bot, ABC):
         all_user_details = await self.users_db.get_multiple_users(twitch_ids=self.connected_channel_ids)
         twitch_users = {user['twitch_username'] for user in all_user_details}
         connected_channels = {chan.name for chan in self.connected_channels}
-        channels_to_join = list(twitch_users - connected_channels)
+        unconnected_channels = (twitch_users - connected_channels)
+        unconnected_channels.update(set(self.channels_join_failed))
+        channels_to_join = list(unconnected_channels)
+        logger.info(f'Users from database: {twitch_users}')
+        logger.info(f'self.connected_channels: {connected_channels}')
+        logger.info(f'Failed connections: {self.channels_join_failed}')
         logger.info(f'Joining channels: {channels_to_join}')
+        self.channels_join_failed = []
         await self.join_channels(channels_to_join)
 
     @routines.routine(hours=1)
