@@ -157,19 +157,19 @@ class TwitchBot(commands.Bot, ABC):
                 response_json = await resp.json()
         return response_json['access_token']
 
-    # async def event_message(self, message: Message):
-    #     if message.author is None:
-    #         logger.info(f"{message.channel.name}: {message.content}")
-    #         return
-    #     logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
-    #
-    #     await self.handle_commands(message)
-    #     try:
-    #         await self.check_channel_enabled(message.channel.name)
-    #         await self.handle_request(message)
-    #     except AssertionError as e:
-    #         logger.info(f'Check unsuccessful: {e}')
-    #         await self.messages_db.add_error('internal_check', str(e))
+    async def event_message(self, message: Message):
+        if message.author is None:
+            logger.info(f"{message.channel.name}: {message.content}")
+            return
+        logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
+
+        await self.handle_commands(message)
+        try:
+            await self.check_channel_enabled(message.channel.name)
+            await self.handle_request(message)
+        except AssertionError as e:
+            logger.info(f'Check unsuccessful: {e}')
+            await self.messages_db.add_error('internal_check', str(e))
 
     async def handle_request(self, message: Message):
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
@@ -450,7 +450,7 @@ class TwitchBot(commands.Bot, ABC):
         connected_channel_names = [channel.name for channel in self.connected_channels]
         logger.info(f'Connected channels: {connected_channel_names}')
 
-    @routines.routine(minutes=2)
+    @routines.routine(hours=1)
     async def routine_join_channels(self):
         logger.info('Started join channels routine')
         if self.join_channels_first_time:
