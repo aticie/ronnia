@@ -131,7 +131,7 @@ class BotManager:
             logger.info(f"Started Twitch bot instance for {len(user_id_list)} users")
             self.bot_processes[p] = user_id_list
             # 20 join rate per 10 seconds
-            time.sleep(50.5)
+            time.sleep(55.5)
 
     async def process_handler(self):
         """
@@ -139,7 +139,7 @@ class BotManager:
         """
         while True:
             await asyncio.sleep(5)
-            for p in self.bot_processes:
+            for p, args in self.bot_processes.items():
                 if not p.is_alive():
                     logger.info(f"Bot process {p.bot} died, restarting")
                     p.start()
