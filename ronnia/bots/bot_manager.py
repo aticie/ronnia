@@ -230,10 +230,9 @@ class BotManager:
         Decide whether to send the message to the bot, or create a new TwitchBot instance.
         """
         if self.create_new_instance:
+            logger.info(f"Started a new bot instance. This is the {len(self.bot_processes)}th instance.")
             p = TwitchProcess([], self.join_lock)
             p.start()
-            self.bot_processes.append(p)
-            logger.info(f"Started a new bot instance. This is the {len(self.bot_processes)}th instance.")
             self.create_new_instance = False
 
         logger.info(f'Received signup message: {message}')
