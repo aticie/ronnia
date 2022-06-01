@@ -12,7 +12,7 @@ Ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the 
 
 # Usage✍️
 
-### [Sign-up for the testing version from here!](https://testing.ronnia.me/)
+### [Sign-up for the bot from here!](https://ronnia.me/)
 
 # Ronnia Dashboard 📋
 
@@ -43,7 +43,7 @@ easier to use and has Windows binaries.
 
 **Q:** How do I get this bot on my channel?
 
-**A:** Just dm me on discord. heyronii#9925
+**A:** If you can see your settings page, then you are good to go! If something else happened and you see an error, dm me on discord: heyronii#9925
 
 **Q:** OMG why is this command not working????
 
