@@ -85,8 +85,9 @@ class BotManager:
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
 
-        self.user_per_instance = 150
-        self.sleep_after_instance = (self.user_per_instance // 20 + 1) * 11
+        self.user_per_instance = 60
+        self.channel_join_cooldown = 11
+        self.sleep_after_instance = (self.user_per_instance // 20 + 1) * self.channel_join_cooldown
 
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_webserver_queue_name = 'webserver-signups'
