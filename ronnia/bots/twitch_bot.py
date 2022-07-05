@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sqlite3
-import time
 import traceback
 from abc import ABC
 from multiprocessing import Lock
@@ -21,7 +20,6 @@ from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
-from websocket.ws import RetryableWSConnection
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +27,7 @@ logger = logging.getLogger(__name__)
 class TwitchBot(commands.Bot, ABC):
     PER_REQUEST_COOLDOWN = 30  # each request has 30 seconds cooldown
 
-    def __init__(self, initial_channel_ids: List[int], join_lock: Lock):
+    def __init__(self, initial_channel_names: List[str], join_lock: Lock, max_users: int):
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
         self.osu_api = OsuApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
@@ -42,24 +40,13 @@ class TwitchBot(commands.Bot, ABC):
             'client_id': os.getenv('TWITCH_CLIENT_ID'),
             'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
             'prefix': os.getenv('BOT_PREFIX'),
-            'heartbeat': 20
+            'initial_channels': [os.getenv('BOT_NICK'), *initial_channel_names]
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
 
-        conn_args = {
-            'token': token,
-            'initial_channels': [os.getenv('BOT_NICK')],
-            'heartbeat': 30
-        }
-        self._connection = RetryableWSConnection(
-            client=self,
-            loop=self.loop,
-            **conn_args
-        )
-
+        self.initial_channel_names = initial_channel_names
         self.environment = os.getenv('ENVIRONMENT')
-        self.connected_channel_ids = initial_channel_ids
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
         self.signup_queue_name = 'bot-signups'
@@ -70,19 +57,14 @@ class TwitchBot(commands.Bot, ABC):
         self.main_prefix = None
         self.user_last_request = {}
 
-        self.join_channels_first_time = True
-        self.max_users = 100
-
-    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
-        with self._join_lock:
-            await super(TwitchBot, self).join_channels(channels)
+        self.max_users = max_users
 
     async def servicebus_message_receiver(self):
         """
         Start a queue listener for messages from the website sign-up.
         """
-        # Each instance of bot can only have one 50 users.
-        if len(self.connected_channel_ids) == self.max_users:
+        # Each instance of bot can only have 100 users.
+        if len(self.initial_channel_names) >= self.max_users:
             logger.info(f'Reached {self.max_users} members, stopped listening to sign-up queue.')
             return
 
@@ -102,7 +84,7 @@ class TwitchBot(commands.Bot, ABC):
                                 logger.info(f'Sending reply message to sign-up queue: {reply_message}')
                                 await sender.send_messages(reply_message)
 
-                                if len(self.connected_channel_ids) == 100:
+                                if len(self.initial_channel_names) == 100:
                                     logger.warning(
                                         'Reached 100 members, sending manager signal to create a new process.')
                                     bot_full_message = ServiceBusMessage("bot-full")
@@ -128,7 +110,7 @@ class TwitchBot(commands.Bot, ABC):
         osu_id = message_dict['osu_id']
         twitch_id = message_dict['twitch_id']
 
-        self.connected_channel_ids.append(twitch_id)
+        self.initial_channel_names.append(twitch_username)
         await self.users_db.add_user(twitch_username=twitch_username,
                                      twitch_id=twitch_id,
                                      osu_username=osu_username,
@@ -163,6 +145,9 @@ class TwitchBot(commands.Bot, ABC):
             return
         logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
 
+        if self.environment == "testing":
+            return
+
         await self.handle_commands(message)
         try:
             await self.check_channel_enabled(message.channel.name)
@@ -187,10 +172,10 @@ class TwitchBot(commands.Bot, ABC):
                                                     beatmap_info=beatmap_info,
                                                     beatmapset_info=beatmapset_info)
 
-                await self._send_beatmap_to_irc(message=message,
-                                                beatmap_info=beatmap_info,
-                                                beatmapset_info=beatmapset_info,
-                                                given_mods=given_mods)
+                await self._send_beatmap_to_in_game(message=message,
+                                                    beatmap_info=beatmap_info,
+                                                    beatmapset_info=beatmapset_info,
+                                                    given_mods=given_mods)
                 await self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['id']),
                                                    requested_channel_name=message.channel.name,
                                                    requester_channel_name=message.author.name,
@@ -326,7 +311,8 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    async def _send_beatmap_to_irc(self, message: Message, beatmap_info: dict, beatmapset_info: dict, given_mods: str):
+    async def _send_beatmap_to_in_game(self, message: Message, beatmap_info: dict, beatmapset_info: dict,
+                                       given_mods: str):
         """
         Sends the beatmap request message to osu!irc bot
         :param message: Twitch Message object
@@ -419,17 +405,7 @@ class TwitchBot(commands.Bot, ABC):
         await self.messages_db.initialize()
 
         logger.debug(f'Successfully initialized databases!')
-
-        logger.debug(f'Populating users: {self.connected_channel_ids}')
-        channel_names = await self.fetch_users(ids=self.connected_channel_ids)
-        channels_to_join = [ch.name for ch in channel_names]
-
-        logger.info(f'Joining channels: {channels_to_join}')
-        # Join channels
-        channel_join_start = time.time()
-        await self.join_channels(channels_to_join)
-
-        logger.info(f'Joined {len(self.connected_channels)} after {time.time() - channel_join_start:.2f}s')
+        logger.debug(f'Started bot instance with: {self.initial_channel_names}')
         logger.info(f'Connected channels: {self.connected_channels}')
 
         initial_extensions = ['cogs.admin_cog']
@@ -440,34 +416,14 @@ class TwitchBot(commands.Bot, ABC):
         self.loop.create_task(self.servicebus_message_receiver())
         self.routine_update_user_information.start(stop_on_error=False)
         self.routine_show_connected_channels.start(stop_on_error=False)
-        self.routine_join_channels.start(stop_on_error=False)
 
         logger.info(f'Successfully initialized bot!')
         logger.info(f'Ready | {self.nick}')
 
     @routines.routine(minutes=1)
     async def routine_show_connected_channels(self):
-        connected_channel_names = [channel.name for channel in self.connected_channels]
+        connected_channel_names = [channel.name for channel in list(filter(None, self.connected_channels))]
         logger.info(f'Connected channels: {connected_channel_names}')
-
-    @routines.routine(hours=1)
-    async def routine_join_channels(self):
-        logger.info('Started join channels routine')
-        if self.join_channels_first_time:
-            self.join_channels_first_time = False
-            return
-        all_user_details = await self.users_db.get_multiple_users(twitch_ids=self.connected_channel_ids)
-        twitch_users = {user['twitch_username'] for user in all_user_details}
-        connected_channels = {chan.name for chan in self.connected_channels}
-        unconnected_channels = (twitch_users - connected_channels)
-        unconnected_channels.update(set(self.channels_join_failed))
-        channels_to_join = list(unconnected_channels)
-        logger.info(f'Users from database: {twitch_users}')
-        logger.info(f'self.connected_channels: {connected_channels}')
-        logger.info(f'Failed connections: {self.channels_join_failed}')
-        logger.info(f'Joining channels: {channels_to_join}')
-        self.channels_join_failed = []
-        await self.join_channels(channels_to_join)
 
     @routines.routine(hours=1)
     async def routine_update_user_information(self):
@@ -476,8 +432,8 @@ class TwitchBot(commands.Bot, ABC):
         :return:
         """
         logger.info('Started user information update routine')
-        connected_users = await self.users_db.get_multiple_users(self.connected_channel_ids)
-        twitch_users = await self.fetch_users(ids=self.connected_channel_ids)
+        connected_users = await self.users_db.get_multiple_users_by_username(self.initial_channel_names)
+        twitch_users = await self.fetch_users(names=self.initial_channel_names)
         twitch_users_by_id = {user.id: user for user in twitch_users}
 
         if len(twitch_users) != len(connected_users):
@@ -526,7 +482,7 @@ class TwitchBot(commands.Bot, ABC):
         for connected_user in connected_users:
             if connected_user['twitch_id'] not in twitch_user_ids:
                 logger.info(f'{connected_user["twitch_username"]} does not exist anymore!')
-                self.connected_channel_ids.remove(connected_user['twitch_id'])
+                self.initial_channel_names.remove(connected_user['twitch_username'])
                 await self.users_db.remove_user(connected_user['twitch_username'])
             else:
                 existing_users.append(connected_user)
