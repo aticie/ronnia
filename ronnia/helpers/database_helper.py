@@ -36,6 +36,11 @@ class UserDatabase(BaseDatabase):
                                       f"INNER JOIN users ON users.user_id=user_settings.user_id " \
                                       f"WHERE user_settings.key=? AND users.twitch_username=?"
 
+        self.sql_string_get_setting_by_id = f"SELECT value FROM user_settings " \
+                                            f"INNER JOIN settings ON user_settings.key=settings.key " \
+                                            f"INNER JOIN users ON users.user_id=user_settings.user_id " \
+                                            f"WHERE user_settings.key=? AND users.twitch_id=?"
+
         self.sql_string_get_range_setting = f"SELECT range_start, range_end FROM user_range_settings " \
                                             f"INNER JOIN range_settings ON user_range_settings.key=range_settings.key " \
                                             f"INNER JOIN users ON users.user_id=user_range_settings.user_id " \
@@ -105,6 +110,7 @@ class UserDatabase(BaseDatabase):
         await self.define_setting('sub-only', 0, 'Subscribers only request mode.')
         await self.define_setting('cp-only', 0, 'Channel Points only request mode.')
         await self.define_setting('test', 0, 'Enables test mode.')
+        await self.define_setting('cooldown', 30, 'Cooldown for requests.')
         await self.define_range_setting('sr', -1, -1, 'Star rating limit for requests.')
 
     async def set_channel_updated(self, twitch_username: str):
@@ -180,7 +186,7 @@ class UserDatabase(BaseDatabase):
     async def get_multiple_users_by_username(self, twitch_names: List[str]) -> List[sqlite3.Row]:
         """
         Gets multiple users from database
-        :param twitch_ids: List of twitch ids
+        :param twitch_names: List of twitch names
         :return: List of users
         """
         query = f"SELECT * FROM users WHERE twitch_username IN ({','.join('?' for i in twitch_names)})"
@@ -315,7 +321,7 @@ class UserDatabase(BaseDatabase):
         if value is None:
             r = await self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
             value = await r.fetchone()
-        return bool(value[0])
+        return value[0]
 
     async def handle_none_type_range_setting(self, value: Optional[sqlite3.Row], setting_key: str):
         """
@@ -331,14 +337,18 @@ class UserDatabase(BaseDatabase):
             return value['default_low'], value['default_high']
         return value['range_start'], value['range_end']
 
-    async def get_setting(self, setting_key: str, twitch_username: str):
+    async def get_setting(self, setting_key: str, twitch_username_or_id: Union[str, int]):
         """
         Get the setting's current value for user
         :param setting_key: Key of the setting
         :param twitch_username: Twitch username
         :return:
         """
-        result = await self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username))
+        if isinstance(twitch_username_or_id, str):
+            result = await self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username_or_id))
+        else:
+            result = await self.c.execute(self.sql_string_get_setting_by_id, (setting_key, twitch_username_or_id))
+
         value = await result.fetchone()
         return await self.handle_none_type_setting(value, setting_key)
 

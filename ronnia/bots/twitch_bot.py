@@ -9,7 +9,6 @@ from abc import ABC
 from multiprocessing import Lock
 from typing import AnyStr, Tuple, Union, List
 
-import aiohttp
 from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.exceptions import ServiceBusError
@@ -25,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchBot(commands.Bot, ABC):
-    PER_REQUEST_COOLDOWN = 30  # each request has 30 seconds cooldown
 
     def __init__(self, initial_channel_names: List[str], join_lock: Lock, max_users: int):
         self.users_db = UserDatabase()
@@ -123,21 +121,6 @@ class TwitchBot(commands.Bot, ABC):
 
     def run(self):
         super().run()
-
-    @staticmethod
-    async def _get_access_token():
-        client_id = os.getenv('TWITCH_CLIENT_ID'),
-        client_secret = os.getenv('TWITCH_CLIENT_SECRET')
-        grant_type = 'client_credentials'
-        scope = 'chat:read chat:edit'
-        payload = {'client_id': client_id,
-                   'client_secret': client_secret,
-                   'grant_type': grant_type,
-                   'scope': scope}
-        async with aiohttp.ClientSession() as session:
-            async with session.post('https://id.twitch.tv/oauth2/token', data=payload) as resp:
-                response_json = await resp.json()
-        return response_json['access_token']
 
     async def event_message(self, message: Message):
         if message.author is None:
@@ -276,25 +259,26 @@ class TwitchBot(commands.Bot, ABC):
         """
         Check if user is on cooldown, raise an exception if the user is on request cooldown.
         :param author: Twitch user object
-        :return: Exception if user has requested a beatmap before TwitchBot.PER_REQUEST_COOLDOWN seconds passed.
+        :return: Exception if user has requested a beatmap before channel_cooldown seconds passed.
         """
         author_id = author.id
         time_right_now = datetime.datetime.now()
 
-        await self._prune_cooldowns(time_right_now)
+        channel_cooldown = await self.users_db.get_setting("cooldown", author_id)
+        await self._prune_cooldowns(time_right_now, channel_cooldown)
 
         if author_id not in self.user_last_request:
             self.user_last_request[author_id] = time_right_now
         else:
             last_message_time = self.user_last_request[author_id]
             seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
-            assert seconds_since_last_request >= TwitchBot.PER_REQUEST_COOLDOWN, \
+            assert seconds_since_last_request >= channel_cooldown, \
                 f'{author.name} is on cooldown.'
             self.user_last_request[author_id] = time_right_now
 
         return
 
-    async def _prune_cooldowns(self, time_right_now: datetime.datetime):
+    async def _prune_cooldowns(self, time_right_now: datetime.datetime, channel_cooldown: int):
         """
         Prunes users on that are on cooldown list so it doesn't get too cluttered.
         :param time_right_now:
@@ -303,7 +287,7 @@ class TwitchBot(commands.Bot, ABC):
         pop_list = []
         for user_id, last_message_time in self.user_last_request.items():
             seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
-            if seconds_since_last_request >= TwitchBot.PER_REQUEST_COOLDOWN:
+            if seconds_since_last_request >= channel_cooldown:
                 pop_list.append(user_id)
 
         for user in pop_list:
@@ -463,7 +447,7 @@ class TwitchBot(commands.Bot, ABC):
         twitch_id = twitch_info.id
         await self.users_db.update_user(new_twitch_username=twitch_name, new_osu_username=osu_username,
                                         osu_user_id=osu_user_id, twitch_id=twitch_id)
-        logger.info(
+        logger.debug(
             f'Updated user information for {user["twitch_username"]}: '
             f'{osu_username} | {twitch_name} | {twitch_id} | {osu_user_id}')
 
