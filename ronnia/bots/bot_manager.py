@@ -62,14 +62,14 @@ class TwitchAPI:
 
 
 class TwitchProcess(Process):
-    def __init__(self, user_list: List[int], join_lock: Lock):
+    def __init__(self, user_list: List[str], join_lock: Lock):
         super().__init__()
         self.join_lock = join_lock
         self.user_list = user_list
         self.bot = None
 
     def initialize(self):
-        self.bot = TwitchBot(initial_channel_ids=self.user_list, join_lock=self.join_lock)
+        self.bot = TwitchBot(initial_channel_names=self.user_list, join_lock=self.join_lock)
 
     def run(self) -> None:
         self.initialize()
@@ -120,19 +120,20 @@ class BotManager:
         self._loop.run_until_complete(self.initialize_queues())
         logger.info("Queues initialized")
         all_users = self.users_db.execute('SELECT * FROM users;').fetchall()
+        all_user_twitch_names = [user[2] for user in all_users]
         all_user_twitch_ids = [user[4] for user in all_users]
-        streaming_user_ids = [user['user_id'] for user in self.twitch_client.get_streams(all_user_twitch_ids)]
+        streaming_user_names = [user['user_login'] for user in self.twitch_client.get_streams(all_user_twitch_ids)]
 
-        for user_id in all_user_twitch_ids:
-            if user_id not in streaming_user_ids:
-                streaming_user_ids.append(user_id)
+        for user_id in all_user_twitch_names:
+            if user_id not in streaming_user_names:
+                streaming_user_names.append(user_id)
 
-        logger.info(f"Collected users: {len(streaming_user_ids)}")
-        for user_id_list in batcher(streaming_user_ids, self.user_per_instance):
-            p = TwitchProcess(user_id_list, self.join_lock)
+        logger.info(f"Collected users: {len(streaming_user_names)}")
+        for user_names_list in batcher(streaming_user_names, self.user_per_instance):
+            p = TwitchProcess(user_names_list, self.join_lock)
             p.start()
-            logger.info(f"Started Twitch bot instance for {len(user_id_list)} users")
-            self.bot_processes[p] = user_id_list
+            logger.info(f"Started Twitch bot instance for {len(user_names_list)} users")
+            self.bot_processes[p] = user_names_list
             # 20 join rate per 10 seconds
             time.sleep(self.sleep_after_instance)
 
