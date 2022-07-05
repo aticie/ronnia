@@ -62,14 +62,15 @@ class TwitchAPI:
 
 
 class TwitchProcess(Process):
-    def __init__(self, user_list: List[str], join_lock: Lock):
+    def __init__(self, user_list: List[str], join_lock: Lock, max_users: int):
         super().__init__()
         self.join_lock = join_lock
         self.user_list = user_list
+        self.max_users = max_users
         self.bot = None
 
     def initialize(self):
-        self.bot = TwitchBot(initial_channel_names=self.user_list, join_lock=self.join_lock)
+        self.bot = TwitchBot(initial_channel_names=self.user_list, join_lock=self.join_lock, max_users=self.max_users)
 
     def run(self) -> None:
         self.initialize()
@@ -84,8 +85,8 @@ class BotManager:
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
 
-        self.user_per_instance = 100
-        self.sleep_after_instance = (self.user_per_instance // 20 + 1) * 10
+        self.user_per_instance = 150
+        self.sleep_after_instance = (self.user_per_instance // 20 + 1) * 11
 
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_webserver_queue_name = 'webserver-signups'
@@ -130,7 +131,7 @@ class BotManager:
 
         logger.info(f"Collected users: {len(streaming_user_names)}")
         for user_names_list in batcher(streaming_user_names, self.user_per_instance):
-            p = TwitchProcess(user_names_list, self.join_lock)
+            p = TwitchProcess(user_list=user_names_list, join_lock=self.join_lock, max_users=self.user_per_instance)
             p.start()
             logger.info(f"Started Twitch bot instance for {len(user_names_list)} users")
             self.bot_processes[p] = user_names_list
@@ -232,7 +233,7 @@ class BotManager:
         """
         if self.create_new_instance:
             logger.info(f"Started a new bot instance. This is the {len(self.bot_processes)}th instance.")
-            p = TwitchProcess([], self.join_lock)
+            p = TwitchProcess([], self.join_lock, max_users=self.user_per_instance)
             p.start()
             self.create_new_instance = False
 

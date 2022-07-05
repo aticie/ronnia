@@ -20,7 +20,6 @@ from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
-from websocket.ws import RetryableWSConnection
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 class TwitchBot(commands.Bot, ABC):
     PER_REQUEST_COOLDOWN = 30  # each request has 30 seconds cooldown
 
-    def __init__(self, initial_channel_names: List[str], join_lock: Lock):
+    def __init__(self, initial_channel_names: List[str], join_lock: Lock, max_users: int):
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
         self.osu_api = OsuApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
@@ -41,21 +40,10 @@ class TwitchBot(commands.Bot, ABC):
             'client_id': os.getenv('TWITCH_CLIENT_ID'),
             'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
             'prefix': os.getenv('BOT_PREFIX'),
-            'heartbeat': 20
+            'initial_channels': [os.getenv('BOT_NICK'), *initial_channel_names]
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
-
-        conn_args = {
-            'token': token,
-            'initial_channels': [os.getenv('BOT_NICK'), *initial_channel_names],
-            'heartbeat': 30
-        }
-        self._connection = RetryableWSConnection(
-            client=self,
-            loop=self.loop,
-            **conn_args
-        )
 
         self.initial_channel_names = initial_channel_names
         self.environment = os.getenv('ENVIRONMENT')
@@ -69,7 +57,7 @@ class TwitchBot(commands.Bot, ABC):
         self.main_prefix = None
         self.user_last_request = {}
 
-        self.max_users = 100
+        self.max_users = max_users
 
     async def servicebus_message_receiver(self):
         """
@@ -157,6 +145,9 @@ class TwitchBot(commands.Bot, ABC):
             return
         logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
 
+        if self.environment == "testing":
+            return
+
         await self.handle_commands(message)
         try:
             await self.check_channel_enabled(message.channel.name)
@@ -181,10 +172,10 @@ class TwitchBot(commands.Bot, ABC):
                                                     beatmap_info=beatmap_info,
                                                     beatmapset_info=beatmapset_info)
 
-                await self._send_beatmap_to_irc(message=message,
-                                                beatmap_info=beatmap_info,
-                                                beatmapset_info=beatmapset_info,
-                                                given_mods=given_mods)
+                await self._send_beatmap_to_in_game(message=message,
+                                                    beatmap_info=beatmap_info,
+                                                    beatmapset_info=beatmapset_info,
+                                                    given_mods=given_mods)
                 await self.messages_db.add_request(requested_beatmap_id=int(beatmap_info['id']),
                                                    requested_channel_name=message.channel.name,
                                                    requester_channel_name=message.author.name,
@@ -320,7 +311,8 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    async def _send_beatmap_to_irc(self, message: Message, beatmap_info: dict, beatmapset_info: dict, given_mods: str):
+    async def _send_beatmap_to_in_game(self, message: Message, beatmap_info: dict, beatmapset_info: dict,
+                                       given_mods: str):
         """
         Sends the beatmap request message to osu!irc bot
         :param message: Twitch Message object
@@ -430,7 +422,7 @@ class TwitchBot(commands.Bot, ABC):
 
     @routines.routine(minutes=1)
     async def routine_show_connected_channels(self):
-        connected_channel_names = [channel.name for channel in self.connected_channels]
+        connected_channel_names = [channel.name for channel in list(filter(None, self.connected_channels))]
         logger.info(f'Connected channels: {connected_channel_names}')
 
     @routines.routine(hours=1)
@@ -490,7 +482,7 @@ class TwitchBot(commands.Bot, ABC):
         for connected_user in connected_users:
             if connected_user['twitch_id'] not in twitch_user_ids:
                 logger.info(f'{connected_user["twitch_username"]} does not exist anymore!')
-                self.initial_channel_names.remove(connected_user['twitch_id'])
+                self.initial_channel_names.remove(connected_user['twitch_username'])
                 await self.users_db.remove_user(connected_user['twitch_username'])
             else:
                 existing_users.append(connected_user)
