@@ -1,9 +1,12 @@
+import logging
 import os
 import sqlite3
 from datetime import datetime
 from typing import Tuple, Optional, List, Union
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 
 class BaseDatabase:
@@ -13,6 +16,7 @@ class BaseDatabase:
         self.c: Optional[aiosqlite.Cursor] = None
 
     async def initialize(self):
+        logger.info(f"Initializing {self.__class__.__name__}")
         self.conn = await aiosqlite.connect(self.db_path,
                                             check_same_thread=False,
                                             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)

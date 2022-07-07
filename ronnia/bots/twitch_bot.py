@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 import traceback
 from abc import ABC
 from multiprocessing import Lock
@@ -120,6 +121,12 @@ class TwitchBot(commands.Bot, ABC):
         return ServiceBusMessage(json.dumps(message_dict))
 
     def run(self):
+        logger.info(f"Running bot")
+        self.loop.run_until_complete(self.users_db.initialize())
+        self.loop.run_until_complete(self.messages_db.initialize())
+        self.loop.create_task(self.servicebus_message_receiver())
+        self.routine_update_user_information.start(stop_on_error=False)
+        self.routine_show_connected_channels.start(stop_on_error=False)
         super().run()
 
     async def event_message(self, message: Message):
@@ -383,24 +390,7 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_ready(self):
 
-        self.main_prefix = self._prefix
-
-        await self.users_db.initialize()
-        await self.messages_db.initialize()
-
-        logger.debug(f'Successfully initialized databases!')
-        logger.debug(f'Started bot instance with: {self.initial_channel_names}')
         logger.info(f'Connected channels: {self.connected_channels}')
-
-        initial_extensions = ['cogs.admin_cog']
-        for extension in initial_extensions:
-            self.load_module(extension)
-            logger.info(f'Successfully loaded: {extension}')
-
-        self.loop.create_task(self.servicebus_message_receiver())
-        self.routine_update_user_information.start(stop_on_error=False)
-        self.routine_show_connected_channels.start(stop_on_error=False)
-
         logger.info(f'Successfully initialized bot!')
         logger.info(f'Ready | {self.nick}')
 
