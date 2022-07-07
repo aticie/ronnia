@@ -85,7 +85,7 @@ class BotManager:
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
 
-        self.user_per_instance = 60
+        self.user_per_instance = 79
         self.channel_join_cooldown = 11
         self.sleep_after_instance = (self.user_per_instance // 20 + 1) * self.channel_join_cooldown
 
@@ -158,7 +158,7 @@ class BotManager:
         logger.info('Initializing queues...')
         for queue_name, queue_properties in self.servicebus_queues.items():
             try:
-                queue_details = await self.servicebus_mgmt.get_queue(queue_name)
+                await self.servicebus_mgmt.get_queue(queue_name)
             except ResourceNotFoundError:
                 await self.servicebus_mgmt.create_queue(queue_name, **queue_properties)
 

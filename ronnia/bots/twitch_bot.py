@@ -20,6 +20,7 @@ from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
+from websocket.ws import PatchedWSConnection
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +34,25 @@ class TwitchBot(commands.Bot, ABC):
         self.osu_chat_api = OsuChatApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
         self.channels_join_failed = []
 
+        initial_channels = [os.getenv('BOT_NICK'), *initial_channel_names]
         token = os.getenv('TMI_TOKEN').replace("oauth:", "")
         args = {
             'token': token,
             'client_id': os.getenv('TWITCH_CLIENT_ID'),
             'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
             'prefix': os.getenv('BOT_PREFIX'),
-            'initial_channels': [os.getenv('BOT_NICK'), *initial_channel_names]
+            'initial_channels': initial_channels
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
+
+        self._connection = PatchedWSConnection(
+            client=self,
+            token=token,
+            loop=self.loop,
+            initial_channels=initial_channels,
+            heartbeat=self._heartbeat,
+        )
 
         self.initial_channel_names = initial_channel_names
         self.environment = os.getenv('ENVIRONMENT')
