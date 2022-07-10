@@ -281,6 +281,7 @@ class TwitchBot(commands.Bot, ABC):
         time_right_now = datetime.datetime.now()
 
         channel_cooldown = await self.users_db.get_setting("cooldown", channel.name)
+        logger.debug()
         await self._prune_cooldowns(time_right_now, channel_cooldown)
 
         if author_id not in self.user_last_request:

@@ -325,6 +325,7 @@ class UserDatabase(BaseDatabase):
         if value is None:
             r = await self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
             value = await r.fetchone()
+            logger.info(f"{setting_key=} is None, reverting to default {value[0]=}")
         return value[0]
 
     async def handle_none_type_range_setting(self, value: Optional[sqlite3.Row], setting_key: str):
@@ -354,6 +355,7 @@ class UserDatabase(BaseDatabase):
             result = await self.c.execute(self.sql_string_get_setting_by_id, (setting_key, twitch_username_or_id))
 
         value = await result.fetchone()
+        logger.info(f"{setting_key=} is {value[0]=}")
         return await self.handle_none_type_setting(value, setting_key)
 
     async def set_setting(self, setting_key, twitch_username, new_value):
