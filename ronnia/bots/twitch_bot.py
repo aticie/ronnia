@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sqlite3
-import time
 import traceback
 from abc import ABC
 from multiprocessing import Lock
@@ -199,9 +198,9 @@ class TwitchBot(commands.Bot, ABC):
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = await self.users_db.get_test_status(message.channel.name)
         if not test_status and self.environment != 'testing':
-            await self.check_if_author_is_broadcaster(message)
-            await self.check_if_streaming_osu(message.channel)
-            await self._check_user_cooldown(message.author)
+            # await self.check_if_author_is_broadcaster(message)
+            # await self.check_if_streaming_osu(message.channel)
+            await self._check_user_cooldown(author=message.author, channel=message.channel)
 
         await self.check_sub_only_mode(message)
         await self.check_cp_only_mode(message)
@@ -272,7 +271,7 @@ class TwitchBot(commands.Bot, ABC):
         enabled = await self.users_db.get_enabled_status(twitch_username=channel_name)
         assert enabled, f'Channel:{channel_name} is not open for requests'
 
-    async def _check_user_cooldown(self, author: Chatter):
+    async def _check_user_cooldown(self, author: Chatter, channel: Channel):
         """
         Check if user is on cooldown, raise an exception if the user is on request cooldown.
         :param author: Twitch user object
@@ -281,7 +280,7 @@ class TwitchBot(commands.Bot, ABC):
         author_id = author.id
         time_right_now = datetime.datetime.now()
 
-        channel_cooldown = await self.users_db.get_setting("cooldown", author_id)
+        channel_cooldown = await self.users_db.get_setting("cooldown", channel.name)
         await self._prune_cooldowns(time_right_now, channel_cooldown)
 
         if author_id not in self.user_last_request:
@@ -290,7 +289,7 @@ class TwitchBot(commands.Bot, ABC):
             last_message_time = self.user_last_request[author_id]
             seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
             assert seconds_since_last_request >= channel_cooldown, \
-                f'{author.name} is on cooldown.'
+                f'{author.name} is on cooldown for {channel_cooldown - seconds_since_last_request}.'
             self.user_last_request[author_id] = time_right_now
 
         return
@@ -305,6 +304,8 @@ class TwitchBot(commands.Bot, ABC):
         for user_id, last_message_time in self.user_last_request.items():
             seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
             if seconds_since_last_request >= channel_cooldown:
+                logger.info(
+                    f'Removing cooldown for {user_id} since last request was {seconds_since_last_request} above {channel_cooldown}s cooldown')
                 pop_list.append(user_id)
 
         for user in pop_list:
