@@ -198,8 +198,8 @@ class TwitchBot(commands.Bot, ABC):
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = await self.users_db.get_test_status(message.channel.name)
         if not test_status and self.environment != 'testing':
-            # await self.check_if_author_is_broadcaster(message)
-            # await self.check_if_streaming_osu(message.channel)
+            await self.check_if_author_is_broadcaster(message)
+            await self.check_if_streaming_osu(message.channel)
             await self._check_user_cooldown(author=message.author, channel=message.channel)
 
         await self.check_sub_only_mode(message)
