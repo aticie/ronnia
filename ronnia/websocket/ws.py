@@ -28,7 +28,7 @@ class PatchedWSConnection(WSConnection):
 
     async def _join_future_handle(self, fut: asyncio.Future, channel: str):
         try:
-            await asyncio.wait_for(fut, timeout=45)
+            await asyncio.wait_for(fut, timeout=50)
         except asyncio.TimeoutError:
             log.error(f'The channel "{channel}" was unable to be joined. Check the channel is valid.')
             self._join_pending.pop(channel)
