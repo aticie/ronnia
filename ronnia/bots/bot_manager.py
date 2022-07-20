@@ -87,7 +87,7 @@ class BotManager:
 
         self.user_per_instance = 79
         self.channel_join_cooldown = 10
-        self.sleep_after_instance = (self.user_per_instance // 20 + 2) * self.channel_join_cooldown
+        self.sleep_after_instance = (self.user_per_instance // 20) * self.channel_join_cooldown * 2 + 1
 
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_webserver_queue_name = 'webserver-signups'
