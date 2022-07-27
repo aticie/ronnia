@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 import traceback
 from abc import ABC
 from multiprocessing import Lock
@@ -66,6 +67,20 @@ class TwitchBot(commands.Bot, ABC):
         self.user_last_request = {}
 
         self.max_users = max_users
+        
+    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
+        logger.info(f"Started joining {len(channels)} channels")
+        join_cooldown = 10
+        max_wait = (len(channels) // 20) * join_cooldown * 2 + 1
+        with self._join_lock():
+            start_time = time.time()
+            await super().join_channels(channels)
+            end_time = time.time()
+            logger.debug(f"Joined channels in {end_time - start_time:.2f}s")
+            if end_time - start_time < max_wait:
+                sleep_for = max_wait - (end_time - start_time)
+                logger.info(f"Join channels took earlier than expected, sleeping for: {sleep_for:.2f}s")
+                await asyncio.sleep(sleep_for)
 
     async def servicebus_message_receiver(self):
         """
