@@ -317,7 +317,7 @@ class UserDatabase(BaseDatabase):
         """
         return await self.get_setting('test', twitch_username)
 
-    async def handle_none_type_setting(self, value: str, setting_key: str):
+    async def handle_none_type_setting(self, value: Optional[sqlite3.Row], setting_key: str):
         """
         If a setting is none, gets the default value for that setting from the database
         :param value: Current value of the key - could be None or a tuple
@@ -327,8 +327,12 @@ class UserDatabase(BaseDatabase):
         if value is None:
             logger.info(f"{setting_key=} is None, reverting to default.")
             r = await self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
-            value = await r.fetchone()
-        return value[0]
+            new_value = await r.fetchone()
+            if new_value is None:
+                logger.error(f"Somehow db fetch failed? DB request was: SELECT default_value FROM settings WHERE key={setting_key}. Returned {new_value=}")
+        else:
+            new_value = value
+        return new_value[0]
 
     async def handle_none_type_range_setting(self, value: Optional[sqlite3.Row], setting_key: str):
         """
@@ -361,7 +365,7 @@ class UserDatabase(BaseDatabase):
             logger.info(f"{setting_key=} is {value=}")
         else:
             logger.info(f"{setting_key=} is {value[0]=}")
-        return await self.handle_none_type_setting(value, setting_key)
+        return await self.handle_none_type_setting(value=value, setting_key=setting_key)
 
     async def set_setting(self, setting_key, twitch_username, new_value):
         """
