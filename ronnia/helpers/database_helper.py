@@ -117,6 +117,8 @@ class UserDatabase(BaseDatabase):
         await self.define_setting('cooldown', 30, 'Cooldown for requests.')
         await self.define_range_setting('sr', -1, -1, 'Star rating limit for requests.')
 
+        logger.info(f"Successfully initialized {self.__class__.__name__}")
+
     async def set_channel_updated(self, twitch_username: str):
         await self.c.execute(f'UPDATE users SET enabled=? WHERE twitch_username=?', (1, twitch_username))
         await self.conn.commit()
@@ -323,9 +325,9 @@ class UserDatabase(BaseDatabase):
         :return: Default or current value of the setting
         """
         if value is None:
+            logger.info(f"{setting_key=} is None, reverting to default.")
             r = await self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
             value = await r.fetchone()
-            logger.info(f"{setting_key=} is None, reverting to default {value[0]=}")
         return value[0]
 
     async def handle_none_type_range_setting(self, value: Optional[sqlite3.Row], setting_key: str):
@@ -543,6 +545,8 @@ class StatisticsDatabase(BaseDatabase):
             f"error_text TEXT);"
         )
         await self.conn.commit()
+
+        logger.info(f"Successfully initialized {self.__class__.__name__}")
 
     async def add_api_usage(self, endpoint_name: str):
         """
