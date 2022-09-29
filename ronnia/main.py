@@ -1,4 +1,3 @@
-import asyncio
 import multiprocessing
 
 from ronnia.bots.bot_manager import BotManager
@@ -11,7 +10,3 @@ if __name__ == "__main__":
     multiprocessing.set_start_method('spawn')
     bot_manager = BotManager()
     bot_manager.start()
-    asyncio.gather(bot_manager.bot_queue_receiver(), bot_manager.webserver_receiver(),
-                   bot_manager.process_handler())
-    loop = asyncio.get_event_loop()
-    loop.run_forever()

@@ -146,4 +146,3 @@ class OsuChatApiV2(BaseOsuApiV2):
                 'message': message,
                 'is_action': is_action}
         await self._post_endpoint(endpoint='chat/new', data=data)
-
