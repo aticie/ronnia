@@ -128,18 +128,3 @@ def parse_beatmap_link(beatmap_link: str, content: str) -> Union[Tuple[dict, str
             return {'s': result[1]}, mods_as_text  # 'mods': mods_as_int}, mods_as_text
         else:
             return None, None
-
-
-if __name__ == '__main__':
-
-    test_beatmap_links = ['https://osu.ppy.sh/beatmapsets/1341551#osu/2778999',
-                          'https://osu.ppy.sh/beatmapsets/1341551',
-                          'https://osu.ppy.sh/b/2778999',
-                          'https://osu.ppy.sh/s/1341551',
-                          'https://old.ppy.sh/p/beatmap?b=1955170&m=3',
-                          'https://old.ppy.sh/p/beatmap?s=1955170&m=2',
-                          'https://osu.ppy.sh/beatmapsets/1222983',
-                          'https://www.xspdf.com/resolution/30209565.html']
-
-    for bmap_link in test_beatmap_links:
-        print(parse_beatmap_link(bmap_link, bmap_link))

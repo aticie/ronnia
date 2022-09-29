@@ -4,13 +4,11 @@ import json
 import logging
 import os
 import sqlite3
-import time
 import traceback
 from abc import ABC
 from multiprocessing import Lock
 from typing import AnyStr, Tuple, Union, List
 
-from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.exceptions import ServiceBusError
 from twitchio import Message, Channel, Chatter, User
@@ -20,21 +18,20 @@ from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import UserDatabase, StatisticsDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
-from websocket.ws import PatchedWSConnection
 
 logger = logging.getLogger(__name__)
 
 
 class TwitchBot(commands.Bot, ABC):
 
-    def __init__(self, initial_channel_names: List[str], join_lock: Lock, max_users: int):
+    def __init__(self, initial_channel_names: List[str], join_lock: Lock):
         self.users_db = UserDatabase()
         self.messages_db = StatisticsDatabase()
         self.osu_api = OsuApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
         self.osu_chat_api = OsuChatApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
-        self.channels_join_failed = []
 
         initial_channels = [os.getenv('BOT_NICK'), *initial_channel_names]
+        self.joined_channels = {user for user in initial_channels}
         token = os.getenv('TMI_TOKEN').replace("oauth:", "")
         args = {
             'token': token,
@@ -45,14 +42,6 @@ class TwitchBot(commands.Bot, ABC):
         }
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
-
-        self._connection = PatchedWSConnection(
-            client=self,
-            token=token,
-            loop=self.loop,
-            initial_channels=initial_channels,
-            heartbeat=self._heartbeat,
-        )
 
         self.initial_channel_names = initial_channel_names
         self.environment = os.getenv('ENVIRONMENT')
@@ -66,89 +55,39 @@ class TwitchBot(commands.Bot, ABC):
         self.main_prefix = None
         self.user_last_request = {}
 
-        self.max_users = max_users
-        
-    async def join_channels(self, channels: Union[List[str], Tuple[str]]):
-        logger.info(f"Started joining {len(channels)} channels")
-        join_cooldown = 10
-        max_wait = (len(channels) // 20) * join_cooldown * 2 + 1
-        with self._join_lock():
-            start_time = time.time()
-            await super().join_channels(channels)
-            end_time = time.time()
-            logger.debug(f"Joined channels in {end_time - start_time:.2f}s")
-            if end_time - start_time < max_wait:
-                sleep_for = max_wait - (end_time - start_time)
-                logger.info(f"Join channels took earlier than expected, sleeping for: {sleep_for:.2f}s")
-                await asyncio.sleep(sleep_for)
-
     async def servicebus_message_receiver(self):
-        """
-        Start a queue listener for messages from the website sign-up.
-        """
-        # Each instance of bot can only have 100 users.
-        if len(self.initial_channel_names) >= self.max_users:
-            logger.info(f'Reached {self.max_users} members, stopped listening to sign-up queue.')
-            return
-
         logger.info(f'Starting service bus message receiver')
         while True:
             try:
                 async with self.servicebus_client.get_queue_receiver(queue_name=self.signup_queue_name) as receiver:
                     async for message in receiver:
-                        logger.info(f'Received sign-up message: {message}')
-                        reply_message = await self.receive_and_parse_message(message)
-                        await receiver.complete_message(message)
+                        logger.info(f'Received streaming users: {message}')
+                        await self.join_streaming_channels(message)
 
-                        async with ServiceBusClient.from_connection_string(
-                                conn_str=self.servicebus_connection_string) as servicebus_client:
-                            async with servicebus_client.get_queue_sender(
-                                    queue_name=self.signup_reply_queue_name) as sender:
-                                logger.info(f'Sending reply message to sign-up queue: {reply_message}')
-                                await sender.send_messages(reply_message)
-
-                                if len(self.initial_channel_names) == 100:
-                                    logger.warning(
-                                        'Reached 100 members, sending manager signal to create a new process.')
-                                    bot_full_message = ServiceBusMessage("bot-full")
-                                    await sender.send_messages(bot_full_message)
-                                    return
             except ServiceBusError as e:
                 logger.error(f'Twitch bot receiver error: {e}')
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(5)
 
-    async def receive_and_parse_message(self, message):
-        """
-        {'command': 'signup',
-         'osu_username': 'heyronii',
-         'osu_id': 5642779,
-         'twitch_username': 'heyronii',
-         'twitch_id': '68427964',
-         'avatar_url': 'https://static-cdn.jtvnw.net/jtv_user_pictures/18057641-820c-44d0-af8d-032e129086fb-profile_image-300x300.png'}
-        """
-        message_dict = json.loads(str(message))
-        twitch_username = message_dict['twitch_username']
-        osu_username = message_dict['osu_username']
-        osu_id = message_dict['osu_id']
-        twitch_id = message_dict['twitch_id']
+    async def join_streaming_channels(self, message):
+        streaming_users_set = set(json.loads(str(message)))
+        new_channels = list(streaming_users_set.difference(self.joined_channels))
+        closed_channels = list(self.joined_channels.difference(streaming_users_set))
 
-        self.initial_channel_names.append(twitch_username)
-        await self.users_db.add_user(twitch_username=twitch_username,
-                                     twitch_id=twitch_id,
-                                     osu_username=osu_username,
-                                     osu_user_id=osu_id)
-        user_db_details = await self.users_db.get_user_from_twitch_username(twitch_username)
+        logger.info(f"Joining new channels: {new_channels}")
+        logger.info(f"Parting closed channels: {closed_channels}")
+
         with self._join_lock:
-            asyncio.create_task(self._connection._join_channel(twitch_username))
-        message_dict['user_id'] = user_db_details['user_id']
-        return ServiceBusMessage(json.dumps(message_dict))
+            await self.join_channels(new_channels)
+            await self.part_channels(closed_channels)
+
+        self.joined_channels = streaming_users_set
+        return
 
     def run(self):
         logger.info(f"Running bot")
         self.loop.run_until_complete(self.users_db.initialize())
         self.loop.run_until_complete(self.messages_db.initialize())
-        self.loop.create_task(self.servicebus_message_receiver())
         self.routine_update_user_information.start(stop_on_error=False)
         self.routine_show_connected_channels.start(stop_on_error=False)
         super().run()
@@ -416,6 +355,7 @@ class TwitchBot(commands.Bot, ABC):
 
     async def event_ready(self):
 
+        self.loop.create_task(self.servicebus_message_receiver())
         logger.info(f'Connected channels: {self.connected_channels}')
         logger.info(f'Successfully initialized bot!')
         logger.info(f'Ready | {self.nick}')

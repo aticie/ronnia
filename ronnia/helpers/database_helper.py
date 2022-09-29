@@ -1,12 +1,25 @@
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Tuple, Optional, List, Union
+from sqlite3 import Row
+from typing import Tuple, Optional, List, Union, Iterable
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DBUser:
+    _id: int
+    osu_username: str
+    twitch_username: str
+    enabled: bool
+    twitch_id: str
+    osu_id: str
+    updated_at: datetime
 
 
 class BaseDatabase:
@@ -178,7 +191,7 @@ class UserDatabase(BaseDatabase):
         await self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
         await self.conn.commit()
 
-    async def get_multiple_users_by_ids(self, twitch_ids: List[int]) -> List[sqlite3.Row]:
+    async def get_multiple_users_by_ids(self, twitch_ids: List[int]) -> Iterable[Row]:
         """
         Gets multiple users from database
         :param twitch_ids: List of twitch ids
@@ -189,7 +202,7 @@ class UserDatabase(BaseDatabase):
         users = await result.fetchall()
         return users
 
-    async def get_multiple_users_by_username(self, twitch_names: List[str]) -> List[sqlite3.Row]:
+    async def get_multiple_users_by_username(self, twitch_names: List[str]) -> Iterable[sqlite3.Row]:
         """
         Gets multiple users from database
         :param twitch_names: List of twitch names
@@ -329,7 +342,9 @@ class UserDatabase(BaseDatabase):
             r = await self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
             new_value = await r.fetchone()
             if new_value is None:
-                logger.error(f"Somehow db fetch failed? DB request was: SELECT default_value FROM settings WHERE key={setting_key}. Returned {new_value=}")
+                logger.error(
+                    f"Somehow db fetch failed? DB request was: "
+                    f"SELECT default_value FROM settings WHERE key={setting_key}. Returned {new_value=}")
         else:
             new_value = value
         return new_value[0]
@@ -352,7 +367,7 @@ class UserDatabase(BaseDatabase):
         """
         Get the setting's current value for user
         :param setting_key: Key of the setting
-        :param twitch_username: Twitch username
+        :param twitch_username_or_id: Twitch username or Twitch id
         :return:
         """
         if isinstance(twitch_username_or_id, str):
@@ -453,7 +468,7 @@ class UserDatabase(BaseDatabase):
         value = await result.fetchone()
         return value[0]
 
-    async def get_users(self, limit: int = 100, offset: int = 0) -> List[sqlite3.Row]:
+    async def get_users(self, limit: int = 100, offset: int = 0) -> Iterable[sqlite3.Row]:
         """
         Gets all users in db
         :return:
@@ -579,7 +594,7 @@ class StatisticsDatabase(BaseDatabase):
                               mods))
         await self.conn.commit()
 
-    async def get_popular_beatmap_id(self, top_n: int = 5) -> List[sqlite3.Row]:
+    async def get_popular_beatmap_id(self, top_n: int = 5) -> Iterable[sqlite3.Row]:
         """
         Gets the top_n most requested beatmap ids.
 
@@ -597,7 +612,7 @@ class StatisticsDatabase(BaseDatabase):
 
         return await cursor.fetchall()
 
-    async def get_popular_requesters(self, top_n: int = 5) -> List[sqlite3.Row]:
+    async def get_popular_requesters(self, top_n: int = 5) -> Iterable[sqlite3.Row]:
         """
         Gets the top_n most popular beatmap requester names.
         """
@@ -609,7 +624,7 @@ class StatisticsDatabase(BaseDatabase):
 
         return await cursor.fetchall()
 
-    async def get_popular_streamer_ids(self, top_n: int = 5) -> List[sqlite3.Row]:
+    async def get_popular_streamer_ids(self, top_n: int = 5) -> Iterable[sqlite3.Row]:
         """
         Gets the top_n most popular streamer channel ids.
         """
