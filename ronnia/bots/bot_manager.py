@@ -134,6 +134,7 @@ class BotManager:
         """
         while True:
             await asyncio.sleep(30)
+            self.users = [DBUser(*user) for user in self.users_db.execute('SELECT * FROM users;').fetchall()]
             all_user_twitch_ids = [user.twitch_id for user in self.users]
             streaming_users = [user["user_login"] for user in self.twitch_client.get_streams(all_user_twitch_ids)]
             await self.send_users_to_bot(streaming_users)
