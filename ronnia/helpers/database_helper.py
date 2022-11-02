@@ -26,7 +26,6 @@ class BaseDatabase:
     def __init__(self, db_path: str):
         self.db_path: str = db_path
         self.conn: Optional[aiosqlite.Connection] = None
-        self.c: Optional[aiosqlite.Cursor] = None
 
     async def initialize(self):
         logger.info(f"Initializing {self.__class__.__name__}")
@@ -35,7 +34,6 @@ class BaseDatabase:
                                             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         await self.conn.execute('PRAGMA journal_mode = DELETE')
         self.conn.row_factory = aiosqlite.Row
-        self.c = await self.conn.cursor()
 
     async def close(self):
         await self.conn.close()
@@ -76,7 +74,7 @@ class UserDatabase(BaseDatabase):
 
     async def initialize(self):
         await super().initialize()
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY AUTOINCREMENT, "
             f"osu_username text UNIQUE NOT NULL, "
             f"twitch_username text NOT NULL, "
@@ -86,27 +84,27 @@ class UserDatabase(BaseDatabase):
             f"updated_at timestamp);"
         )
 
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS user_settings (key text, "
             f"value INTEGER, "
             f"user_id INTEGER);"
         )
 
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS user_range_settings (user_id INTEGER, "
             f"range_start REAL,"
             f"range_end REAL,"
             f"key text);"
         )
 
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             f"key text UNIQUE, "
             f"default_value INTEGER, "
             f"description text);"
         )
 
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS range_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             f"key text UNIQUE, "
             f"default_low REAL, "
@@ -114,7 +112,7 @@ class UserDatabase(BaseDatabase):
             f"description text);"
         )
 
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS exclude_list (user_id INTEGER UNIQUE, "
             f"excluded_user text NOT NULL);"
         )
@@ -133,34 +131,9 @@ class UserDatabase(BaseDatabase):
         logger.info(f"Successfully initialized {self.__class__.__name__}")
 
     async def set_channel_updated(self, twitch_username: str):
-        await self.c.execute(f'UPDATE users SET enabled=? WHERE twitch_username=?', (1, twitch_username))
+        await self.conn.execute(f'UPDATE users SET enabled=? WHERE twitch_username=?', (1, twitch_username))
         await self.conn.commit()
         return
-
-    async def add_user(self,
-                       twitch_username: str,
-                       osu_username: str,
-                       osu_user_id: str,
-                       twitch_id: str,
-                       enabled_status: bool = True) -> None:
-        """
-        Adds a user to database.
-        """
-        twitch_username = twitch_username.lower()
-        osu_username = osu_username.lower().replace(' ', '_')
-
-        result = await self.c.execute(f"SELECT * FROM users WHERE twitch_username=?",
-                                      (twitch_username,))
-        user = await result.fetchone()
-        if user is None:
-            await self.c.execute(
-                f"INSERT INTO users (twitch_username, twitch_id, osu_username, osu_id, enabled, updated_at)"
-                f" VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                (twitch_username, twitch_id, osu_username, osu_user_id, enabled_status, datetime.now()))
-        else:
-            await self.c.execute(f"UPDATE users SET osu_username=?1, osu_id=?2, updated_at=?3 WHERE twitch_username=?4",
-                                 (osu_username, osu_user_id, datetime.now(), twitch_username))
-        await self.conn.commit()
 
     async def update_user(self, new_twitch_username: str, new_osu_username: str, twitch_id: str,
                           osu_user_id: str) -> None:
@@ -175,9 +148,9 @@ class UserDatabase(BaseDatabase):
         new_twitch_username = new_twitch_username.lower()
         new_osu_username = new_osu_username.lower().replace(' ', '_')
 
-        await self.c.execute(f"UPDATE users SET twitch_username=?1, osu_username=?2, updated_at=?5 "
-                             f"WHERE twitch_id=?3 AND osu_id=?4",
-                             (new_twitch_username, new_osu_username, twitch_id, osu_user_id, datetime.now()))
+        await self.conn.execute(f"UPDATE users SET twitch_username=?1, osu_username=?2, updated_at=?5 "
+                                f"WHERE twitch_id=?3 AND osu_id=?4",
+                                (new_twitch_username, new_osu_username, twitch_id, osu_user_id, datetime.now()))
         await self.conn.commit()
 
     async def remove_user(self, twitch_username: str) -> None:
@@ -188,7 +161,7 @@ class UserDatabase(BaseDatabase):
         """
         twitch_username = twitch_username.lower()
 
-        await self.c.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
+        await self.conn.execute(f"DELETE FROM users WHERE twitch_username=?", (twitch_username,))
         await self.conn.commit()
 
     async def get_multiple_users_by_ids(self, twitch_ids: List[int]) -> Iterable[Row]:
@@ -198,7 +171,7 @@ class UserDatabase(BaseDatabase):
         :return: List of users
         """
         query = f"SELECT * FROM users WHERE twitch_id IN ({','.join('?' for i in twitch_ids)})"
-        result = await self.c.execute(query, twitch_ids)
+        result = await self.conn.execute(query, twitch_ids)
         users = await result.fetchall()
         return users
 
@@ -209,7 +182,7 @@ class UserDatabase(BaseDatabase):
         :return: List of users
         """
         query = f"SELECT * FROM users WHERE twitch_username IN ({','.join('?' for i in twitch_names)})"
-        result = await self.c.execute(query, twitch_names)
+        result = await self.conn.execute(query, twitch_names)
         users = await result.fetchall()
         return users
 
@@ -221,7 +194,7 @@ class UserDatabase(BaseDatabase):
         """
         osu_username = osu_username.lower().replace(' ', '_')
 
-        cursor = await self.c.execute(f"SELECT * from users WHERE osu_username=?", (osu_username,))
+        cursor = await self.conn.execute(f"SELECT * from users WHERE osu_username=?", (osu_username,))
         result = await cursor.fetchone()
         return result
 
@@ -233,7 +206,7 @@ class UserDatabase(BaseDatabase):
         """
         twitch_username = twitch_username.lower()
 
-        cursor = await self.c.execute(f"SELECT * from users WHERE twitch_username=?", (twitch_username,))
+        cursor = await self.conn.execute(f"SELECT * from users WHERE twitch_username=?", (twitch_username,))
         result = await cursor.fetchone()
         return result
 
@@ -245,14 +218,14 @@ class UserDatabase(BaseDatabase):
         :param description: Description of the setting
         :return:
         """
-        result = await self.c.execute(f"SELECT * FROM settings WHERE key=?", (key,))
+        result = await self.conn.execute(f"SELECT * FROM settings WHERE key=?", (key,))
         setting = await result.fetchone()
         if setting is None:
-            await self.c.execute(f"INSERT INTO settings (key, default_value, description) VALUES (?, ?, ?)",
-                                 (key, default_value, description))
+            await self.conn.execute(f"INSERT INTO settings (key, default_value, description) VALUES (?, ?, ?)",
+                                    (key, default_value, description))
         else:
-            await self.c.execute(f"UPDATE settings SET default_value=?1, description=?2 WHERE key=?3",
-                                 (default_value, description, key))
+            await self.conn.execute(f"UPDATE settings SET default_value=?1, description=?2 WHERE key=?3",
+                                    (default_value, description, key))
 
         return await self.conn.commit()
 
@@ -265,12 +238,12 @@ class UserDatabase(BaseDatabase):
         :param description: Description of the setting
         :return:
         """
-        result = await self.c.execute(f"SELECT * FROM range_settings WHERE key=?", (key,))
+        result = await self.conn.execute(f"SELECT * FROM range_settings WHERE key=?", (key,))
         setting = await result.fetchone()
         if setting is None:
-            await self.c.execute(f"INSERT INTO range_settings (key, default_low, default_high, description)"
-                                 f" VALUES (?, ?, ?, ?)",
-                                 (key, default_low, default_high, description))
+            await self.conn.execute(f"INSERT INTO range_settings (key, default_low, default_high, description)"
+                                    f" VALUES (?, ?, ?, ?)",
+                                    (key, default_low, default_high, description))
             await self.conn.commit()
         return
 
@@ -339,7 +312,7 @@ class UserDatabase(BaseDatabase):
         """
         if value is None:
             logger.info(f"{setting_key=} is None, reverting to default.")
-            r = await self.c.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
+            r = await self.conn.execute(f"SELECT default_value FROM settings WHERE key=?", (setting_key,))
             new_value = await r.fetchone()
             if new_value is None:
                 logger.error(
@@ -357,8 +330,8 @@ class UserDatabase(BaseDatabase):
         :return: Default or current value of the setting
         """
         if value is None:
-            r = await self.c.execute(f"SELECT default_low, default_high FROM range_settings WHERE key=?",
-                                     (setting_key,))
+            r = await self.conn.execute(f"SELECT default_low, default_high FROM range_settings WHERE key=?",
+                                        (setting_key,))
             value = await r.fetchone()
             return value['default_low'], value['default_high']
         return value['range_start'], value['range_end']
@@ -371,15 +344,15 @@ class UserDatabase(BaseDatabase):
         :return:
         """
         if isinstance(twitch_username_or_id, str):
-            result = await self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username_or_id))
+            result = await self.conn.execute(self.sql_string_get_setting, (setting_key, twitch_username_or_id))
         else:
-            result = await self.c.execute(self.sql_string_get_setting_by_id, (setting_key, twitch_username_or_id))
+            result = await self.conn.execute(self.sql_string_get_setting_by_id, (setting_key, twitch_username_or_id))
 
         value = await result.fetchone()
         if value is None:
-            logger.info(f"{setting_key=} is {value=}")
+            logger.info(f"{self.sql_string_get_setting},{(setting_key, twitch_username_or_id)} is {value=}")
         else:
-            logger.info(f"{setting_key=} is {value[0]=}")
+            logger.info(f"{self.sql_string_get_setting},{(setting_key, twitch_username_or_id)} is {value[0]=}")
         return await self.handle_none_type_setting(value=value, setting_key=setting_key)
 
     async def set_setting(self, setting_key, twitch_username, new_value):
@@ -394,12 +367,12 @@ class UserDatabase(BaseDatabase):
 
         user_details = await self.get_user_from_twitch_username(twitch_username)
         user_id = user_details['user_id']
-        result = await self.c.execute(self.sql_string_get_setting, (setting_key, twitch_username))
+        result = await self.conn.execute(self.sql_string_get_setting, (setting_key, twitch_username))
         value = await result.fetchone()
         if value is None:
-            await self.c.execute(self.sql_string_insert_setting, (setting_key, new_value, user_id))
+            await self.conn.execute(self.sql_string_insert_setting, (setting_key, new_value, user_id))
         else:
-            await self.c.execute(self.sql_string_update_setting, (setting_key, new_value, user_id))
+            await self.conn.execute(self.sql_string_update_setting, (setting_key, new_value, user_id))
         await self.conn.commit()
         return new_value
 
@@ -431,7 +404,7 @@ class UserDatabase(BaseDatabase):
         :param setting_key: Setting key
         :return:
         """
-        result = await self.c.execute(self.sql_string_get_range_setting, (setting_key, twitch_username))
+        result = await self.conn.execute(self.sql_string_get_range_setting, (setting_key, twitch_username))
         value = await result.fetchone()
         return await self.handle_none_type_range_setting(value, setting_key)
 
@@ -450,12 +423,12 @@ class UserDatabase(BaseDatabase):
 
         user_details = await self.get_user_from_twitch_username(twitch_username)
         user_id = user_details['user_id']
-        result = await self.c.execute(self.sql_string_get_range_setting, (setting_key, twitch_username))
+        result = await self.conn.execute(self.sql_string_get_range_setting, (setting_key, twitch_username))
         value = await result.fetchone()
         if value is None:
-            await self.c.execute(self.sql_string_insert_range_setting, (setting_key, range_low, range_high, user_id))
+            await self.conn.execute(self.sql_string_insert_range_setting, (setting_key, range_low, range_high, user_id))
         else:
-            await self.c.execute(self.sql_string_update_range_setting, (setting_key, range_low, range_high, user_id))
+            await self.conn.execute(self.sql_string_update_range_setting, (setting_key, range_low, range_high, user_id))
         await self.conn.commit()
         return range_low, range_high
 
@@ -464,7 +437,7 @@ class UserDatabase(BaseDatabase):
         Gets all user count in users table
         :return:
         """
-        result = await self.c.execute("SELECT COUNT(*) FROM users;")
+        result = await self.conn.execute("SELECT COUNT(*) FROM users;")
         value = await result.fetchone()
         return value[0]
 
@@ -473,7 +446,7 @@ class UserDatabase(BaseDatabase):
         Gets all users in db
         :return:
         """
-        result = await self.c.execute("SELECT * FROM users limit ?1, ?2;", (limit, offset))
+        result = await self.conn.execute("SELECT * FROM users limit ?1, ?2;", (limit, offset))
         value = await result.fetchall()
         return value
 
@@ -487,18 +460,18 @@ class UserDatabase(BaseDatabase):
         twitch_username = twitch_username.lower()
 
         user_id = (await self.get_user_from_twitch_username(twitch_username))['user_id']
-        result = await self.c.execute("SELECT * FROM exclude_list WHERE user_id=?", (user_id,))
+        result = await self.conn.execute("SELECT * FROM exclude_list WHERE user_id=?", (user_id,))
         value = await result.fetchone()
 
         # Make a comma separated list where every username is lowercase and stripped
         excluded_users = ','.join(map(str.lower, map(str.strip, excluded_users.split(','))))
 
         if value is None:
-            await self.c.execute("INSERT INTO exclude_list (excluded_user, user_id) VALUES (?, ?)",
-                                 (excluded_users, user_id))
+            await self.conn.execute("INSERT INTO exclude_list (excluded_user, user_id) VALUES (?, ?)",
+                                    (excluded_users, user_id))
         else:
-            await self.c.execute("UPDATE exclude_list SET excluded_user=? WHERE user_id=?",
-                                 (excluded_users, user_id))
+            await self.conn.execute("UPDATE exclude_list SET excluded_user=? WHERE user_id=?",
+                                    (excluded_users, user_id))
 
         await self.conn.commit()
 
@@ -509,7 +482,7 @@ class UserDatabase(BaseDatabase):
         :param return_mode: Can be 'str' (String of comma separated values) or 'list' (List of excluded users)
         :return: Comma separated values of excluded users
         """
-        result = await self.c.execute(
+        result = await self.conn.execute(
             "SELECT * FROM exclude_list INNER JOIN users ON users.user_id=exclude_list.user_id "
             "WHERE twitch_username=?", (twitch_username,))
 
@@ -537,7 +510,7 @@ class StatisticsDatabase(BaseDatabase):
 
     async def initialize(self):
         await super().initialize()
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS beatmaps "
             f"(request_date timestamp, "
             f"beatmap_id TEXT, "
@@ -545,19 +518,19 @@ class StatisticsDatabase(BaseDatabase):
             f"requested_channel_id TEXT, "
             f"mods TEXT);"
         )
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS commands "
             f"(timestamp timestamp, "
             f"command_name TEXT, "
             f"used_from TEXT, "
             f"username TEXT);"
         )
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS api_usage "
             f"(timestamp timestamp, "
             f"endpoint TEXT);"
         )
-        await self.c.execute(
+        await self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS errors "
             f"(timestamp timestamp, "
             f"type TEXT, "
@@ -572,8 +545,8 @@ class StatisticsDatabase(BaseDatabase):
         Adds an api usage entry to database.
         :param endpoint_name: osu! Api endpoint name
         """
-        await self.c.execute("INSERT INTO api_usage (timestamp, endpoint) VALUES (?, ?)",
-                             (datetime.now(), endpoint_name))
+        await self.conn.execute("INSERT INTO api_usage (timestamp, endpoint) VALUES (?, ?)",
+                                (datetime.now(), endpoint_name))
         await self.conn.commit()
 
     async def add_request(self, requester_channel_name: str, requested_beatmap_id: int, requested_channel_name: str,
@@ -587,11 +560,11 @@ class StatisticsDatabase(BaseDatabase):
         """
         if mods == '':
             mods = None
-        await self.c.execute("INSERT INTO beatmaps "
-                             "(request_date, beatmap_id, requester_channel_name, requested_channel_id, mods) "
-                             "VALUES (?, ?, ?, ?, ?)",
-                             (datetime.now(), requested_beatmap_id, requester_channel_name, requested_channel_name,
-                              mods))
+        await self.conn.execute("INSERT INTO beatmaps "
+                                "(request_date, beatmap_id, requester_channel_name, requested_channel_id, mods) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (datetime.now(), requested_beatmap_id, requester_channel_name, requested_channel_name,
+                                 mods))
         await self.conn.commit()
 
     async def get_popular_beatmap_id(self, top_n: int = 5) -> Iterable[sqlite3.Row]:
@@ -605,10 +578,10 @@ class StatisticsDatabase(BaseDatabase):
         ORDER BY `value_occurrence` DESC
         LIMIT    1;
         """
-        cursor = await self.c.execute("SELECT beatmap_id, COUNT(beatmap_id) AS nr_of_requests FROM beatmaps "
-                                      "GROUP BY beatmap_id "
-                                      "ORDER BY nr_of_requests DESC "
-                                      f"LIMIT {top_n};")
+        cursor = await self.conn.execute("SELECT beatmap_id, COUNT(beatmap_id) AS nr_of_requests FROM beatmaps "
+                                         "GROUP BY beatmap_id "
+                                         "ORDER BY nr_of_requests DESC "
+                                         f"LIMIT {top_n};")
 
         return await cursor.fetchall()
 
@@ -616,11 +589,12 @@ class StatisticsDatabase(BaseDatabase):
         """
         Gets the top_n most popular beatmap requester names.
         """
-        cursor = await self.c.execute("SELECT requester_channel_name, COUNT(requester_channel_name) AS nr_of_requests "
-                                      "FROM beatmaps "
-                                      "GROUP BY requester_channel_name "
-                                      "ORDER BY nr_of_requests DESC "
-                                      f"LIMIT {top_n};")
+        cursor = await self.conn.execute(
+            "SELECT requester_channel_name, COUNT(requester_channel_name) AS nr_of_requests "
+            "FROM beatmaps "
+            "GROUP BY requester_channel_name "
+            "ORDER BY nr_of_requests DESC "
+            f"LIMIT {top_n};")
 
         return await cursor.fetchall()
 
@@ -628,11 +602,11 @@ class StatisticsDatabase(BaseDatabase):
         """
         Gets the top_n most popular streamer channel ids.
         """
-        cursor = await self.c.execute("SELECT requested_channel_id, COUNT(requested_channel_id) AS nr_of_requests "
-                                      "FROM beatmaps "
-                                      "GROUP BY requested_channel_id "
-                                      "ORDER BY nr_of_requests DESC "
-                                      f"LIMIT {top_n};")
+        cursor = await self.conn.execute("SELECT requested_channel_id, COUNT(requested_channel_id) AS nr_of_requests "
+                                         "FROM beatmaps "
+                                         "GROUP BY requested_channel_id "
+                                         "ORDER BY nr_of_requests DESC "
+                                         f"LIMIT {top_n};")
 
         return await cursor.fetchall()
 
@@ -643,8 +617,8 @@ class StatisticsDatabase(BaseDatabase):
         For example, if heyronii uses !echo on twitch, it will add:
         (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
         """
-        await self.c.execute("INSERT INTO commands (timestamp, command_name, used_from, username) VALUES (?,?,?,?)",
-                             (datetime.now(), command, used_on, user))
+        await self.conn.execute("INSERT INTO commands (timestamp, command_name, used_from, username) VALUES (?,?,?,?)",
+                                (datetime.now(), command, used_on, user))
         await self.conn.commit()
 
     async def add_error(self, error_type: str, error_text: Optional[str] = None):
@@ -654,6 +628,6 @@ class StatisticsDatabase(BaseDatabase):
         For example, if we get rate-limited by osu, we will add:
         (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
         """
-        await self.c.execute("INSERT INTO errors (timestamp, type, error_text) VALUES (?,?,?)",
-                             (datetime.now(), error_type, error_text))
+        await self.conn.execute("INSERT INTO errors (timestamp, type, error_text) VALUES (?,?,?)",
+                                (datetime.now(), error_type, error_text))
         await self.conn.commit()
