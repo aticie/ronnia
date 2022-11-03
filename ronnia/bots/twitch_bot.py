@@ -7,7 +7,7 @@ import sqlite3
 import traceback
 from abc import ABC
 from multiprocessing import Lock
-from typing import AnyStr, Tuple, Union, List
+from typing import AnyStr, Tuple, Union, List, Iterable
 
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus.exceptions import ServiceBusError
@@ -43,7 +43,6 @@ class TwitchBot(commands.Bot, ABC):
         logger.debug(f'Sending args to super().__init__: {args}')
         super().__init__(**args)
 
-        self.initial_channel_names = initial_channel_names
         self.environment = os.getenv('ENVIRONMENT')
         self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
         self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string)
@@ -88,8 +87,6 @@ class TwitchBot(commands.Bot, ABC):
         logger.info(f"Running bot")
         self.loop.run_until_complete(self.users_db.initialize())
         self.loop.run_until_complete(self.messages_db.initialize())
-        self.routine_update_user_information.start(stop_on_error=False)
-        self.routine_show_connected_channels.start(stop_on_error=False)
         super().run()
 
     async def event_message(self, message: Message):
@@ -356,6 +353,8 @@ class TwitchBot(commands.Bot, ABC):
     async def event_ready(self):
 
         self.loop.create_task(self.servicebus_message_receiver())
+        self.routine_update_user_information.start(stop_on_error=False)
+        self.routine_show_connected_channels.start(stop_on_error=False)
         logger.info(f'Connected channels: {self.connected_channels}')
         logger.info(f'Successfully initialized bot!')
         logger.info(f'Ready | {self.nick}')
@@ -365,15 +364,16 @@ class TwitchBot(commands.Bot, ABC):
         connected_channel_names = [channel.name for channel in list(filter(None, self.connected_channels))]
         logger.info(f'Connected channels: {connected_channel_names}')
 
-    @routines.routine(hours=1)
+    @routines.routine(minutes=5)
     async def routine_update_user_information(self):
         """
         Checks and updates user information changes. This routine runs every hour.
         :return:
         """
         logger.info('Started user information update routine')
-        connected_users = await self.users_db.get_multiple_users_by_username(self.initial_channel_names)
-        twitch_users = await self.fetch_users(names=self.initial_channel_names)
+        joined_channels = list(self.joined_channels)
+        connected_users = await self.users_db.get_multiple_users_by_username(joined_channels)
+        twitch_users = await self.fetch_users(names=joined_channels)
         twitch_users_by_id = {user.id: user for user in twitch_users}
 
         if len(twitch_users) != len(connected_users):
@@ -407,7 +407,7 @@ class TwitchBot(commands.Bot, ABC):
             f'Updated user information for {user["twitch_username"]}: '
             f'{osu_username} | {twitch_name} | {twitch_id} | {osu_user_id}')
 
-    async def handle_banned_users(self, connected_users: List[sqlite3.Row], twitch_users: List[User]) -> \
+    async def handle_banned_users(self, connected_users: Iterable[sqlite3.Row], twitch_users: List[User]) -> \
             List[sqlite3.Row]:
         """
         Removes banned users from self.connected_channel_ids and updates the database.
@@ -422,7 +422,7 @@ class TwitchBot(commands.Bot, ABC):
         for connected_user in connected_users:
             if connected_user['twitch_id'] not in twitch_user_ids:
                 logger.info(f'{connected_user["twitch_username"]} does not exist anymore!')
-                self.initial_channel_names.remove(connected_user['twitch_username'])
+                self.joined_channels.remove(connected_user['twitch_username'])
                 await self.users_db.remove_user(connected_user['twitch_username'])
             else:
                 existing_users.append(connected_user)

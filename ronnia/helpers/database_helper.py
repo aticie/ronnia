@@ -148,8 +148,9 @@ class UserDatabase(BaseDatabase):
         new_twitch_username = new_twitch_username.lower()
         new_osu_username = new_osu_username.lower().replace(' ', '_')
 
-        await self.conn.execute(f"UPDATE users SET twitch_username=?1, osu_username=?2, updated_at=?5 "
-                                f"WHERE twitch_id=?3 AND osu_id=?4",
+        query = f"UPDATE users SET twitch_username=?1, osu_username=?2, updated_at=?5 " \
+                f"WHERE twitch_id=?3 AND osu_id=?4"
+        await self.conn.execute(query,
                                 (new_twitch_username, new_osu_username, twitch_id, osu_user_id, datetime.now()))
         await self.conn.commit()
 
