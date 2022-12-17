@@ -19,7 +19,7 @@ Ronnia Dashboard is available at https://ronnia.me/
 
 Project page: https://github.com/aticie/ronnia-web
 
-Registered streamers can now change their settings from website instead of IRC commmands!
+Registered streamers can now change their settings from website.
 
 ## Disclaimer 📝
 
