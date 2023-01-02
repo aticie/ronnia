@@ -13,3 +13,4 @@ LICENSE
 *.json
 mount/
 *.pyc
+restart
