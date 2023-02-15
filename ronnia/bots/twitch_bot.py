@@ -383,7 +383,9 @@ class TwitchBot(commands.Bot, ABC):
             osu_info = await self.osu_api.get_user_info(user['osu_id'])
             twitch_info = twitch_users_by_id[int(user['twitch_id'])]
             if osu_info is None or twitch_info is None:
+                logger.info(f"User {user['twitch_username']} is not in osu! or twitch anymore. Removing from database.")
                 await self.users_db.remove_user(user["twitch_username"])
+                await self.part_channels([user["twitch_username"]])
             else:
                 await self.update_user_db_info(user, osu_info, twitch_info)
 
