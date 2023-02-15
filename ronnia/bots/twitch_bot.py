@@ -382,7 +382,10 @@ class TwitchBot(commands.Bot, ABC):
         for user in connected_users:
             osu_info = await self.osu_api.get_user_info(user['osu_id'])
             twitch_info = twitch_users_by_id[int(user['twitch_id'])]
-            await self.update_user_db_info(user, osu_info, twitch_info)
+            if osu_info is None or twitch_info is None:
+                await self.users_db.remove_user(user["twitch_username"])
+            else:
+                await self.update_user_db_info(user, osu_info, twitch_info)
 
     @routine_update_user_information.error
     async def routine_update_user_information_error(error: Exception):
