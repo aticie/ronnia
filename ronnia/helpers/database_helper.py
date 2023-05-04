@@ -3,7 +3,11 @@ import sqlite3
 from datetime import datetime
 from typing import Optional, List, Union, Iterable, Any
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
+from motor.motor_asyncio import (
+    AsyncIOMotorClient,
+    AsyncIOMotorDatabase,
+    AsyncIOMotorCollection,
+)
 from pydantic import BaseModel, Field
 from pymongo import UpdateOne
 
@@ -13,8 +17,8 @@ logger = logging.getLogger(__name__)
 class DBSettings(BaseModel):
     echo: bool = True
     enable: bool = True
-    sub_only: bool = Field(False, alias='sub-only')
-    points_only: bool = Field(False, alias='points-only')
+    sub_only: bool = Field(False, alias="sub-only")
+    points_only: bool = Field(False, alias="points-only")
     test: bool = False
     cooldown: float = 0
     sr: List[float] = [0, -1]
@@ -33,33 +37,43 @@ class DBUser(BaseModel):
 
 
 class RonniaDatabase(AsyncIOMotorClient):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.db: AsyncIOMotorDatabase = self['Ronnia']
-        self.users_col: AsyncIOMotorCollection = self.db['Users']
-        self.settings_col: AsyncIOMotorCollection = self.db['Settings']
-        self.statistics_col: AsyncIOMotorCollection = self.db['Statistics']
+        self.db: AsyncIOMotorDatabase = self["Ronnia"]
+        self.users_col: AsyncIOMotorCollection = self.db["Users"]
+        self.settings_col: AsyncIOMotorCollection = self.db["Settings"]
+        self.statistics_col: AsyncIOMotorCollection = self.db["Statistics"]
 
     async def initialize(self):
-        await self.define_setting('enable', True, 'Enables the bot.', "toggle")
-        await self.define_setting('echo', True,
-                                  'Enables Twitch chat acknowledge message.', "toggle")
-        await self.define_setting('sub-only', False, 'Subscribers only request mode.', "toggle")
-        await self.define_setting('cp-only', False, 'Channel Points only request mode.', "toggle")
-        await self.define_setting('test', False, 'Enables test mode.', "toggle")
-        await self.define_setting('cooldown', 30, 'Cooldown for requests.', "value")
-        await self.define_setting('sr', [0, -1], 'Star rating limit for requests.', "range")
+        await self.define_setting("enable", True, "Enables the bot.", "toggle")
+        await self.define_setting(
+            "echo", True, "Enables Twitch chat acknowledge message.", "toggle"
+        )
+        await self.define_setting(
+            "sub-only", False, "Subscribers only request mode.", "toggle"
+        )
+        await self.define_setting(
+            "cp-only", False, "Channel Points only request mode.", "toggle"
+        )
+        await self.define_setting("test", False, "Enables test mode.", "toggle")
+        await self.define_setting("cooldown", 30, "Cooldown for requests.", "value")
+        await self.define_setting(
+            "sr", [0, -1], "Star rating limit for requests.", "range"
+        )
 
         logger.info(f"Successfully initialized {self.__class__.__name__}")
 
-    async def get_multiple_users_by_username(self, twitch_names: List[str]) -> Iterable[DBUser]:
+    async def get_multiple_users_by_username(
+        self, twitch_names: List[str]
+    ) -> Iterable[DBUser]:
         """
         Gets multiple users from database
         :param twitch_names: List of twitch names
         :return: List of users
         """
-        users = await self.users_col.find({'twitchUsername': {'$in': twitch_names}}).to_list(length=len(twitch_names))
+        users = await self.users_col.find(
+            {"twitchUsername": {"$in": twitch_names}}
+        ).to_list(length=len(twitch_names))
         return [DBUser(**user) for user in users]
 
     async def get_user_from_osu_username(self, osu_username: str) -> sqlite3.Row:
@@ -68,9 +82,11 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param osu_username: osu username
         :return: User details of the user associated with osu username
         """
-        osu_username = osu_username.lower().replace(' ', '_')
+        osu_username = osu_username.lower().replace(" ", "_")
 
-        cursor = await self.conn.execute(f"SELECT * from users WHERE osu_username=?", (osu_username,))
+        cursor = await self.conn.execute(
+            f"SELECT * from users WHERE osu_username=?", (osu_username,)
+        )
         result = await cursor.fetchone()
         return result
 
@@ -80,7 +96,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param twitch_id: Twitch ID
         :return: User details of the user associated with twitch username
         """
-        user = await self.users_col.find_one({'twitchId': twitch_id})
+        user = await self.users_col.find_one({"twitchId": twitch_id})
         return DBUser(**user)
 
     async def get_user_from_twitch_username(self, twitch_username: str) -> DBUser:
@@ -89,10 +105,12 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param twitch_username:
         :return: User details of the user associated with twitch username
         """
-        user = await self.users_col.find_one({'twitchUsername': twitch_username})
+        user = await self.users_col.find_one({"twitchUsername": twitch_username})
         return DBUser(**user)
 
-    async def define_setting(self, name: str, default_value: Any, description: str, _type: str) -> None:
+    async def define_setting(
+        self, name: str, default_value: Any, description: str, _type: str
+    ) -> None:
         """
         Define a new user specific setting
         :param name: Setting key
@@ -101,12 +119,18 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param _type: Type of the setting
         :return:
         """
-        update_key = UpdateOne({'name': name},
-                               {'$set': {'name': name,
-                                         'value': default_value,
-                                         'description': description,
-                                         'type': _type}},
-                               upsert=True)
+        update_key = UpdateOne(
+            {"name": name},
+            {
+                "$set": {
+                    "name": name,
+                    "value": default_value,
+                    "description": description,
+                    "type": _type,
+                }
+            },
+            upsert=True,
+        )
         await self.settings_col.bulk_write([update_key])
         return
 
@@ -116,7 +140,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param twitch_username: Twitch username.
         :return: User's echo setting status
         """
-        return await self.get_setting('echo', twitch_username)
+        return await self.get_setting("echo", twitch_username)
 
     async def toggle_setting(self, setting_key: str, twitch_username: str):
         """
@@ -136,20 +160,23 @@ class RonniaDatabase(AsyncIOMotorClient):
         # Return new value
         return new_value
 
-
     async def get_enabled_status(self, twitch_username: str):
         """
         Returns if the channel has enabled requests or not
         :param twitch_username: Twitch username of the requested user
         :return: Channel enabled status
         """
-        return await self.get_setting('enable', twitch_username)
+        return await self.get_setting("enable", twitch_username)
 
     async def disable_channel(self, twitch_username: str):
-        await self.set_setting(setting_key='enable', twitch_username=twitch_username, new_value=0)
+        await self.set_setting(
+            setting_key="enable", twitch_username=twitch_username, new_value=0
+        )
 
     async def enable_channel(self, twitch_username: str):
-        await self.set_setting(setting_key='enable', twitch_username=twitch_username, new_value=1)
+        await self.set_setting(
+            setting_key="enable", twitch_username=twitch_username, new_value=1
+        )
 
     async def get_test_status(self, twitch_username: str):
         """
@@ -157,9 +184,11 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param twitch_username: Twitch username
         :return:
         """
-        return await self.get_setting('test', twitch_username)
+        return await self.get_setting("test", twitch_username)
 
-    async def get_setting(self, setting_key: str, twitch_username_or_id: Union[str, int]):
+    async def get_setting(
+        self, setting_key: str, twitch_username_or_id: Union[str, int]
+    ):
         """
         Get the setting's current value for user
         :param setting_key: Key of the setting
@@ -178,7 +207,9 @@ class RonniaDatabase(AsyncIOMotorClient):
         Gets all users in db
         :return:
         """
-        users = await self.users_col.find().skip(offset).limit(limit).to_list(length=limit)
+        users = (
+            await self.users_col.find().skip(offset).limit(limit).to_list(length=limit)
+        )
         return [DBUser(**user) for user in users]
 
     async def get_excluded_users(self, twitch_username: str) -> List[str]:
@@ -191,8 +222,13 @@ class RonniaDatabase(AsyncIOMotorClient):
         user = await self.get_user_from_twitch_username(twitch_username)
         return list(map(str.lower, user.excludedUsers))
 
-    async def add_request(self, requester_channel_name: str, requested_beatmap_id: int, requested_channel_name: str,
-                          mods: Optional[str]):
+    async def add_request(
+        self,
+        requester_channel_name: str,
+        requested_beatmap_id: int,
+        requested_channel_name: str,
+        mods: Optional[str],
+    ):
         """
         Adds a beatmap request to database.
         :param requester_channel_name: Channel name of the beatmap requester
@@ -200,11 +236,15 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param requested_channel_name: Channel id of the chat where the beatmap is requested
         :param mods: Requested mods (optional)
         """
-        self.statistics_col.insert_one({'requester_channel_name': requester_channel_name,
-                                        'requested_beatmap_id': requested_beatmap_id,
-                                        'requested_channel_name': requested_channel_name,
-                                        'mods': mods,
-                                        'timestamp': datetime.utcnow()})
+        self.statistics_col.insert_one(
+            {
+                "requester_channel_name": requester_channel_name,
+                "requested_beatmap_id": requested_beatmap_id,
+                "requested_channel_name": requested_channel_name,
+                "mods": mods,
+                "timestamp": datetime.utcnow(),
+            }
+        )
 
     async def add_error(self, error_type: str, error_text: Optional[str] = None):
         """
@@ -213,8 +253,10 @@ class RonniaDatabase(AsyncIOMotorClient):
         For example, if we get rate-limited by osu, we will add:
         (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
         """
-        await self.conn.execute("INSERT INTO errors (timestamp, type, error_text) VALUES (?,?,?)",
-                                (datetime.now(), error_type, error_text))
+        await self.conn.execute(
+            "INSERT INTO errors (timestamp, type, error_text) VALUES (?,?,?)",
+            (datetime.now(), error_type, error_text),
+        )
         await self.conn.commit()
 
     async def update_user(self, user: DBUser):
@@ -222,4 +264,6 @@ class RonniaDatabase(AsyncIOMotorClient):
         Updates user in database
         :param user: User to update
         """
-        await self.users_col.update_one({'twitchId': user.twitchId}, {'$set': user.dict()})
+        await self.users_col.update_one(
+            {"twitchId": user.twitchId}, {"$set": user.dict()}
+        )

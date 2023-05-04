@@ -21,9 +21,9 @@ class TwitchAPI:
         self.client_secret = client_secret
 
         self.session = requests.Session()
-        self.retry_policy = Retry(total=5,
-                                  backoff_factor=0.1,
-                                  status_forcelist=[500, 502, 503, 504])
+        self.retry_policy = Retry(
+            total=5, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504]
+        )
         self.session.mount("https://", HTTPAdapter(max_retries=self.retry_policy))
 
         self.access_token = self.get_token()
@@ -33,23 +33,28 @@ class TwitchAPI:
         Gets access token from Twitch API
         """
         url = "https://id.twitch.tv/oauth2/token?client_id={}&client_secret={}&grant_type=client_credentials".format(
-            self.client_id, self.client_secret)
+            self.client_id, self.client_secret
+        )
         response = self.session.post(url)
-        return response.json()['access_token']
+        return response.json()["access_token"]
 
     def get_streams(self, user_ids: List[str]):
         """
         Gets streams from Twitch API helix/streams only users playing osu!
         """
-        headers = {'Authorization': 'Bearer {}'.format(self.access_token),
-                   'Client-ID': self.client_id}
+        headers = {
+            "Authorization": "Bearer {}".format(self.access_token),
+            "Client-ID": self.client_id,
+        }
         streams = []
         for user_id in batcher(user_ids, 100):
             # game_id = 21465 is osu!
-            url = f"https://api.twitch.tv/helix/streams?first=100&game_id=21465&" + "&".join(
-                [f"user_id={user}" for user in user_id])
+            url = (
+                f"https://api.twitch.tv/helix/streams?first=100&game_id=21465&"
+                + "&".join([f"user_id={user}" for user in user_id])
+            )
             response = self.session.get(url, headers=headers)
-            streams += response.json()['data']
+            streams += response.json()["data"]
         return streams
 
 
@@ -61,7 +66,9 @@ class TwitchProcess(Process):
         self.bot = None
 
     def initialize(self):
-        self.bot = TwitchBot(initial_channel_names=self.user_list, join_lock=self.join_lock)
+        self.bot = TwitchBot(
+            initial_channel_names=self.user_list, join_lock=self.join_lock
+        )
 
     def run(self) -> None:
         self.initialize()
@@ -69,11 +76,15 @@ class TwitchProcess(Process):
 
 
 class BotManager:
-    def __init__(self, ):
+    def __init__(
+        self,
+    ):
         self.db_client = RonniaDatabase(os.getenv("MONGODB_URL"))
         self.join_lock = Lock()
 
-        self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
+        self.twitch_client = TwitchAPI(
+            os.getenv("TWITCH_CLIENT_ID"), os.getenv("TWITCH_CLIENT_SECRET")
+        )
         self._loop = asyncio.get_event_loop()
 
         self.bot_processes: Dict[TwitchProcess, List[str]] = {}
@@ -91,7 +102,9 @@ class BotManager:
         logger.info(f"Collected users: {len(streaming_user_names)}")
         p = TwitchProcess(user_list=streaming_user_names, join_lock=self.join_lock)
         p.start()
-        logger.info(f"Started Twitch bot instance for {len(streaming_user_names)} users")
+        logger.info(
+            f"Started Twitch bot instance for {len(streaming_user_names)} users"
+        )
         self.bot_processes[p] = streaming_user_names
 
         self._loop.run_until_complete(self.main())
@@ -101,13 +114,17 @@ class BotManager:
         Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
         """
 
-        address = ('localhost', 31313)
-        with Listener(address, authkey=os.getenv('TWITCH_CLIENT_SECRET').encode()) as listener:
+        address = ("localhost", 31313)
+        with Listener(
+            address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
+        ) as listener:
             with listener.accept() as conn:
                 while True:
                     try:
                         streaming_users = await self.get_streaming_users()
-                        logger.info(f'Sending streaming users to bot: {streaming_users}')
+                        logger.info(
+                            f"Sending streaming users to bot: {streaming_users}"
+                        )
                         conn.send(streaming_users)
                         await asyncio.sleep(30)
                     except Exception as e:
@@ -117,10 +134,15 @@ class BotManager:
         self.users = await self.db_client.get_users(limit=10000000)
         all_user_twitch_ids = [user.twitchId for user in self.users]
         streaming_twitch_users = self.twitch_client.get_streams(all_user_twitch_ids)
-        streaming_twitch_user_ids = [int(user["user_id"]) for user in streaming_twitch_users]
-        self.db_client.users_col.update_many({"twitchId": {"$in": streaming_twitch_user_ids}},
-                                             {"$set": {"isLive": True}})
-        self.db_client.users_col.update_many({"twitchId": {"$nin": streaming_twitch_user_ids}},
-                                             {"$set": {"isLive": False}})
+        streaming_twitch_user_ids = [
+            int(user["user_id"]) for user in streaming_twitch_users
+        ]
+        self.db_client.users_col.update_many(
+            {"twitchId": {"$in": streaming_twitch_user_ids}}, {"$set": {"isLive": True}}
+        )
+        self.db_client.users_col.update_many(
+            {"twitchId": {"$nin": streaming_twitch_user_ids}},
+            {"$set": {"isLive": False}},
+        )
         streaming_usernames = [user["user_login"] for user in streaming_twitch_users]
         return streaming_usernames

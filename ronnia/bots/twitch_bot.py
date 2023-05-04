@@ -21,26 +21,29 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchBot(commands.Bot, ABC):
-
     def __init__(self, initial_channel_names: List[str], join_lock: Lock):
         self.ronnia_db = RonniaDatabase(os.getenv("MONGODB_URL"))
-        self.osu_api = OsuApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
-        self.osu_chat_api = OsuChatApiV2(os.getenv('OSU_CLIENT_ID'), os.getenv('OSU_CLIENT_SECRET'))
+        self.osu_api = OsuApiV2(
+            os.getenv("OSU_CLIENT_ID"), os.getenv("OSU_CLIENT_SECRET")
+        )
+        self.osu_chat_api = OsuChatApiV2(
+            os.getenv("OSU_CLIENT_ID"), os.getenv("OSU_CLIENT_SECRET")
+        )
 
-        initial_channels = [os.getenv('BOT_NICK'), *initial_channel_names]
+        initial_channels = [os.getenv("BOT_NICK"), *initial_channel_names]
         self.joined_channels = {user for user in initial_channels}
-        token = os.getenv('TMI_TOKEN').replace("oauth:", "")
+        token = os.getenv("TMI_TOKEN").replace("oauth:", "")
         args = {
-            'token': token,
-            'client_id': os.getenv('TWITCH_CLIENT_ID'),
-            'client_secret': os.getenv('TWITCH_CLIENT_SECRET'),
-            'prefix': os.getenv('BOT_PREFIX'),
-            'initial_channels': initial_channels
+            "token": token,
+            "client_id": os.getenv("TWITCH_CLIENT_ID"),
+            "client_secret": os.getenv("TWITCH_CLIENT_SECRET"),
+            "prefix": os.getenv("BOT_PREFIX"),
+            "initial_channels": initial_channels,
         }
-        logger.debug(f'Sending args to super().__init__: {args}')
+        logger.debug(f"Sending args to super().__init__: {args}")
         super().__init__(**args)
 
-        self.environment = os.getenv('ENVIRONMENT')
+        self.environment = os.getenv("ENVIRONMENT")
 
         self._join_lock = join_lock
 
@@ -48,17 +51,19 @@ class TwitchBot(commands.Bot, ABC):
         self.user_last_request = {}
 
     async def streaming_channel_receiver(self):
-        logger.info(f'Starting streaming channels message receiver')
+        logger.info(f"Starting streaming channels message receiver")
 
         address = ("localhost", 31313)
-        with Client(address, authkey=os.getenv('TWITCH_CLIENT_SECRET').encode()) as conn:
+        with Client(
+            address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
+        ) as conn:
             while True:
                 try:
                     message = conn.recv()
                     logger.info(f"Received message: {message}")
                     await self.join_streaming_channels(message)
                 except Exception as e:
-                    logger.error(f'Twitch bot receiver error: {e}')
+                    logger.error(f"Twitch bot receiver error: {e}")
                     logger.error(traceback.format_exc())
                     await asyncio.sleep(5)
 
@@ -86,7 +91,9 @@ class TwitchBot(commands.Bot, ABC):
         if message.author is None:
             logger.info(f"{message.channel.name}: {message.content}")
             return
-        logger.info(f"{message.channel.name} - {message.author.name}: {message.content}")
+        logger.info(
+            f"{message.channel.name} - {message.author.name}: {message.content}"
+        )
 
         if self.environment == "testing":
             return
@@ -96,55 +103,71 @@ class TwitchBot(commands.Bot, ABC):
             await self.check_channel_enabled(message.channel.name)
             await self.handle_request(message)
         except AssertionError as e:
-            logger.info(f'Check unsuccessful: {e}')
+            logger.info(f"Check unsuccessful: {e}")
 
     async def handle_request(self, message: Message):
         given_mods, api_params = self._check_message_contains_beatmap_link(message)
         if given_mods is not None:
-            if 's' in api_params:
-                beatmap_info, beatmapset_info = await self.osu_api.get_beatmapset(api_params['s'])
+            if "s" in api_params:
+                beatmap_info, beatmapset_info = await self.osu_api.get_beatmapset(
+                    api_params["s"]
+                )
             else:
-                beatmap_info, beatmapset_info = await self.osu_api.get_beatmap(api_params['b'])
+                beatmap_info, beatmapset_info = await self.osu_api.get_beatmap(
+                    api_params["b"]
+                )
 
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
                 # If user has enabled echo setting, send twitch chat a message
-                if await self.ronnia_db.get_echo_status(twitch_username=message.channel.name):
-                    await self._send_twitch_message(message=message,
-                                                    beatmap_info=beatmap_info,
-                                                    beatmapset_info=beatmapset_info)
+                if await self.ronnia_db.get_echo_status(
+                    twitch_username=message.channel.name
+                ):
+                    await self._send_twitch_message(
+                        message=message,
+                        beatmap_info=beatmap_info,
+                        beatmapset_info=beatmapset_info,
+                    )
 
-                await self._send_beatmap_to_in_game(message=message,
-                                                    beatmap_info=beatmap_info,
-                                                    beatmapset_info=beatmapset_info,
-                                                    given_mods=given_mods)
-                await self.ronnia_db.add_request(requested_beatmap_id=int(beatmap_info['id']),
-                                                 requested_channel_name=message.channel.name,
-                                                 requester_channel_name=message.author.name,
-                                                 mods=given_mods)
+                await self._send_beatmap_to_in_game(
+                    message=message,
+                    beatmap_info=beatmap_info,
+                    beatmapset_info=beatmapset_info,
+                    given_mods=given_mods,
+                )
+                await self.ronnia_db.add_request(
+                    requested_beatmap_id=int(beatmap_info["id"]),
+                    requested_channel_name=message.channel.name,
+                    requester_channel_name=message.author.name,
+                    mods=given_mods,
+                )
 
     async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         twitch_username = message.channel.name
         requester_name = message.author.name
-        diff_rating = float(beatmap_info['difficulty_rating'])
-        range_low, range_high = await self.ronnia_db.get_range_setting(twitch_username=twitch_username,
-                                                                       setting_key='sr')
+        diff_rating = float(beatmap_info["difficulty_rating"])
+        range_low, range_high = await self.ronnia_db.get_range_setting(
+            twitch_username=twitch_username, setting_key="sr"
+        )
 
         if range_low == -1 or range_high == -1:
             return
 
-        assert range_low < diff_rating < range_high, \
-            f'@{requester_name} Streamer is accepting requests between {range_low:.1f}-{range_high:.1f}* difficulty.' \
-            f' Your map is {diff_rating:.1f}*.'
+        assert range_low < diff_rating < range_high, (
+            f"@{requester_name} Streamer is accepting requests between {range_low:.1f}-{range_high:.1f}* difficulty."
+            f" Your map is {diff_rating:.1f}*."
+        )
 
         return
 
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = await self.ronnia_db.get_test_status(message.channel.name)
-        if not test_status and self.environment != 'testing':
+        if not test_status and self.environment != "testing":
             await self.check_if_author_is_broadcaster(message)
             await self.check_if_streaming_osu(message.channel)
-            await self._check_user_cooldown(author=message.author, channel=message.channel)
+            await self._check_user_cooldown(
+                author=message.author, channel=message.channel
+            )
 
         await self.check_sub_only_mode(message)
         await self.check_cp_only_mode(message)
@@ -156,19 +179,28 @@ class TwitchBot(commands.Bot, ABC):
             raise AssertionError
 
     async def check_user_excluded(self, message: Message):
-        excluded_users = await self.ronnia_db.get_excluded_users(twitch_username=message.channel.name)
-        assert message.author.name.lower() not in excluded_users, f'{message.author.name} is excluded'
+        excluded_users = await self.ronnia_db.get_excluded_users(
+            twitch_username=message.channel.name
+        )
+        assert (
+            message.author.name.lower() not in excluded_users
+        ), f"{message.author.name} is excluded"
 
     async def check_sub_only_mode(self, message: Message):
-        is_sub_only = await self.ronnia_db.get_setting('sub-only', message.channel.name)
+        is_sub_only = await self.ronnia_db.get_setting("sub-only", message.channel.name)
         if is_sub_only:
-            assert message.author.is_mod or message.author.is_subscriber != '0' or 'vip' in message.author.badges, \
-                'Subscriber only request mode is active.'
+            assert (
+                message.author.is_mod
+                or message.author.is_subscriber != "0"
+                or "vip" in message.author.badges
+            ), "Subscriber only request mode is active."
 
     async def check_cp_only_mode(self, message):
-        is_cp_only = await self.ronnia_db.get_setting('cp-only', message.channel.name)
+        is_cp_only = await self.ronnia_db.get_setting("cp-only", message.channel.name)
         if is_cp_only:
-            assert 'custom-reward-id' in message.tags, 'Channel Points only mode is active.'
+            assert (
+                "custom-reward-id" in message.tags
+            ), "Channel Points only mode is active."
         return
 
     async def event_error(self, error: Exception, data: str = None):
@@ -178,8 +210,9 @@ class TwitchBot(commands.Bot, ABC):
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
-
-        assert message.author.name != message.channel.name, 'Author is broadcaster and not in test mode.'
+        assert (
+            message.author.name != message.channel.name
+        ), "Author is broadcaster and not in test mode."
 
         return
 
@@ -190,8 +223,10 @@ class TwitchBot(commands.Bot, ABC):
         :return:
         """
         user = await self.ronnia_db.get_user_from_twitch_username(ctx.author.name)
-        assert user is not None, 'User does not exist'
-        assert ctx.message.channel.name == ctx.author.name, 'Message is not in author\'s channel'
+        assert user is not None, "User does not exist"
+        assert (
+            ctx.message.channel.name == ctx.author.name
+        ), "Message is not in author's channel"
 
     async def check_if_streaming_osu(self, channel: Channel):
         """
@@ -200,15 +235,15 @@ class TwitchBot(commands.Bot, ABC):
         :return:
         """
         stream_list = await self.fetch_streams(user_logins=[channel.name])
-        assert len(stream_list) == 1, f'{channel.name} stream is not on.'
+        assert len(stream_list) == 1, f"{channel.name} stream is not on."
         stream = stream_list[0]
-        assert stream.game_name == 'osu!', f'{channel.name} stream is not playing osu!'
+        assert stream.game_name == "osu!", f"{channel.name} stream is not playing osu!"
 
         return
 
     async def check_channel_enabled(self, channel_name):
         enabled = await self.ronnia_db.get_enabled_status(twitch_username=channel_name)
-        assert enabled, f'Channel:{channel_name} is not open for requests'
+        assert enabled, f"Channel:{channel_name} is not open for requests"
 
     async def _check_user_cooldown(self, author: Chatter, channel: Channel):
         """
@@ -226,14 +261,19 @@ class TwitchBot(commands.Bot, ABC):
             self.user_last_request[author_id] = time_right_now
         else:
             last_message_time = self.user_last_request[author_id]
-            seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
-            assert seconds_since_last_request >= channel_cooldown, \
-                f'{author.name} is on cooldown for {channel_cooldown - seconds_since_last_request}.'
+            seconds_since_last_request = (
+                time_right_now - last_message_time
+            ).total_seconds()
+            assert (
+                seconds_since_last_request >= channel_cooldown
+            ), f"{author.name} is on cooldown for {channel_cooldown - seconds_since_last_request}."
             self.user_last_request[author_id] = time_right_now
 
         return
 
-    async def _prune_cooldowns(self, time_right_now: datetime.datetime, channel_cooldown: int):
+    async def _prune_cooldowns(
+        self, time_right_now: datetime.datetime, channel_cooldown: int
+    ):
         """
         Prunes users on that are on cooldown list so it doesn't get too cluttered.
         :param time_right_now:
@@ -241,12 +281,15 @@ class TwitchBot(commands.Bot, ABC):
         """
         pop_list = []
         for user_id, last_message_time in self.user_last_request.items():
-            seconds_since_last_request = (time_right_now - last_message_time).total_seconds()
+            seconds_since_last_request = (
+                time_right_now - last_message_time
+            ).total_seconds()
             if seconds_since_last_request >= channel_cooldown:
                 logger.info(
-                    f'Removing cooldown for {user_id} '
-                    f'since last request was {seconds_since_last_request} '
-                    f'above {channel_cooldown}s cooldown')
+                    f"Removing cooldown for {user_id} "
+                    f"since last request was {seconds_since_last_request} "
+                    f"above {channel_cooldown}s cooldown"
+                )
                 pop_list.append(user_id)
 
         for user in pop_list:
@@ -254,8 +297,13 @@ class TwitchBot(commands.Bot, ABC):
 
         return
 
-    async def _send_beatmap_to_in_game(self, message: Message, beatmap_info: dict, beatmapset_info: dict,
-                                       given_mods: str):
+    async def _send_beatmap_to_in_game(
+        self,
+        message: Message,
+        beatmap_info: dict,
+        beatmapset_info: dict,
+        given_mods: str,
+    ):
         """
         Sends the beatmap request message to osu!irc bot
         :param message: Twitch Message object
@@ -263,31 +311,39 @@ class TwitchBot(commands.Bot, ABC):
         :param given_mods: String of mods if they are requested, empty string instead
         :return:
         """
-        irc_message = await self._prepare_irc_message(message=message,
-                                                      beatmap_info=beatmap_info,
-                                                      beatmapset_info=beatmapset_info,
-                                                      given_mods=given_mods)
-        target_id = (await self.ronnia_db.get_user_from_twitch_username(message.channel.name))['osu_id']
+        irc_message = await self._prepare_irc_message(
+            message=message,
+            beatmap_info=beatmap_info,
+            beatmapset_info=beatmapset_info,
+            given_mods=given_mods,
+        )
+        target_id = (
+            await self.ronnia_db.get_user_from_twitch_username(message.channel.name)
+        )["osu_id"]
         await self.osu_chat_api.send_message(target_id=target_id, message=irc_message)
         return
 
     @staticmethod
-    async def _send_twitch_message(message: Message, beatmapset_info: dict, beatmap_info: dict):
+    async def _send_twitch_message(
+        message: Message, beatmapset_info: dict, beatmap_info: dict
+    ):
         """
         Sends twitch feedback message
         :param message: Twitch Message object
         :param beatmap_info: Dictionary containing beatmap information from osu! api
         :return:
         """
-        artist = beatmapset_info['artist']
-        title = beatmapset_info['title']
-        version = beatmap_info['version']
+        artist = beatmapset_info["artist"]
+        title = beatmapset_info["title"]
+        version = beatmap_info["version"]
         bmap_info_text = f"{artist} - {title} [{version}]"
         await message.channel.send(f"{bmap_info_text} - Request sent!")
         return
 
     @staticmethod
-    def _check_message_contains_beatmap_link(message: Message) -> Tuple[Union[AnyStr, None], Union[dict, None]]:
+    def _check_message_contains_beatmap_link(
+        message: Message,
+    ) -> Tuple[Union[AnyStr, None], Union[dict, None]]:
         """
         Splits message by space character and checks for possible beatmap links
         :param message: Twitch Message object
@@ -296,7 +352,7 @@ class TwitchBot(commands.Bot, ABC):
         logger.debug("Checking if message contains beatmap link")
         content = message.content
 
-        for candidate_link in content.split(' '):
+        for candidate_link in content.split(" "):
             result, mods = parse_beatmap_link(candidate_link, content)
             if result:
                 logger.info(f"Found beatmap id: {result}")
@@ -306,11 +362,11 @@ class TwitchBot(commands.Bot, ABC):
             return None, None
 
     async def _prepare_irc_message(
-            self,
-            message: Message,
-            beatmap_info: dict,
-            beatmapset_info: dict,
-            given_mods: str
+        self,
+        message: Message,
+        beatmap_info: dict,
+        beatmapset_info: dict,
+        given_mods: str,
     ):
         """
         Prepare beatmap request message to send to osu!irc.
@@ -319,16 +375,18 @@ class TwitchBot(commands.Bot, ABC):
         :param given_mods: Mods as string
         :return:
         """
-        artist = beatmapset_info['artist']
-        title = beatmapset_info['title']
-        version = beatmap_info['version']
-        bpm = beatmap_info['bpm']
-        beatmap_status = str(beatmap_info['status']).capitalize()
-        difficultyrating = float(beatmap_info['difficulty_rating'])
-        beatmap_id = beatmap_info['id']
-        beatmap_length = convert_seconds_to_readable(beatmap_info['hit_length'])
-        beatmap_info = f"[https://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] " \
-                       f"({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
+        artist = beatmapset_info["artist"]
+        title = beatmapset_info["title"]
+        version = beatmap_info["version"]
+        bpm = beatmap_info["bpm"]
+        beatmap_status = str(beatmap_info["status"]).capitalize()
+        difficultyrating = float(beatmap_info["difficulty_rating"])
+        beatmap_id = beatmap_info["id"]
+        beatmap_length = convert_seconds_to_readable(beatmap_info["hit_length"])
+        beatmap_info = (
+            f"[https://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] "
+            f"({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
+        )
         extra_postfix = ""
         extra_prefix = ""
 
@@ -338,23 +396,24 @@ class TwitchBot(commands.Bot, ABC):
             extra_prefix += "[MOD] "
         elif message.author.is_subscriber:
             extra_prefix += "[SUB] "
-        elif 'vip' in badges:
+        elif "vip" in badges:
             extra_prefix += "[VIP] "
 
-        if 'custom-reward-id' in message.tags:
+        if "custom-reward-id" in message.tags:
             extra_postfix += "+ USED POINTS"
 
         return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
 
     async def event_ready(self):
-
         self.loop.create_task(self.streaming_channel_receiver())
         self.routine_show_connected_channels.start(stop_on_error=False)
-        logger.info(f'Connected channels: {self.connected_channels}')
-        logger.info(f'Successfully initialized bot!')
-        logger.info(f'Ready | {self.nick}')
+        logger.info(f"Connected channels: {self.connected_channels}")
+        logger.info(f"Successfully initialized bot!")
+        logger.info(f"Ready | {self.nick}")
 
     @routines.routine(minutes=1)
     async def routine_show_connected_channels(self):
-        connected_channel_names = [channel.name for channel in list(filter(None, self.connected_channels))]
-        logger.info(f'Connected channels: {connected_channel_names}')
+        connected_channel_names = [
+            channel.name for channel in list(filter(None, self.connected_channels))
+        ]
+        logger.info(f"Connected channels: {connected_channel_names}")
