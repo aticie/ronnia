@@ -51,7 +51,7 @@ class TwitchBot(commands.Bot, ABC):
         self.user_last_request = {}
 
     async def streaming_channel_receiver(self):
-        logger.info(f"Starting streaming channels message receiver")
+        logger.info("Starting streaming channels message receiver")
 
         address = ("localhost", 31313)
         with Client(
