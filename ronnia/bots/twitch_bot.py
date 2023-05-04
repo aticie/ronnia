@@ -408,7 +408,7 @@ class TwitchBot(commands.Bot, ABC):
         self.loop.create_task(self.streaming_channel_receiver())
         self.routine_show_connected_channels.start(stop_on_error=False)
         logger.info(f"Connected channels: {self.connected_channels}")
-        logger.info(f"Successfully initialized bot!")
+        logger.info("Successfully initialized bot!")
         logger.info(f"Ready | {self.nick}")
 
     @routines.routine(minutes=1)

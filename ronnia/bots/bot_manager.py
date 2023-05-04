@@ -32,8 +32,11 @@ class TwitchAPI:
         """
         Gets access token from Twitch API
         """
-        url = "https://id.twitch.tv/oauth2/token?client_id={}&client_secret={}&grant_type=client_credentials".format(
-            self.client_id, self.client_secret
+        url = (
+            f"https://id.twitch.tv/oauth2/token?"
+            f"client_id={self.client_id}&"
+            f"client_secret={self.client_secret}&"
+            f"grant_type=client_credentials"
         )
         response = self.session.post(url)
         return response.json()["access_token"]
@@ -50,7 +53,7 @@ class TwitchAPI:
         for user_id in batcher(user_ids, 100):
             # game_id = 21465 is osu!
             url = (
-                f"https://api.twitch.tv/helix/streams?first=100&game_id=21465&"
+                "https://api.twitch.tv/helix/streams?first=100&game_id=21465&"
                 + "&".join([f"user_id={user}" for user in user_id])
             )
             response = self.session.get(url, headers=headers)
