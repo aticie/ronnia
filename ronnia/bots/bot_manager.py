@@ -1,20 +1,14 @@
 import asyncio
-import datetime
-import json
 import logging
 import os
-import sqlite3
 from multiprocessing import Process, Lock
+from multiprocessing.connection import Listener
 from typing import List, Dict
 
 import requests
-from azure.servicebus import ServiceBusMessage
 from requests.adapters import Retry, HTTPAdapter
-from azure.core.exceptions import ResourceNotFoundError
-from azure.servicebus.aio import ServiceBusClient
-from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
-from helpers.database_helper import DBUser
+from helpers.database_helper import DBUser, RonniaDatabase
 from ronnia.bots.twitch_bot import TwitchBot
 from ronnia.helpers.utils import batcher
 
@@ -76,31 +70,11 @@ class TwitchProcess(Process):
 
 class BotManager:
     def __init__(self, ):
-        self.users_db = sqlite3.connect(os.path.join(os.getenv('DB_DIR'), 'users.db'))
+        self.db_client = RonniaDatabase(os.getenv("MONGODB_URL"))
         self.join_lock = Lock()
 
         self.twitch_client = TwitchAPI(os.getenv('TWITCH_CLIENT_ID'), os.getenv('TWITCH_CLIENT_SECRET'))
         self._loop = asyncio.get_event_loop()
-
-        self.servicebus_connection_string = os.getenv('SERVICE_BUS_CONNECTION_STR')
-        self.servicebus_webserver_queue_name = 'webserver-signups'
-        self.servicebus_webserver_reply_queue_name = 'webserver-signups-reply'
-        self.servicebus_bot_queue_name = 'bot-signups'
-        self.servicebus_bot_reply_queue_name = 'bot-signups-reply'
-        self.servicebus_queues = {'webserver-signups': {'max_delivery_count': 100,
-                                                        'default_message_time_to_live': datetime.timedelta(seconds=10)},
-                                  'webserver-signups-reply': {'max_delivery_count': 100,
-                                                              'default_message_time_to_live': datetime.timedelta(
-                                                                  seconds=10)},
-                                  'bot-signups': {'max_delivery_count': 100,
-                                                  'default_message_time_to_live': datetime.timedelta(seconds=10)},
-                                  'bot-signups-reply': {'max_delivery_count': 100,
-                                                        'default_message_time_to_live': datetime.timedelta(seconds=10)},
-                                  }
-
-        self.servicebus_mgmt = ServiceBusAdministrationClient.from_connection_string(self.servicebus_connection_string)
-        self.servicebus_client = ServiceBusClient.from_connection_string(conn_str=self.servicebus_connection_string,
-                                                                         logging_enable=True)
 
         self.bot_processes: Dict[TwitchProcess, List[str]] = {}
         self.users: List[DBUser] = []
@@ -111,12 +85,8 @@ class BotManager:
 
         Creates an IRCBot process and multiple TwitchBot processes.
         """
-        self._loop.run_until_complete(self.initialize_queues())
-        logger.info("ServiceBus queues initialized")
-        self.users = [DBUser(*user) for user in self.users_db.execute('SELECT * FROM users;').fetchall()]
-
-        all_user_twitch_ids = [user.twitch_id for user in self.users]
-        streaming_user_names = [user['user_login'] for user in self.twitch_client.get_streams(all_user_twitch_ids)]
+        self._loop.run_until_complete(self.db_client.initialize())
+        streaming_user_names = self._loop.run_until_complete(self.get_streaming_users())
 
         logger.info(f"Collected users: {len(streaming_user_names)}")
         p = TwitchProcess(user_list=streaming_user_names, join_lock=self.join_lock)
@@ -124,44 +94,33 @@ class BotManager:
         logger.info(f"Started Twitch bot instance for {len(streaming_user_names)} users")
         self.bot_processes[p] = streaming_user_names
 
-        asyncio.run(self.main())
-        loop = asyncio.get_event_loop()
-        loop.run_forever()
+        self._loop.run_until_complete(self.main())
 
     async def main(self):
         """
         Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
         """
-        while True:
-            try:
-                await asyncio.sleep(30)
-                self.users = [DBUser(*user) for user in self.users_db.execute('SELECT * FROM users;').fetchall()]
-                all_user_twitch_ids = [user.twitch_id for user in self.users]
-                streaming_users = [user["user_login"] for user in self.twitch_client.get_streams(all_user_twitch_ids)]
-                await self.send_users_to_bot(streaming_users)
-            except Exception as e:
-                logger.error(e)
 
-    async def initialize_queues(self):
-        """
-        Initializes webserver & bot, signup and reply queues
-        """
-        logger.info('Initializing queues...')
-        for queue_name, queue_properties in self.servicebus_queues.items():
-            try:
-                await self.servicebus_mgmt.get_queue(queue_name)
-            except ResourceNotFoundError:
-                await self.servicebus_mgmt.create_queue(queue_name, **queue_properties)
+        address = ('localhost', 31313)
+        with Listener(address, authkey=os.getenv('TWITCH_CLIENT_SECRET').encode()) as listener:
+            with listener.accept() as conn:
+                while True:
+                    try:
+                        streaming_users = await self.get_streaming_users()
+                        logger.info(f'Sending streaming users to bot: {streaming_users}')
+                        conn.send(streaming_users)
+                        await asyncio.sleep(30)
+                    except Exception as e:
+                        logger.error(e)
 
-    async def send_users_to_bot(self, twitch_usernames: List[str]):
-        """
-        Receive a message from the webserver signup queue and parse it.
-
-        Decide whether to send the message to the bot, or create a new TwitchBot instance.
-        """
-
-        logger.info(f'Sending streaming users to bot: {twitch_usernames}')
-        async with ServiceBusClient.from_connection_string(self.servicebus_connection_string) as sb_client:
-            async with sb_client.get_queue_sender(queue_name=self.servicebus_bot_queue_name) as sender:
-                logger.debug(f'Sending message to bot: {twitch_usernames}')
-                await sender.send_messages(ServiceBusMessage(json.dumps(twitch_usernames)))
+    async def get_streaming_users(self):
+        self.users = await self.db_client.get_users(limit=10000000)
+        all_user_twitch_ids = [user.twitchId for user in self.users]
+        streaming_twitch_users = self.twitch_client.get_streams(all_user_twitch_ids)
+        streaming_twitch_user_ids = [int(user["user_id"]) for user in streaming_twitch_users]
+        self.db_client.users_col.update_many({"twitchId": {"$in": streaming_twitch_user_ids}},
+                                             {"$set": {"isLive": True}})
+        self.db_client.users_col.update_many({"twitchId": {"$nin": streaming_twitch_user_ids}},
+                                             {"$set": {"isLive": False}})
+        streaming_usernames = [user["user_login"] for user in streaming_twitch_users]
+        return streaming_usernames
