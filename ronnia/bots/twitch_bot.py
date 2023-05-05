@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import functools
 import json
 import logging
 import os
@@ -59,7 +60,7 @@ class TwitchBot(commands.Bot, ABC):
         ) as conn:
             while True:
                 try:
-                    message = conn.recv()
+                    message = await self.loop.run_in_executor(None, conn.recv)
                     logger.info(f"Received message: {message}")
                     await self.join_streaming_channels(message)
                 except Exception as e:
