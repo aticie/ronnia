@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 from datetime import datetime
-from typing import Optional, List, Union, Iterable, Any
+from typing import Optional, List, Union, Iterable, Any, Sequence, Collection
 
 from motor.motor_asyncio import (
     AsyncIOMotorClient,
@@ -10,6 +10,9 @@ from motor.motor_asyncio import (
 )
 from pydantic import BaseModel, Field
 from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
+from pymongo.collection import Collection, _WriteOp
+from pymongo.typings import _DocumentType
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,9 @@ class RonniaDatabase(AsyncIOMotorClient):
         await self.define_setting(
             "points-only", False, "Channel Points only request mode.", "toggle"
         )
-        await self.define_setting("test", False, "Enables test mode. (Removes all restrictions.)", "toggle")
+        await self.define_setting(
+            "test", False, "Enables test mode. (Removes all restrictions.)", "toggle"
+        )
         await self.define_setting("cooldown", 30, "Cooldown for requests.", "value")
         await self.define_setting(
             "sr", [0, -1], "Star rating limit for requests.", "range"
@@ -131,8 +136,38 @@ class RonniaDatabase(AsyncIOMotorClient):
             },
             upsert=True,
         )
-        await self.settings_col.bulk_write([update_key])
+        await self.bulk_write_operations(operations=[update_key], col=self.settings_col)
         return
+
+    async def bulk_write_operations(
+        self,
+        operations: Sequence[_WriteOp[_DocumentType]],
+        col: Optional[Collection] = None,
+    ):
+        """Bulk write multiple operations to the given collection. \
+        Defaults writing to "Metrics" collection."""
+        if col is None:
+            col = self.col
+        try:
+            if len(operations) != 0:
+                result = await col.bulk_write(operations)
+            else:
+                return
+
+        except BulkWriteError as e:
+            non_duplicates_list = list(
+                filter(lambda x: x["code"] != 11000, e.details["writeErrors"])
+            )
+            logger.info(
+                f"Had duplicates, bulk_write "
+                f"{len(non_duplicates_list) / len(operations)} of operations."
+            )
+        else:
+            logger.info(
+                f"Completed with no errors. Bulk_write {len(operations)} "
+                f"operations to MongoDB. {result.bulk_api_result}"
+            )
+            return result
 
     async def get_echo_status(self, twitch_username: str) -> bool:
         """
@@ -207,9 +242,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         Gets all enabled users in db
         :return:
         """
-        users = (
-            await self.users_col.find({"settings.enable": 1}).to_list(length=None)
-        )
+        users = await self.users_col.find({"settings.enable": 1}).to_list(length=None)
         return [DBUser(**user) for user in users]
 
     async def get_excluded_users(self, twitch_username: str) -> List[str]:

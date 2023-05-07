@@ -6,6 +6,7 @@ from multiprocessing.connection import Listener
 from typing import List, Dict
 
 import requests
+from pymongo import UpdateOne
 from requests.adapters import Retry, HTTPAdapter
 
 from helpers.database_helper import DBUser, RonniaDatabase
@@ -137,13 +138,24 @@ class BotManager:
         self.users = await self.db_client.get_enabled_users()
         all_user_twitch_ids = [user.twitchId for user in self.users]
         streaming_twitch_users = self.twitch_client.get_streams(all_user_twitch_ids)
-        streaming_twitch_user_ids = [
-            int(user["user_id"]) for user in streaming_twitch_users
-        ]
-        self.db_client.users_col.update_many(
-            {"twitchId": {"$in": streaming_twitch_user_ids}}, {"$set": {"isLive": True}}
+        streaming_twitch_user_ids = []
+        operations = []
+        for user in streaming_twitch_users:
+            twitch_username = user["user_login"]
+            twitch_id = int(user["user_id"])
+            streaming_twitch_user_ids.append(twitch_id)
+            operations.append(
+                UpdateOne(
+                    {"twitchId": twitch_id},
+                    {"$set": {"isLive": True, "twitchUsername": twitch_username}},
+                    upsert=True,
+                )
+            )
+
+        await self.db_client.bulk_write_operations(
+            operations=operations, col=self.db_client.users_col
         )
-        self.db_client.users_col.update_many(
+        await self.db_client.users_col.update_many(
             {"twitchId": {"$nin": streaming_twitch_user_ids}},
             {"$set": {"isLive": False}},
         )
