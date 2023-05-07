@@ -145,8 +145,8 @@ class TwitchBot(commands.Bot, ABC):
         twitch_username = message.channel.name
         requester_name = message.author.name
         diff_rating = float(beatmap_info["difficulty_rating"])
-        range_low, range_high = await self.ronnia_db.get_range_setting(
-            twitch_username=twitch_username, setting_key="sr"
+        range_low, range_high = await self.ronnia_db.get_setting(
+            twitch_username_or_id=twitch_username, setting_key="sr"
         )
 
         if range_low == -1 or range_high == -1:
