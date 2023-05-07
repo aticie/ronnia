@@ -195,7 +195,7 @@ class TwitchBot(commands.Bot, ABC):
             ), "Subscriber only request mode is active."
 
     async def check_cp_only_mode(self, message):
-        is_cp_only = await self.ronnia_db.get_setting("cp-only", message.channel.name)
+        is_cp_only = await self.ronnia_db.get_setting("points-only", message.channel.name)
         if is_cp_only:
             assert (
                 "custom-reward-id" in message.tags
