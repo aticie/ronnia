@@ -53,9 +53,9 @@ class RonniaDatabase(AsyncIOMotorClient):
             "sub-only", False, "Subscribers only request mode.", "toggle"
         )
         await self.define_setting(
-            "cp-only", False, "Channel Points only request mode.", "toggle"
+            "points-only", False, "Channel Points only request mode.", "toggle"
         )
-        await self.define_setting("test", False, "Enables test mode.", "toggle")
+        await self.define_setting("test", False, "Enables test mode. (Removes all restrictions.)", "toggle")
         await self.define_setting("cooldown", 30, "Cooldown for requests.", "value")
         await self.define_setting(
             "sr", [0, -1], "Star rating limit for requests.", "range"
