@@ -202,13 +202,13 @@ class RonniaDatabase(AsyncIOMotorClient):
         settings = user.settings.dict(by_alias=True)
         return settings[setting_key]
 
-    async def get_users(self, limit: int = 100, offset: int = 0) -> Iterable[DBUser]:
+    async def get_enabled_users(self) -> Iterable[DBUser]:
         """
-        Gets all users in db
+        Gets all enabled users in db
         :return:
         """
         users = (
-            await self.users_col.find().skip(offset).limit(limit).to_list(length=limit)
+            await self.users_col.find({"settings.enable": 1})
         )
         return [DBUser(**user) for user in users]
 

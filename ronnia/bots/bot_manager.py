@@ -134,7 +134,7 @@ class BotManager:
                         logger.error(e)
 
     async def get_streaming_users(self):
-        self.users = await self.db_client.get_users(limit=10000000)
+        self.users = await self.db_client.get_enabled_users()
         all_user_twitch_ids = [user.twitchId for user in self.users]
         streaming_twitch_users = self.twitch_client.get_streams(all_user_twitch_ids)
         streaming_twitch_user_ids = [
