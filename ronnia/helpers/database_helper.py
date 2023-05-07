@@ -199,8 +199,8 @@ class RonniaDatabase(AsyncIOMotorClient):
             user = await self.get_user_from_twitch_id(twitch_username_or_id)
         else:
             user = await self.get_user_from_twitch_username(twitch_username_or_id)
-
-        return getattr(user.settings, setting_key)
+        settings = user.settings.dict(by_alias=True)
+        return settings[setting_key]
 
     async def get_users(self, limit: int = 100, offset: int = 0) -> Iterable[DBUser]:
         """
