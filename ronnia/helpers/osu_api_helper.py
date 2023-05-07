@@ -1,7 +1,7 @@
 import asyncio
 import datetime
 import logging
-from typing import Union, Dict, Optional, Tuple, Any
+from typing import Union, Dict, Optional, Tuple
 
 import aiohttp
 from multidict import CIMultiDict

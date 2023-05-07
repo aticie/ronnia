@@ -1,3 +1,4 @@
 twitchio==2.4.0
 motor==3.1.2
 pydantic==1.10.7
+requests==2.30.0

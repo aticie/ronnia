@@ -1,7 +1,5 @@
 import asyncio
 import datetime
-import functools
-import json
 import logging
 import os
 import traceback
@@ -320,7 +318,7 @@ class TwitchBot(commands.Bot, ABC):
         )
         target_id = (
             await self.ronnia_db.get_user_from_twitch_username(message.channel.name)
-        )["osu_id"]
+        ).osuId
         await self.osu_chat_api.send_message(target_id=target_id, message=irc_message)
         return
 
