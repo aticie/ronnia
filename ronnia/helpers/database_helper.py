@@ -242,7 +242,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         Gets all enabled users in db
         :return:
         """
-        users = await self.users_col.find({"settings.enable": 1}).to_list(length=None)
+        users = await self.users_col.find({"settings.enable": True}).to_list(length=None)
         return [DBUser(**user) for user in users]
 
     async def get_excluded_users(self, twitch_username: str) -> List[str]:
