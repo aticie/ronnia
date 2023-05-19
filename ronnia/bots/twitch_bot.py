@@ -119,9 +119,12 @@ class TwitchBot(commands.Bot, ABC):
             if beatmap_info:
                 await self.check_request_criteria(message, beatmap_info)
                 # If user has enabled echo setting, send twitch chat a message
+
+                logger.info(f"Sending beatmap {beatmap_info['id']} to user {message.channel.name}")
                 if await self.ronnia_db.get_echo_status(
                     twitch_username=message.channel.name
                 ):
+                    logger.info(f"Sending echo message to {message.channel.name}")
                     await self._send_twitch_message(
                         message=message,
                         beatmap_info=beatmap_info,
@@ -140,6 +143,7 @@ class TwitchBot(commands.Bot, ABC):
                     requester_channel_name=message.author.name,
                     mods=given_mods,
                 )
+                logger.info(f"Adding beatmap {beatmap_info['id']} to database.")
                 await self.ronnia_db.add_beatmap(
                     beatmap_info=beatmap_info
                 )
