@@ -140,6 +140,9 @@ class TwitchBot(commands.Bot, ABC):
                     requester_channel_name=message.author.name,
                     mods=given_mods,
                 )
+                await self.ronnia_db.add_beatmap(
+                    beatmap_info=beatmap_info
+                )
 
     async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         twitch_username = message.channel.name

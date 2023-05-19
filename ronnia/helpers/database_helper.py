@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 from datetime import datetime
-from typing import Optional, List, Union, Iterable, Any, Sequence, Collection
+from typing import Optional, List, Union, Iterable, Any, Sequence
 
 from motor.motor_asyncio import (
     AsyncIOMotorClient,
@@ -46,6 +46,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         self.users_col: AsyncIOMotorCollection = self.db["Users"]
         self.settings_col: AsyncIOMotorCollection = self.db["Settings"]
         self.statistics_col: AsyncIOMotorCollection = self.db["Statistics"]
+        self.beatmaps_col: AsyncIOMotorCollection = self.db["Beatmaps"]
 
     async def initialize(self):
         await self.define_setting("enable", True, "Enables the bot.", "toggle")
@@ -249,8 +250,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         """
         Gets excluded user settings of a user
         :param twitch_username: Twitch username
-        :param return_mode: Can be 'str' (String of comma separated values) or 'list' (List of excluded users)
-        :return: Comma separated values of excluded users
+        :return: List of excluded users
         """
         user = await self.get_user_from_twitch_username(twitch_username)
         return list(map(str.lower, user.excludedUsers))
@@ -300,3 +300,11 @@ class RonniaDatabase(AsyncIOMotorClient):
         await self.users_col.update_one(
             {"twitchId": user.twitchId}, {"$set": user.dict()}
         )
+
+    async def add_beatmap(self, beatmap_info: dict):
+        """
+        Adds beatmap to database
+        :param beatmap_info: Beatmap to add
+        """
+        beatmap_id = beatmap_info["id"]
+        await self.beatmaps_col.update_one({"id": beatmap_id}, {"$set": beatmap_info}, upsert=True)

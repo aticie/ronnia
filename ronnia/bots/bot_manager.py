@@ -42,7 +42,7 @@ class TwitchAPI:
         response = self.session.post(url)
         return response.json()["access_token"]
 
-    def get_streams(self, user_ids: List[str]):
+    def get_streams(self, user_ids: List[int]):
         """
         Gets streams from Twitch API helix/streams only users playing osu!
         """
