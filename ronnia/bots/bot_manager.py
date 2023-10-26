@@ -54,8 +54,8 @@ class TwitchAPI:
         for user_id in batcher(user_ids, 100):
             # game_id = 21465 is osu!
             url = (
-                "https://api.twitch.tv/helix/streams?first=100&game_id=21465&"
-                + "&".join([f"user_id={user}" for user in user_id])
+                    "https://api.twitch.tv/helix/streams?first=100&game_id=21465&"
+                    + "&".join([f"user_id={user}" for user in user_id])
             )
             response = self.session.get(url, headers=headers)
             streams += response.json()["data"]
@@ -81,7 +81,7 @@ class TwitchProcess(Process):
 
 class BotManager:
     def __init__(
-        self,
+            self,
     ):
         self.db_client = RonniaDatabase(os.getenv("MONGODB_URL"))
         self.join_lock = Lock()
@@ -119,20 +119,21 @@ class BotManager:
         """
 
         address = ("localhost", 31313)
-        with Listener(
-            address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
-        ) as listener:
-            with listener.accept() as conn:
-                while True:
-                    try:
+        while True:
+            try:
+                with Listener(
+                        address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
+                ) as listener:
+                    with listener.accept() as conn:
                         streaming_users = await self.get_streaming_users()
                         logger.info(
                             f"Sending streaming users to bot: {streaming_users}"
                         )
                         conn.send(streaming_users)
                         await asyncio.sleep(30)
-                    except Exception as e:
-                        logger.error(e)
+            except Exception:
+                logger.exception(f"Bot Manager send streaming users error.")
+                await asyncio.sleep(5)
 
     async def get_streaming_users(self):
         self.users = await self.db_client.get_enabled_users()

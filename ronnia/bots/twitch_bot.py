@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import logging
 import os
-import traceback
+
 from abc import ABC
 from multiprocessing import Lock
 from multiprocessing.connection import Client
@@ -53,18 +53,17 @@ class TwitchBot(commands.Bot, ABC):
         logger.info("Starting streaming channels message receiver")
 
         address = ("localhost", 31313)
-        with Client(
-            address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
-        ) as conn:
-            while True:
-                try:
+        while True:
+            try:
+                with Client(
+                    address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
+                ) as conn:
                     message = await self.loop.run_in_executor(None, conn.recv)
                     logger.info(f"Received message: {message}")
                     await self.join_streaming_channels(message)
-                except Exception as e:
-                    logger.error(f"Twitch bot receiver error: {e}")
-                    logger.error(traceback.format_exc())
-                    await asyncio.sleep(5)
+            except Exception:
+                logger.exception(f"Twitch bot receiver error.")
+                await asyncio.sleep(5)
 
     async def join_streaming_channels(self, message):
         streaming_users_set = set(message)
