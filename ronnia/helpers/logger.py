@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 
 
 class RonniaLogger(object):
@@ -11,7 +12,7 @@ class RonniaLogger(object):
             datefmt="%d/%m/%Y %I:%M:%S",
         )
 
-        ch = logging.StreamHandler()
+        ch = logging.StreamHandler(stream=sys.stdout)
         ch.setFormatter(loggers_formatter)
         logger.addHandler(ch)
 
