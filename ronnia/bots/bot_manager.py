@@ -125,12 +125,13 @@ class BotManager:
                         address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
                 ) as listener:
                     with listener.accept() as conn:
-                        streaming_users = await self.get_streaming_users()
-                        logger.info(
-                            f"Sending streaming users to bot: {streaming_users}"
-                        )
-                        conn.send(streaming_users)
-                        await asyncio.sleep(30)
+                        while True:
+                            streaming_users = await self.get_streaming_users()
+                            logger.info(
+                                f"Sending streaming users to bot: {streaming_users}"
+                            )
+                            conn.send(streaming_users)
+                            await asyncio.sleep(30)
             except Exception:
                 logger.exception(f"Bot Manager send streaming users error.")
                 await asyncio.sleep(5)

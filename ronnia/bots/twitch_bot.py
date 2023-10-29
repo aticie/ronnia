@@ -58,9 +58,15 @@ class TwitchBot(commands.Bot, ABC):
                 with Client(
                     address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
                 ) as conn:
-                    message = await self.loop.run_in_executor(None, conn.recv)
-                    logger.info(f"Received message: {message}")
-                    await self.join_streaming_channels(message)
+                    while True:
+                        try:
+                            message = await self.loop.run_in_executor(None, conn.recv)
+                            logger.info(f"Received message: {message}")
+                            await self.join_streaming_channels(message)
+                        except Exception:
+                            logger.exception(f"Twitch bot receiver error.")
+                            await asyncio.sleep(5)
+                            break
             except Exception:
                 logger.exception(f"Twitch bot receiver error.")
                 await asyncio.sleep(5)
