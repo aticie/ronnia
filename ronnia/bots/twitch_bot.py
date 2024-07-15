@@ -100,7 +100,6 @@ class TwitchBot(Client):
             await self.part_channels(closed_channels)
 
         self.joined_channels = streaming_users_set
-        return
 
     async def event_message(self, message: Message):
         if message.author is None:
@@ -179,8 +178,6 @@ class TwitchBot(Client):
             f" Your map is {diff_rating:.1f}*."
         )
 
-        return
-
     async def check_request_criteria(self, message: Message, beatmap_info: dict):
         test_status = await self.ronnia_db.get_test_status(message.channel.name)
         if not test_status and self.environment != "testing":
@@ -224,20 +221,16 @@ class TwitchBot(Client):
             assert (
                     "custom-reward-id" in message.tags
             ), "Channel Points only mode is active."
-        return
 
     async def event_error(self, error: Exception, data: str = None):
         logger.error(error, data)
         await super(TwitchBot, self).event_error(error, data)
-        pass
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
         assert (
                 message.author.name != message.channel.name
         ), "Author is broadcaster and not in test mode."
-
-        return
 
     async def global_before_hook(self, ctx):
         """
@@ -261,8 +254,6 @@ class TwitchBot(Client):
         assert len(stream_list) == 1, f"{channel.name} stream is not on."
         stream = stream_list[0]
         assert stream.game_name == "osu!", f"{channel.name} stream is not playing osu!"
-
-        return
 
     async def check_channel_enabled(self, channel_name):
         enabled = await self.ronnia_db.get_enabled_status(twitch_username=channel_name)
@@ -292,8 +283,6 @@ class TwitchBot(Client):
             ), f"{author.name} is on cooldown for {channel_cooldown - seconds_since_last_request}."
             self.user_last_request[author_id] = time_right_now
 
-        return
-
     async def _prune_cooldowns(
             self, time_right_now: datetime.datetime, channel_cooldown: int
     ):
@@ -317,8 +306,6 @@ class TwitchBot(Client):
 
         for user in pop_list:
             self.user_last_request.pop(user)
-
-        return
 
     async def _send_beatmap_to_in_game(
             self,
@@ -344,7 +331,6 @@ class TwitchBot(Client):
             await self.ronnia_db.get_user_from_twitch_username(message.channel.name)
         ).osuId
         await self.osu_chat_api.send_message(target_id=target_id, message=irc_message)
-        return
 
     @staticmethod
     async def _send_twitch_message(
@@ -361,7 +347,6 @@ class TwitchBot(Client):
         version = beatmap_info["version"]
         bmap_info_text = f"{artist} - {title} [{version}]"
         await message.channel.send(f"{bmap_info_text} - Request sent!")
-        return
 
     @staticmethod
     def _check_message_contains_beatmap_link(

@@ -122,7 +122,6 @@ class RonniaDatabase(AsyncIOMotorClient):
             upsert=True,
         )
         await self.bulk_write_operations(operations=[update_key], col=self.settings_col)
-        return
 
     @staticmethod
     async def bulk_write_operations(
