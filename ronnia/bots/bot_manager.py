@@ -139,18 +139,18 @@ class BotManager:
         )
         twitch_bot_task = asyncio.create_task(self.twitch_bot.start())
         await self.twitch_bot.wait_for_ready()
-        listener_task = asyncio.create_task(self.listener())
+        await asyncio.sleep(0.5)
+        listener_task = asyncio.create_task(self.listener(self.twitch_bot.server_addr))
         await asyncio.gather(
             twitch_bot_task,
             listener_task
         )
 
-    async def listener(self):
+    async def listener(self, address: tuple[str, int]):
         """
         Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
         """
 
-        address = ("localhost", 31313)
         _, writer = await asyncio.open_connection(*address)
         while True:
             try:

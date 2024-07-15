@@ -41,15 +41,17 @@ class TwitchBot(Client):
         self._join_lock = asyncio.Lock()
 
         self.main_prefix = None
+        self.server_addr = None
         self.user_last_request = {}
 
     async def streaming_channel_receiver(self):
         logger.info("Starting streaming channels message receiver")
 
-        address = ("localhost", 31313)
+        address = ("localhost", 0)
         server = await asyncio.start_server(self.handle_bot_manager_message, *address)
-        addr = server.sockets[0].getsockname()
-        logger.info(f'TwitchBot started serving on {addr}')
+        self.server_addr = server.sockets[0].getsockname()
+
+        logger.info(f'TwitchBot started serving on {self.server_addr}')
 
         async with server:
             await server.serve_forever()
