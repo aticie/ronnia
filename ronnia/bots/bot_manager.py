@@ -150,7 +150,7 @@ class BotManager:
         """
         Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
         """
-
+        logger.info(f"Starting Bot Manager Listener on {address=}")
         _, writer = await asyncio.open_connection(*address)
         while True:
             try:
