@@ -80,20 +80,6 @@ class RonniaDatabase(AsyncIOMotorClient):
         ).to_list(length=len(twitch_names))
         return [DBUser(**user) for user in users]
 
-    async def get_user_from_osu_username(self, osu_username: str) -> sqlite3.Row:
-        """
-        Gets the user details from database using osu username
-        :param osu_username: osu username
-        :return: User details of the user associated with osu username
-        """
-        osu_username = osu_username.lower().replace(" ", "_")
-
-        cursor = await self.conn.execute(
-            f"SELECT * from users WHERE osu_username=?", (osu_username,)
-        )
-        result = await cursor.fetchone()
-        return result
-
     async def get_user_from_twitch_id(self, twitch_id: int) -> DBUser:
         """
         Gets the user details from database using Twitch username
