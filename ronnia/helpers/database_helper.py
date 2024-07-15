@@ -10,8 +10,8 @@ from motor.motor_asyncio import (
 )
 from pydantic import BaseModel, Field
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError
 from pymongo.collection import Collection, _WriteOp
+from pymongo.errors import BulkWriteError
 from pymongo.typings import _DocumentType
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         logger.info(f"Successfully initialized {self.__class__.__name__}")
 
     async def get_multiple_users_by_username(
-        self, twitch_names: List[str]
+            self, twitch_names: List[str]
     ) -> Iterable[DBUser]:
         """
         Gets multiple users from database
@@ -115,7 +115,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         return DBUser(**user)
 
     async def define_setting(
-        self, name: str, default_value: Any, description: str, _type: str
+            self, name: str, default_value: Any, description: str, _type: str
     ) -> None:
         """
         Define a new user specific setting
@@ -141,9 +141,9 @@ class RonniaDatabase(AsyncIOMotorClient):
         return
 
     async def bulk_write_operations(
-        self,
-        operations: Sequence[_WriteOp[_DocumentType]],
-        col: Optional[Collection] = None,
+            self,
+            operations: Sequence[_WriteOp[_DocumentType]],
+            col: Optional[Collection] = None,
     ):
         """Bulk write multiple operations to the given collection. \
         Defaults writing to "Metrics" collection."""
@@ -223,7 +223,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         return await self.get_setting("test", twitch_username)
 
     async def get_setting(
-        self, setting_key: str, twitch_username_or_id: Union[str, int]
+            self, setting_key: str, twitch_username_or_id: Union[str, int]
     ):
         """
         Get the setting's current value for user
@@ -256,11 +256,11 @@ class RonniaDatabase(AsyncIOMotorClient):
         return list(map(str.lower, user.excludedUsers))
 
     async def add_request(
-        self,
-        requester_channel_name: str,
-        requested_beatmap_id: int,
-        requested_channel_name: str,
-        mods: Optional[str],
+            self,
+            requester_channel_name: str,
+            requested_beatmap_id: int,
+            requested_channel_name: str,
+            mods: Optional[str],
     ):
         """
         Adds a beatmap request to database.

@@ -27,7 +27,7 @@ def get_mod_from_text(content, candidate_link) -> Tuple[int, str]:
     for mods in matches:
         mods = mods.strip("-+~|").upper()
 
-        mods_as_list = [mods[i : i + 2] for i in range(0, len(mods), 2)]
+        mods_as_list = [mods[i: i + 2] for i in range(0, len(mods), 2)]
 
         total_mods.extend(mods_as_list)
 
@@ -115,7 +115,7 @@ def parse_single_beatmap(map_link: str) -> Optional[Sequence[AnyStr]]:
 
 
 def parse_beatmap_link(
-    beatmap_link: str, content: str
+        beatmap_link: str, content: str
 ) -> Union[Tuple[dict, str], Tuple[None, None]]:
     beatmap_link = beatmap_link.split("+")[0]
     result = parse_single_beatmap(beatmap_link)

@@ -9,7 +9,7 @@ from multidict import CIMultiDict
 logger = logging.getLogger("ronnia")
 
 
-class BaseOsuApiV2(aiohttp.ClientSession):
+class BaseOsuApiV2:
     """Async wrapper for osu! api v2"""
 
     def __init__(self, client_id: str, client_secret: str):
@@ -28,10 +28,18 @@ class BaseOsuApiV2(aiohttp.ClientSession):
         )
         self._cooldown_seconds = 0.5
 
+    async def __aenter__(self):
+        self._session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, *err):
+        await self._session.close()
+        self._session = None
+
     async def _check_token_expired(self):
         return (
-            datetime.datetime.now() + datetime.timedelta(minutes=1)
-            > self._access_token_expire_date
+                datetime.datetime.now() + datetime.timedelta(minutes=1)
+                > self._access_token_expire_date
         )
 
     async def _get_access_token(self):
@@ -50,8 +58,8 @@ class BaseOsuApiV2(aiohttp.ClientSession):
 
         self._access_token_obtain_date = datetime.datetime.now()
         self._access_token_expire_date = (
-            self._access_token_obtain_date
-            + datetime.timedelta(seconds=token_response["expires_in"])
+                self._access_token_obtain_date
+                + datetime.timedelta(seconds=token_response["expires_in"])
         )
 
         self._default_headers = CIMultiDict(
@@ -61,7 +69,7 @@ class BaseOsuApiV2(aiohttp.ClientSession):
     async def _get_endpoint(self, endpoint: str, params: dict = None):
         await self.wait_cooldown()
 
-        async with self.get(f"{self._api_base_url}{endpoint}", params=params) as resp:
+        async with self._session.get(f"{self._api_base_url}{endpoint}", params=params) as resp:
             contents = await resp.json()
 
         self._last_request_time = datetime.datetime.now()
@@ -71,8 +79,8 @@ class BaseOsuApiV2(aiohttp.ClientSession):
     async def _post_endpoint(self, endpoint: str, data: dict, params: dict = None):
         await self.wait_cooldown()
 
-        async with self.post(
-            f"{self._api_base_url}{endpoint}", params=params, json=data
+        async with self._session.post(
+                f"{self._api_base_url}{endpoint}", params=params, json=data
         ) as resp:
             contents = await resp.json()
 
@@ -84,7 +92,7 @@ class BaseOsuApiV2(aiohttp.ClientSession):
         if self._access_token is None or await self._check_token_expired():
             await self._get_access_token()
         seconds_since_last_request = (
-            datetime.datetime.now() - self._last_request_time
+                datetime.datetime.now() - self._last_request_time
         ).total_seconds()
         if seconds_since_last_request < self._cooldown_seconds:
             await asyncio.sleep(self._cooldown_seconds - seconds_since_last_request)
@@ -115,7 +123,7 @@ class OsuApiV2(BaseOsuApiV2):
         return beatmap_info, beatmapset_info
 
     async def get_beatmap_attributes(
-        self, beatmap_id: int, mods: Optional[str] = None
+            self, beatmap_id: int, mods: Optional[str] = None
     ) -> Dict:
         """
         Gets beatmap data for the specified beatmap ID.
@@ -129,10 +137,10 @@ class OsuApiV2(BaseOsuApiV2):
         return await self._post_endpoint(f"beatmaps/{beatmap_id}/attributes", data=data)
 
     async def get_user_info(
-        self,
-        user_id: Union[str, int],
-        game_mode: Optional[str] = None,
-        key: Optional[str] = "id",
+            self,
+            user_id: Union[str, int],
+            game_mode: Optional[str] = None,
+            key: Optional[str] = "id",
     ) -> Dict:
         """
         This endpoint returns the detail of specified user.

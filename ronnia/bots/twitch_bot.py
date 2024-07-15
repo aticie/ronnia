@@ -2,16 +2,12 @@ import asyncio
 import datetime
 import logging
 import os
+from typing import AnyStr, Tuple, Union
 
-from abc import ABC
-from multiprocessing import Lock
-from multiprocessing.connection import Client
-from typing import AnyStr, Tuple, Union, List
+from twitchio import Message, Channel, Chatter, Client
+from twitchio.ext import routines
 
-from twitchio import Message, Channel, Chatter
-from twitchio.ext import commands, routines
-
-from helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
+from ronnia.helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import RonniaDatabase
 from ronnia.helpers.utils import convert_seconds_to_readable
@@ -19,8 +15,8 @@ from ronnia.helpers.utils import convert_seconds_to_readable
 logger = logging.getLogger(__name__)
 
 
-class TwitchBot(commands.Bot, ABC):
-    def __init__(self, initial_channel_names: List[str], join_lock: Lock):
+class TwitchBot(Client):
+    def __init__(self, initial_channel_names: set[str]):
         self.ronnia_db = RonniaDatabase(os.getenv("MONGODB_URL"))
         self.osu_api = OsuApiV2(
             os.getenv("OSU_CLIENT_ID"), os.getenv("OSU_CLIENT_SECRET")
@@ -34,9 +30,7 @@ class TwitchBot(commands.Bot, ABC):
         token = os.getenv("TMI_TOKEN").replace("oauth:", "")
         args = {
             "token": token,
-            "client_id": os.getenv("TWITCH_CLIENT_ID"),
             "client_secret": os.getenv("TWITCH_CLIENT_SECRET"),
-            "prefix": os.getenv("BOT_PREFIX"),
             "initial_channels": initial_channels,
         }
         logger.debug(f"Sending args to super().__init__: {args}")
@@ -44,7 +38,7 @@ class TwitchBot(commands.Bot, ABC):
 
         self.environment = os.getenv("ENVIRONMENT")
 
-        self._join_lock = join_lock
+        self._join_lock = asyncio.Lock()
 
         self.main_prefix = None
         self.user_last_request = {}
@@ -52,26 +46,44 @@ class TwitchBot(commands.Bot, ABC):
     async def streaming_channel_receiver(self):
         logger.info("Starting streaming channels message receiver")
 
-        address = ("localhost", 31313)
-        while True:
-            try:
-                with Client(
-                    address, authkey=os.getenv("TWITCH_CLIENT_SECRET").encode()
-                ) as conn:
-                    while True:
-                        try:
-                            message = await self.loop.run_in_executor(None, conn.recv)
-                            logger.info(f"Received message: {message}")
-                            await self.join_streaming_channels(message)
-                        except Exception:
-                            logger.exception(f"Twitch bot receiver error.")
-                            await asyncio.sleep(5)
-                            break
-            except Exception:
-                logger.exception(f"Twitch bot receiver error.")
-                await asyncio.sleep(5)
+        address = ("127.0.0.1", 31313)
+        server = await asyncio.start_server(self.handle_bot_manager_message, *address)
+        addr = server.sockets[0].getsockname()
+        logger.info(f'TwitchBot started serving on {addr}')
 
-    async def join_streaming_channels(self, message):
+        async with server:
+            await server.serve_forever()
+
+    async def handle_bot_manager_message(self, reader, writer):
+        addr = writer.get_extra_info('peername')
+        logger.info(f"TwitchBot received a new connection from {addr}")
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(reader.readline(), timeout=35)  # 30 seconds + 5 seconds buffer
+                    raw_message = data.decode()
+                    streaming_users = raw_message.strip("\n").split(",")
+                    logger.info(f"Twitch Bot received {len(streaming_users)} from {addr}")
+                    await self.join_streaming_channels(streaming_users)
+
+                except asyncio.TimeoutError as e:
+                    logger.exception(f"Timeout waiting for message from {addr}", exc_info=e)
+                    continue
+
+                except asyncio.IncompleteReadError as e:
+                    logger.exception(f"Client {addr} disconnected", exc_info=e)
+                    break
+
+                except Exception as e:
+                    logger.exception(f"Error handling client {addr}", exc_info=e)
+                    break
+
+        finally:
+            print(f"Closing connection from {addr!r}")
+            writer.close()
+            await writer.wait_closed()
+
+    async def join_streaming_channels(self, message: list[str]):
         streaming_users_set = set(message)
         new_channels = list(streaming_users_set.difference(self.joined_channels))
         closed_channels = list(self.joined_channels.difference(streaming_users_set))
@@ -79,17 +91,12 @@ class TwitchBot(commands.Bot, ABC):
         logger.info(f"Joining new channels: {new_channels}")
         logger.info(f"Parting closed channels: {closed_channels}")
 
-        with self._join_lock:
+        async with self._join_lock:
             await self.join_channels(new_channels)
             await self.part_channels(closed_channels)
 
         self.joined_channels = streaming_users_set
         return
-
-    def run(self):
-        logger.info(f"Running bot")
-        self.loop.run_until_complete(self.ronnia_db.initialize())
-        super().run()
 
     async def event_message(self, message: Message):
         if message.author is None:
@@ -102,7 +109,6 @@ class TwitchBot(commands.Bot, ABC):
         if self.environment == "testing":
             return
 
-        await self.handle_commands(message)
         try:
             await self.check_channel_enabled(message.channel.name)
             await self.handle_request(message)
@@ -127,7 +133,7 @@ class TwitchBot(commands.Bot, ABC):
 
                 logger.info(f"Sending beatmap {beatmap_info['id']} to user {message.channel.name}")
                 if await self.ronnia_db.get_echo_status(
-                    twitch_username=message.channel.name
+                        twitch_username=message.channel.name
                 ):
                     logger.info(f"Sending echo message to {message.channel.name}")
                     await self._send_twitch_message(
@@ -194,16 +200,16 @@ class TwitchBot(commands.Bot, ABC):
             twitch_username=message.channel.name
         )
         assert (
-            message.author.name.lower() not in excluded_users
+                message.author.name.lower() not in excluded_users
         ), f"{message.author.name} is excluded"
 
     async def check_sub_only_mode(self, message: Message):
         is_sub_only = await self.ronnia_db.get_setting("sub-only", message.channel.name)
         if is_sub_only:
             assert (
-                message.author.is_mod
-                or message.author.is_subscriber != "0"
-                or "vip" in message.author.badges
+                    message.author.is_mod
+                    or message.author.is_subscriber != "0"
+                    or "vip" in message.author.badges
             ), "Subscriber only request mode is active."
 
     async def check_cp_only_mode(self, message):
@@ -212,7 +218,7 @@ class TwitchBot(commands.Bot, ABC):
         )
         if is_cp_only:
             assert (
-                "custom-reward-id" in message.tags
+                    "custom-reward-id" in message.tags
             ), "Channel Points only mode is active."
         return
 
@@ -224,7 +230,7 @@ class TwitchBot(commands.Bot, ABC):
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
         assert (
-            message.author.name != message.channel.name
+                message.author.name != message.channel.name
         ), "Author is broadcaster and not in test mode."
 
         return
@@ -238,7 +244,7 @@ class TwitchBot(commands.Bot, ABC):
         user = await self.ronnia_db.get_user_from_twitch_username(ctx.author.name)
         assert user is not None, "User does not exist"
         assert (
-            ctx.message.channel.name == ctx.author.name
+                ctx.message.channel.name == ctx.author.name
         ), "Message is not in author's channel"
 
     async def check_if_streaming_osu(self, channel: Channel):
@@ -275,17 +281,17 @@ class TwitchBot(commands.Bot, ABC):
         else:
             last_message_time = self.user_last_request[author_id]
             seconds_since_last_request = (
-                time_right_now - last_message_time
+                    time_right_now - last_message_time
             ).total_seconds()
             assert (
-                seconds_since_last_request >= channel_cooldown
+                    seconds_since_last_request >= channel_cooldown
             ), f"{author.name} is on cooldown for {channel_cooldown - seconds_since_last_request}."
             self.user_last_request[author_id] = time_right_now
 
         return
 
     async def _prune_cooldowns(
-        self, time_right_now: datetime.datetime, channel_cooldown: int
+            self, time_right_now: datetime.datetime, channel_cooldown: int
     ):
         """
         Prunes users on that are on cooldown list so it doesn't get too cluttered.
@@ -295,7 +301,7 @@ class TwitchBot(commands.Bot, ABC):
         pop_list = []
         for user_id, last_message_time in self.user_last_request.items():
             seconds_since_last_request = (
-                time_right_now - last_message_time
+                    time_right_now - last_message_time
             ).total_seconds()
             if seconds_since_last_request >= channel_cooldown:
                 logger.info(
@@ -311,11 +317,11 @@ class TwitchBot(commands.Bot, ABC):
         return
 
     async def _send_beatmap_to_in_game(
-        self,
-        message: Message,
-        beatmap_info: dict,
-        beatmapset_info: dict,
-        given_mods: str,
+            self,
+            message: Message,
+            beatmap_info: dict,
+            beatmapset_info: dict,
+            given_mods: str,
     ):
         """
         Sends the beatmap request message to osu!irc bot
@@ -338,7 +344,7 @@ class TwitchBot(commands.Bot, ABC):
 
     @staticmethod
     async def _send_twitch_message(
-        message: Message, beatmapset_info: dict, beatmap_info: dict
+            message: Message, beatmapset_info: dict, beatmap_info: dict
     ):
         """
         Sends twitch feedback message
@@ -355,7 +361,7 @@ class TwitchBot(commands.Bot, ABC):
 
     @staticmethod
     def _check_message_contains_beatmap_link(
-        message: Message,
+            message: Message,
     ) -> Tuple[Union[AnyStr, None], Union[dict, None]]:
         """
         Splits message by space character and checks for possible beatmap links
@@ -375,11 +381,11 @@ class TwitchBot(commands.Bot, ABC):
             return None, None
 
     async def _prepare_irc_message(
-        self,
-        message: Message,
-        beatmap_info: dict,
-        beatmapset_info: dict,
-        given_mods: str,
+            self,
+            message: Message,
+            beatmap_info: dict,
+            beatmapset_info: dict,
+            given_mods: str,
     ):
         """
         Prepare beatmap request message to send to osu!irc.
@@ -418,11 +424,11 @@ class TwitchBot(commands.Bot, ABC):
         return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
 
     async def event_ready(self):
-        self.loop.create_task(self.streaming_channel_receiver())
-        self.routine_show_connected_channels.start(stop_on_error=False)
         logger.info(f"Connected channels: {self.connected_channels}")
         logger.info("Successfully initialized bot!")
         logger.info(f"Ready | {self.nick}")
+        task = self.loop.create_task(self.streaming_channel_receiver())
+        self.routine_show_connected_channels.start(stop_on_error=False)
 
     @routines.routine(minutes=1)
     async def routine_show_connected_channels(self):
