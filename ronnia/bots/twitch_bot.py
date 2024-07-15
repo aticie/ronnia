@@ -380,8 +380,8 @@ class TwitchBot(Client):
             logger.info("Couldn't find beatmap in message")
             return None, None
 
+    @staticmethod
     async def _prepare_irc_message(
-            self,
             message: Message,
             beatmap_info: dict,
             beatmapset_info: dict,
@@ -427,7 +427,7 @@ class TwitchBot(Client):
         logger.info(f"Connected channels: {self.connected_channels}")
         logger.info("Successfully initialized bot!")
         logger.info(f"Ready | {self.nick}")
-        task = self.loop.create_task(self.streaming_channel_receiver())
+        _ = self.loop.create_task(self.streaming_channel_receiver())
         self.routine_show_connected_channels.start(stop_on_error=False)
 
     @routines.routine(minutes=1)

@@ -128,6 +128,7 @@ class OsuApiV2(BaseOsuApiV2):
         """
         Gets beatmap data for the specified beatmap ID.
         :param beatmap_id: The ID of the beatmap.
+        :param mods: Optional added mods to the beatmap.
         :return: Returns Beatmap object.
 
         This endpoint returns a single beatmap dict.

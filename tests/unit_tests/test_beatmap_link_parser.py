@@ -6,20 +6,29 @@ from ronnia.helpers.beatmap_link_parser import parse_single_beatmap, parse_beatm
 class TestBeatmapLinkParser(unittest.TestCase):
 
     @classmethod
-    def setUp(self) -> None:
-        self.official_beatmap_link = 'https://osu.ppy.sh/beatmapsets/1341551#osu/2778999'
-        self.official_beatmap_link_alt = 'https://osu.ppy.sh/beatmaps/806017?mode=osu'
-        self.official_beatmap_link_alt_2 = 'https://osu.ppy.sh/beatmaps/806017'
-        self.old_beatmap_link = 'https://osu.ppy.sh/b/2778999'
-        self.old_beatmap_link_alt = 'https://old.ppy.sh/p/beatmap?b=1955170&m=2'
+    def setUp(cls) -> None:
+        official_beatmap_link = 'https://osu.ppy.sh/beatmapsets/1341551#osu/2778999'
+        official_beatmap_link_alt = 'https://osu.ppy.sh/beatmaps/806017?mode=osu'
+        official_beatmap_link_alt_2 = 'https://osu.ppy.sh/beatmaps/806017'
+        old_beatmap_link = 'https://osu.ppy.sh/b/2778999'
+        old_beatmap_link_alt = 'https://old.ppy.sh/p/beatmap?b=1955170&m=2'
 
-        self.official_beatmapset_link = 'https://osu.ppy.sh/beatmapsets/1341551'
-        self.old_beatmapset_link = 'https://osu.ppy.sh/s/1341551'
-        self.old_beatmapset_link_alt = 'https://old.ppy.sh/p/beatmap?s=1955170&m=2'
+        official_beatmapset_link = 'https://osu.ppy.sh/beatmapsets/1341551'
+        old_beatmapset_link = 'https://osu.ppy.sh/s/1341551'
+        old_beatmapset_link_alt = 'https://old.ppy.sh/p/beatmap?s=1955170&m=2'
 
-        self.beatmap_links = [self.official_beatmap_link, self.official_beatmap_link_alt, self.old_beatmap_link,
-                              self.old_beatmap_link_alt]
-        self.beatmapset_links = [self.official_beatmapset_link, self.old_beatmapset_link, self.old_beatmapset_link_alt]
+        cls.official_beatmap_link = official_beatmap_link
+        cls.official_beatmap_link_alt = official_beatmap_link_alt
+        cls.official_beatmap_link_alt_2 = official_beatmap_link_alt_2
+        cls.old_beatmap_link = old_beatmap_link
+        cls.old_beatmap_link_alt = old_beatmap_link_alt
+        cls.official_beatmapset_link = official_beatmapset_link
+        cls.old_beatmapset_link = old_beatmapset_link
+        cls.old_beatmapset_link_alt = old_beatmapset_link_alt
+
+        cls.beatmap_links = [official_beatmap_link, official_beatmap_link_alt, old_beatmap_link,
+                             old_beatmap_link_alt]
+        cls.beatmapset_links = [official_beatmapset_link, old_beatmapset_link, old_beatmapset_link_alt]
 
     def test_parse_single_beatmap_returns_beatmap_id_for_official_links(self):
         expected_id = '2778999'

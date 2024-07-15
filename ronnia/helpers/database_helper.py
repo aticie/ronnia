@@ -10,9 +10,7 @@ from motor.motor_asyncio import (
 )
 from pydantic import BaseModel, Field
 from pymongo import UpdateOne
-from pymongo.collection import Collection, _WriteOp
 from pymongo.errors import BulkWriteError
-from pymongo.typings import _DocumentType
 
 logger = logging.getLogger(__name__)
 
@@ -140,15 +138,13 @@ class RonniaDatabase(AsyncIOMotorClient):
         await self.bulk_write_operations(operations=[update_key], col=self.settings_col)
         return
 
+    @staticmethod
     async def bulk_write_operations(
-            self,
-            operations: Sequence[_WriteOp[_DocumentType]],
-            col: Optional[Collection] = None,
+            operations: Sequence,
+            col: AsyncIOMotorCollection,
     ):
         """Bulk write multiple operations to the given collection. \
         Defaults writing to "Metrics" collection."""
-        if col is None:
-            col = self.col
         try:
             if len(operations) != 0:
                 result = await col.bulk_write(operations)
@@ -253,7 +249,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         :return: List of excluded users
         """
         user = await self.get_user_from_twitch_username(twitch_username)
-        return list(map(str.lower, user.excludedUsers))
+        return [excluded_user.lower() for excluded_user in user.excludedUsers]
 
     async def add_request(
             self,

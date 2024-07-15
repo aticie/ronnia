@@ -151,7 +151,7 @@ class BotManager:
         """
 
         address = ("127.0.0.1", 31313)
-        reader, writer = await asyncio.open_connection(*address)
+        _, writer = await asyncio.open_connection(*address)
         while True:
             try:
                 await asyncio.sleep(30)  # Wait for 30 seconds before sending connected users
@@ -163,7 +163,7 @@ class BotManager:
                 await writer.drain()
 
             except BaseException as e:
-                logger.exception(f"Bot manager sender error exiting...", exc_info=e)
+                logger.exception("Bot manager sender error exiting...", exc_info=e)
                 await asyncio.sleep(5)
                 writer.close()
                 await writer.wait_closed()
