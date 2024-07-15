@@ -83,7 +83,7 @@ class TwitchBot(Client):
                     break
 
         finally:
-            print(f"Closing connection from {addr!r}")
+            logger.warning(f"Closing connection from {addr}")
             writer.close()
             await writer.wait_closed()
 
