@@ -121,12 +121,12 @@ def parse_beatmap_link(
     result = parse_single_beatmap(beatmap_link)
 
     if result:
-        mods_as_int, mods_as_text = get_mod_from_text(content, beatmap_link)
+        _, mods_as_text = get_mod_from_text(content, beatmap_link)
         return {"b": result[1]}, mods_as_text  # 'mods': mods_as_int}, mods_as_text
     else:
         result = parse_beatmapset(beatmap_link)
         if result:
-            mods_as_int, mods_as_text = get_mod_from_text(content, beatmap_link)
+            _, mods_as_text = get_mod_from_text(content, beatmap_link)
             return {"s": result[1]}, mods_as_text  # 'mods': mods_as_int}, mods_as_text
         else:
             return None, None
