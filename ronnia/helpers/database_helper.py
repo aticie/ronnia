@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-from datetime import datetime
+import datetime
 from typing import Optional, List, Union, Iterable, Any, Sequence
 
 from motor.motor_asyncio import (
@@ -271,22 +271,9 @@ class RonniaDatabase(AsyncIOMotorClient):
                 "requested_beatmap_id": requested_beatmap_id,
                 "requested_channel_name": requested_channel_name,
                 "mods": mods,
-                "timestamp": datetime.utcnow(),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc),
             }
         )
-
-    async def add_error(self, error_type: str, error_text: Optional[str] = None):
-        """
-        Adds an error entry to database
-        This is used for statistics. It will keep information about osu! api issues and twitch api issues.
-        For example, if we get rate-limited by osu, we will add:
-        (timestamp.now(), 'echo', 'twitch', 'heyronii') to database
-        """
-        await self.conn.execute(
-            "INSERT INTO errors (timestamp, type, error_text) VALUES (?,?,?)",
-            (datetime.now(), error_type, error_text),
-        )
-        await self.conn.commit()
 
     async def update_user(self, user: DBUser):
         """
