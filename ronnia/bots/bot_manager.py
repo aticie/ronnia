@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import socket
 from typing import List, Dict
 
 import aiohttp
@@ -140,18 +141,19 @@ class BotManager:
         twitch_bot_task = asyncio.create_task(self.twitch_bot.start())
         await self.twitch_bot.wait_for_ready()
         await asyncio.sleep(0.5)
-        listener_task = asyncio.create_task(self.listener(self.twitch_bot.server_addr))
+        listener_task = asyncio.create_task(self.listener(self.twitch_bot.server_socket))
         await asyncio.gather(
             twitch_bot_task,
             listener_task
         )
 
-    async def listener(self, address: tuple[str, int]):
+    async def listener(self, server_sock: socket.socket):
         """
         Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
         """
+        address = server_sock.getsockname()
         logger.info(f"Starting Bot Manager Listener on {address=}")
-        _, writer = await asyncio.open_connection(*address)
+        _, writer = await asyncio.open_connection(*address[:2])
         while True:
             try:
                 await asyncio.sleep(30)  # Wait for 30 seconds before sending connected users
