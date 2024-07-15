@@ -150,7 +150,7 @@ class BotManager:
         Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
         """
 
-        address = ("127.0.0.1", 31313)
+        address = ("localhost", 31313)
         _, writer = await asyncio.open_connection(*address)
         while True:
             try:

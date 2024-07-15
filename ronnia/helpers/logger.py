@@ -8,7 +8,7 @@ class RonniaLogger(object):
         logger = logging.getLogger()
         logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
         loggers_formatter = logging.Formatter(
-            '[{asctime}] [{levelname:<8}] [{funcName}] {name}: {message}', style='{',
+            '[{asctime}] [{levelname:<8}] {name}: {message}', style='{',
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 

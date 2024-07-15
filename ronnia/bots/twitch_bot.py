@@ -46,7 +46,7 @@ class TwitchBot(Client):
     async def streaming_channel_receiver(self):
         logger.info("Starting streaming channels message receiver")
 
-        address = ("127.0.0.1", 31313)
+        address = ("localhost", 31313)
         server = await asyncio.start_server(self.handle_bot_manager_message, *address)
         addr = server.sockets[0].getsockname()
         logger.info(f'TwitchBot started serving on {addr}')
