@@ -169,10 +169,9 @@ class BotManager:
 
             except BaseException as e:
                 logger.exception("Bot manager sender error exiting...", exc_info=e)
-                await asyncio.sleep(5)
                 writer.close()
                 await writer.wait_closed()
-                break
+                raise e
 
     async def get_streaming_users(self) -> set:
         self.users = await self.db_client.get_enabled_users()

@@ -80,7 +80,7 @@ class TwitchBot(Client):
 
                 except Exception as e:
                     logger.exception(f"Error handling client {addr}", exc_info=e)
-                    break
+                    raise e
 
         finally:
             logger.warning(f"Closing connection from {addr}")
