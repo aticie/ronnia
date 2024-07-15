@@ -11,6 +11,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from helpers.database_helper import DBUser, RonniaDatabase
 from ronnia.bots.twitch_bot import TwitchBot
 
+STREAMING_USERS_UPDATE_SLEEP = 120
+
 logger = logging.getLogger(__name__)
 
 
@@ -133,7 +135,8 @@ class BotManager:
         streaming_user_names = await self.get_streaming_users()
 
         self.twitch_bot = TwitchBot(
-            initial_channel_names=streaming_user_names
+            initial_channel_names=streaming_user_names,
+            listener_update_sleep=STREAMING_USERS_UPDATE_SLEEP
         )
         logger.info(
             f"Started Twitch bot instance for {len(streaming_user_names)} users"
@@ -156,7 +159,7 @@ class BotManager:
         _, writer = await asyncio.open_connection(*address[:2])
         while True:
             try:
-                await asyncio.sleep(30)  # Wait for 30 seconds before sending connected users
+                await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)  # Wait for 30 seconds before sending connected users
 
                 streaming_users = await self.get_streaming_users()
                 logger.info(f'Sending {len(streaming_users)} streaming users to the Twitch Bot.')

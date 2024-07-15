@@ -7,16 +7,16 @@ from typing import AnyStr, Tuple, Union
 from twitchio import Message, Channel, Chatter, Client
 from twitchio.ext import routines
 
-from ronnia.helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
 from ronnia.helpers.database_helper import RonniaDatabase
+from ronnia.helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
 from ronnia.helpers.utils import convert_seconds_to_readable
 
 logger = logging.getLogger(__name__)
 
 
 class TwitchBot(Client):
-    def __init__(self, initial_channel_names: set[str]):
+    def __init__(self, initial_channel_names: set[str], listener_update_sleep: int = 60):
         self.ronnia_db = RonniaDatabase(os.getenv("MONGODB_URL"))
         self.osu_api = OsuApiV2(
             os.getenv("OSU_CLIENT_ID"), os.getenv("OSU_CLIENT_SECRET")
@@ -40,6 +40,7 @@ class TwitchBot(Client):
 
         self._join_lock = asyncio.Lock()
 
+        self.listener_update_sleep = listener_update_sleep
         self.main_prefix = None
         self.server_socket = None
         self.user_last_request = {}
@@ -62,7 +63,8 @@ class TwitchBot(Client):
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(reader.readline(), timeout=35)  # 30 seconds + 5 seconds buffer
+                    data = await asyncio.wait_for(reader.readline(),
+                                                  timeout=self.listener_update_sleep + 5)  # 30 seconds + 5 seconds buffer
                     raw_message = data.decode()
                     streaming_users = raw_message.strip("\n").split(",")
                     logger.info(f"Twitch Bot received {len(streaming_users)} from {addr}")
