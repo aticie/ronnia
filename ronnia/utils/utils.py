@@ -12,11 +12,9 @@ def convert_seconds_to_readable(seconds: str) -> str:
 
 
 async def async_batcher(iterable: AsyncIterable, batch_size: int) -> AsyncGenerator:
-    i = 0
     batch = []
     async for item in iterable:
         batch.append(item)
-        i += 1
         if len(batch) == batch_size:
             yield batch
             batch = []
