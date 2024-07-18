@@ -6,19 +6,6 @@ from ronnia.models.beatmap import Beatmap, BeatmapType
 
 class BeatmapParser:
     legacy_mode_converter = {"osu": "0", "taiko": "1", "fruits": "2", "mania": "3"}
-    mod_bit_shift_dict = {
-        "NF": 0,
-        "EZ": 1,
-        "HD": 3,
-        "HR": 4,
-        "SD": 5,
-        "DT": 6,
-        "HT": 8,
-        "NC": 9,
-        "FL": 10,
-        "SO": 12,
-        "PF": 14,
-    }
 
     @staticmethod
     def get_mod_from_text(content, candidate_link) -> str:
@@ -36,13 +23,10 @@ class BeatmapParser:
         if len(total_mods) == 0:
             return ""
 
-        mods_as_int = 0
         mods_as_text = "+"
         total_mods = OrderedDict.fromkeys(total_mods)
         for mod in total_mods.keys():
-            if mod in BeatmapParser.mod_bit_shift_dict:
-                mods_as_int |= 1 << BeatmapParser.mod_bit_shift_dict[mod]
-                mods_as_text += mod
+            mods_as_text += mod
 
         return mods_as_text
 
