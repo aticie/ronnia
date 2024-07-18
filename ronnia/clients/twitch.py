@@ -91,6 +91,8 @@ class TwitchAPI(metaclass=SingletonMeta):
         async with asyncio.TaskGroup() as tg:
             tasks = []
             async for batch in async_batcher(user_ids, 100):
+                if not len(batch):
+                    continue
                 tasks.append(tg.create_task(self.get_streams_batch(batch)))
 
             for task in asyncio.as_completed(tasks):
