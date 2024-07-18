@@ -3,13 +3,11 @@ FROM python:3.11-slim-bullseye
 WORKDIR /app
 ENV PYTHONPATH=/app
 
-RUN apt-get update && apt-get install -y git build-essential libssl-dev uuid-dev cmake libcurl4-openssl-dev pkg-config -y
-
 COPY ronnia /app/ronnia
 
 WORKDIR /app/ronnia
 
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 
 COPY tests /tests
 
