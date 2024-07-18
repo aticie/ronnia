@@ -6,10 +6,10 @@ from typing import AsyncIterable
 
 from pymongo import UpdateOne
 
+from ronnia.bots.twitch_bot import TwitchBot
 from ronnia.clients.database import RonniaDatabase
 from ronnia.clients.twitch import TwitchAPI
 from ronnia.models.database import DBUser
-from ronnia.bots.twitch_bot import TwitchBot
 
 STREAMING_USERS_UPDATE_SLEEP = 60
 
@@ -48,7 +48,6 @@ class BotManager:
             await self.twitch_bot.wait_for_ready()
             await asyncio.sleep(1)  # wait for twitch_bot to initialize the server
             tg.create_task(self.listener(self.twitch_bot.server_socket))
-
 
     async def listener(self, server_sock: socket.socket):
         """

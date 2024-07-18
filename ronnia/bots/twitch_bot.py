@@ -249,15 +249,14 @@ class TwitchBot(Client):
 
     async def event_error(self, error: Exception, data: str = None):
         if isinstance(error, ExceptionGroup):
-            logger.info(f"Task group had an exception")
+            logger.info("Task group had an exception")
             for exception in error.exceptions:
                 if isinstance(exception, AssertionError):
                     logger.info(msg=f"TwitchBot check failed: {error}")
                 else:
-                    logger.exception(msg=f"TaskGroup exception", exc_info=exception)
+                    logger.exception(msg="TaskGroup exception", exc_info=exception)
         else:
-            logger.exception(msg=f"TwitchBot emitted event_error", exc_info=error)
-
+            logger.exception(msg="TwitchBot emitted event_error", exc_info=error)
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
