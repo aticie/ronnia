@@ -1,16 +1,15 @@
+import asyncio
 import datetime
 import logging
-from typing import Optional, List, Union, Iterable, Any, Sequence
+from typing import Optional, Union, Any, Sequence, AsyncGenerator
 
 from motor.motor_asyncio import (
     AsyncIOMotorClient,
     AsyncIOMotorDatabase,
-    AsyncIOMotorCollection,
-)
-from pymongo import UpdateOne
+    AsyncIOMotorCollection, )
 from pymongo.errors import BulkWriteError
 
-from models.database import DBUser
+from ronnia.models.database import DBUser
 
 logger = logging.getLogger(__name__)
 
@@ -25,38 +24,27 @@ class RonniaDatabase(AsyncIOMotorClient):
         self.beatmaps_col: AsyncIOMotorCollection = self.db["Beatmaps"]
 
     async def initialize(self):
-        await self.define_setting("enable", True, "Enables the bot.", "toggle")
-        await self.define_setting(
-            "echo", True, "Enables Twitch chat acknowledge message.", "toggle"
-        )
-        await self.define_setting(
-            "sub-only", False, "Subscribers only request mode.", "toggle"
-        )
-        await self.define_setting(
-            "points-only", False, "Channel Points only request mode.", "toggle"
-        )
-        await self.define_setting(
-            "test", False, "Enables test mode. (Removes all restrictions.)", "toggle"
-        )
-        await self.define_setting("cooldown", 30, "Cooldown for requests.", "value")
-        await self.define_setting(
-            "sr", [0, -1], "Star rating limit for requests.", "range"
-        )
+        """Initialize the Database, define hardcoded settings."""
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self.define_setting("enable", True, "Enables the bot.", "toggle"))
+            tg.create_task(self.define_setting(
+                "echo", True, "Enables Twitch chat acknowledge message.", "toggle"
+            ))
+            tg.create_task(self.define_setting(
+                "sub-only", False, "Subscribers only request mode.", "toggle"
+            ))
+            tg.create_task(self.define_setting(
+                "points-only", False, "Channel Points only request mode.", "toggle"
+            ))
+            tg.create_task(self.define_setting(
+                "test", False, "Enables test mode. (Removes all restrictions.)", "toggle"
+            ))
+            tg.create_task(self.define_setting("cooldown", 30, "Cooldown for requests.", "value"))
+            tg.create_task(self.define_setting(
+                "sr", [0, -1], "Star rating limit for requests.", "range"
+            ))
 
         logger.info(f"Successfully initialized {self.__class__.__name__}")
-
-    async def get_multiple_users_by_username(
-            self, twitch_names: List[str]
-    ) -> Iterable[DBUser]:
-        """
-        Gets multiple users from database
-        :param twitch_names: List of twitch names
-        :return: List of users
-        """
-        users = await self.users_col.find(
-            {"twitchUsername": {"$in": twitch_names}}
-        ).to_list(length=len(twitch_names))
-        return [DBUser(**user) for user in users]
 
     async def get_user_from_twitch_id(self, twitch_id: int) -> DBUser:
         """
@@ -87,27 +75,19 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param _type: Type of the setting
         :return:
         """
-        update_key = UpdateOne(
-            {"name": name},
-            {
-                "$set": {
-                    "name": name,
-                    "value": default_value,
-                    "description": description,
-                    "type": _type,
-                }
-            },
-            upsert=True,
-        )
-        await self.bulk_write_operations(operations=[update_key], col=self.settings_col)
+        await self.settings_col.update_one({"name": name}, {"$set": {
+            "name": name,
+            "value": default_value,
+            "description": description,
+            "type": _type,
+        }}, upsert=True)
 
     @staticmethod
     async def bulk_write_operations(
             operations: Sequence,
             col: AsyncIOMotorCollection,
     ):
-        """Bulk write multiple operations to the given collection. \
-        Defaults writing to "Metrics" collection."""
+        """Bulk write multiple operations to the given collection."""
         try:
             if len(operations) != 0:
                 result = await col.bulk_write(operations)
@@ -137,42 +117,6 @@ class RonniaDatabase(AsyncIOMotorClient):
         """
         return await self.get_setting("echo", twitch_username)
 
-    async def toggle_setting(self, setting_key: str, twitch_username: str):
-        """
-        Toggles setting of given user
-        :param setting_key: Key of the setting
-        :param twitch_username: Twitch username
-        :return: New value of the toggled setting.
-        """
-        twitch_username = twitch_username.lower()
-
-        # Get current status of setting
-        cur_value = await self.get_setting(setting_key, twitch_username)
-        # Toggle it
-        new_value = not cur_value
-        # Set new value to setting
-        await self.set_setting(setting_key, twitch_username, new_value)
-        # Return new value
-        return new_value
-
-    async def get_enabled_status(self, twitch_username: str):
-        """
-        Returns if the channel has enabled requests or not
-        :param twitch_username: Twitch username of the requested user
-        :return: Channel enabled status
-        """
-        return await self.get_setting("enable", twitch_username)
-
-    async def disable_channel(self, twitch_username: str):
-        await self.set_setting(
-            setting_key="enable", twitch_username=twitch_username, new_value=0
-        )
-
-    async def enable_channel(self, twitch_username: str):
-        await self.set_setting(
-            setting_key="enable", twitch_username=twitch_username, new_value=1
-        )
-
     async def get_test_status(self, twitch_username: str):
         """
         Gets the user's setting for test mode
@@ -197,22 +141,23 @@ class RonniaDatabase(AsyncIOMotorClient):
         settings = user.settings.dict(by_alias=True)
         return settings[setting_key]
 
-    async def get_enabled_users(self) -> Iterable[DBUser]:
+    async def get_enabled_users(self) -> AsyncGenerator[DBUser, None]:
         """
         Gets all enabled users in db
         :return:
         """
-        users = await self.users_col.find({"settings.enable": True}).to_list(length=None)
-        return [DBUser(**user) for user in users]
+        async for user in self.users_col.find({"settings.enable": True}):
+            yield DBUser.model_validate(user)
 
-    async def get_excluded_users(self, twitch_username: str) -> List[str]:
+    async def get_excluded_users(self, twitch_username: str) -> AsyncGenerator[str, None]:
         """
         Gets excluded user settings of a user
         :param twitch_username: Twitch username
         :return: List of excluded users
         """
         user = await self.get_user_from_twitch_username(twitch_username)
-        return [excluded_user.lower() for excluded_user in user.excludedUsers]
+        for excluded_user in user.excludedUsers:
+            yield excluded_user.lower()
 
     async def add_request(
             self,
@@ -228,7 +173,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param requested_channel_name: Channel id of the chat where the beatmap is requested
         :param mods: Requested mods (optional)
         """
-        self.statistics_col.insert_one(
+        await self.statistics_col.insert_one(
             {
                 "requester_channel_name": requester_channel_name,
                 "requested_beatmap_id": requested_beatmap_id,
@@ -238,19 +183,11 @@ class RonniaDatabase(AsyncIOMotorClient):
             }
         )
 
-    async def update_user(self, user: DBUser):
-        """
-        Updates user in database
-        :param user: User to update
-        """
-        await self.users_col.update_one(
-            {"twitchId": user.twitchId}, {"$set": user.dict()}
-        )
-
     async def add_beatmap(self, beatmap_info: dict):
         """
         Adds beatmap to database
         :param beatmap_info: Beatmap to add
         """
         beatmap_id = beatmap_info["id"]
+        logger.debug(f"Adding {beatmap_id} to the database")
         await self.beatmaps_col.update_one({"id": beatmap_id}, {"$set": beatmap_info}, upsert=True)

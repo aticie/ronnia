@@ -2,16 +2,16 @@ import asyncio
 import logging
 import os
 import socket
-from typing import List
+from typing import AsyncIterable
 
 from pymongo import UpdateOne
 
-from clients.twitch import TwitchAPI
-from clients.database import RonniaDatabase
-from models.database import DBUser
+from ronnia.clients.database import RonniaDatabase
+from ronnia.clients.twitch import TwitchAPI
+from ronnia.models.database import DBUser
 from ronnia.bots.twitch_bot import TwitchBot
 
-STREAMING_USERS_UPDATE_SLEEP = 120
+STREAMING_USERS_UPDATE_SLEEP = 60
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,9 @@ class BotManager:
 
         self._loop = asyncio.get_event_loop()
 
-        self.users: List[DBUser] = []
-
     async def start(self):
         """
-        Starts the bot manager.
-
-        Creates an IRCBot process and multiple TwitchBot processes.
+        Starts the TwitchBot, and starts a task for continuously sending currently streaming users to it.
         """
         await self.db_client.initialize()
         streaming_user_names = await self.get_streaming_users()
@@ -47,25 +43,25 @@ class BotManager:
         logger.info(
             f"Started Twitch bot instance for {len(streaming_user_names)} users"
         )
-        twitch_bot_task = asyncio.create_task(self.twitch_bot.start())
-        await self.twitch_bot.wait_for_ready()
-        await asyncio.sleep(0.5)
-        listener_task = asyncio.create_task(self.listener(self.twitch_bot.server_socket))
-        await asyncio.gather(
-            twitch_bot_task,
-            listener_task
-        )
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self.twitch_bot.start())
+            await self.twitch_bot.wait_for_ready()
+            await asyncio.sleep(1)  # wait for twitch_bot to initialize the server
+            tg.create_task(self.listener(self.twitch_bot.server_socket))
+
 
     async def listener(self, server_sock: socket.socket):
         """
-        Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every 30 seconds.
+        Main coroutine of the bot manager. Checks streaming users and sends the updated list to bot every
+        STREAMING_USERS_UPDATE_SLEEP seconds.
         """
         address = server_sock.getsockname()
         logger.info(f"Starting Bot Manager Listener on {address=}")
         _, writer = await asyncio.open_connection(*address[:2])
         while True:
             try:
-                await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)  # Wait for 30 seconds before sending connected users
+                # Wait for STREAMING_USERS_UPDATE_SLEEP seconds before sending connected users
+                await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)
 
                 streaming_users = await self.get_streaming_users()
                 logger.info(f'Sending streaming users to the Twitch Bot: {streaming_users}')
@@ -80,16 +76,19 @@ class BotManager:
                 raise e
 
     async def get_streaming_users(self) -> set:
-        self.users = await self.db_client.get_enabled_users()
-        all_user_twitch_ids = [user.twitchId for user in self.users]
+        """Gets the currently streaming users from TwitchAPI."""
+        users = self.db_client.get_enabled_users()
+        users = self.extract_user_id(users)
 
+        streaming_usernames = set()
         async with TwitchAPI(self.twitch_client_id, self.twitch_client_secret) as twitch_api:
-            streaming_twitch_users = await twitch_api.get_streams(all_user_twitch_ids)
+            streaming_twitch_user_data = twitch_api.get_streams(users)
             streaming_twitch_user_ids = []
             operations = []
-            for user in streaming_twitch_users:
+            async for user in streaming_twitch_user_data:
                 twitch_username = user["user_login"]
                 twitch_id = int(user["user_id"])
+                streaming_usernames.add(twitch_username)
                 streaming_twitch_user_ids.append(twitch_id)
                 operations.append(
                     UpdateOne(
@@ -107,5 +106,9 @@ class BotManager:
             {"twitchId": {"$nin": streaming_twitch_user_ids}},
             {"$set": {"isLive": False}},
         )
-        streaming_usernames = [user["user_login"] for user in streaming_twitch_users]
-        return set(streaming_usernames)
+        return streaming_usernames
+
+    @staticmethod
+    async def extract_user_id(users: AsyncIterable[DBUser]) -> AsyncIterable[int]:
+        async for user in users:
+            yield user.twitchId

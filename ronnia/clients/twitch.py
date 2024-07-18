@@ -1,10 +1,11 @@
 import asyncio
-from typing import Dict, List
+from typing import AsyncGenerator, AsyncIterable
 
 import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from utils.singleton import SingletonMeta
+from ronnia.utils.singleton import SingletonMeta
+from ronnia.utils.utils import async_batcher
 
 
 class TwitchAPI(metaclass=SingletonMeta):
@@ -31,7 +32,7 @@ class TwitchAPI(metaclass=SingletonMeta):
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((aiohttp.ClientError, aiohttp.ServerConnectionError))
     )
-    async def _make_request(self, method: str, url: str, **kwargs) -> Dict:
+    async def _make_request(self, method: str, url: str, **kwargs) -> dict:
         async with self.semaphore:
             while self.authenticating:
                 await asyncio.sleep(0.1)
@@ -46,7 +47,7 @@ class TwitchAPI(metaclass=SingletonMeta):
                 else:
                     response.raise_for_status()
 
-    async def _auth_request(self, url: str, params: Dict) -> Dict:
+    async def _auth_request(self, url: str, params: dict) -> dict:
         async with self.session.post(url, params=params) as response:
             if response.status == 200:
                 return await response.json()
@@ -68,7 +69,8 @@ class TwitchAPI(metaclass=SingletonMeta):
             data = await self._auth_request(auth_url, params)
             self.access_token = data["access_token"]
 
-    async def get_streams_batch(self, user_ids: List[int]) -> Dict:
+    async def get_streams_batch(self, user_ids: list[int]) -> dict:
+        """Fetch /streams from the TwitchAPI for the given user_ids list."""
         if not self.access_token:
             await self.authenticate()
 
@@ -83,19 +85,15 @@ class TwitchAPI(metaclass=SingletonMeta):
 
         return await self._make_request("GET", url, headers=headers)
 
-    async def get_streams(self, user_ids: List[int]) -> List[Dict]:
-        # Split user_ids into batches
-        batches = [user_ids[i:i + 100] for i in range(0, len(user_ids), 100)]
-
+    async def get_streams(self, user_ids: AsyncIterable[int]) -> AsyncGenerator[dict, None]:
+        """Get current streaming users for the given user_ids list."""
         # Create tasks for each batch
-        tasks = [self.get_streams_batch(batch) for batch in batches]
+        async with asyncio.TaskGroup() as tg:
+            tasks = []
+            async for batch in async_batcher(user_ids, 100):
+                tasks.append(tg.create_task(self.get_streams_batch(batch)))
 
-        # Run all tasks concurrently, but limited by the semaphore
-        results = await asyncio.gather(*tasks)
-
-        # Combine results
-        combined_data = {"data": []}
-        for result in results:
-            combined_data["data"].extend(result.get("data", []))
-
-        return combined_data["data"]
+            for task in asyncio.as_completed(tasks):
+                users = await task
+                for user in users["data"]:
+                    yield user

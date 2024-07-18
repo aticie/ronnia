@@ -4,15 +4,16 @@ import logging
 from typing import Union, Dict, Optional, Tuple
 
 import aiohttp
-from multidict import CIMultiDict
 
-from utils.singleton import SingletonMeta
+from ronnia.models.beatmap import Beatmap, BeatmapType
+from ronnia.utils.singleton import SingletonMeta
 
 logger = logging.getLogger("ronnia")
 
 
 class BaseOsuApiV2(metaclass=SingletonMeta):
     """Async wrapper for osu! api v2"""
+    _session: aiohttp.ClientSession | None = None
 
     def __init__(self, client_id: str, client_secret: str):
         super().__init__()
@@ -21,6 +22,8 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
         self._api_base_url = "https://osu.ppy.sh/api/v2/"
         self._scopes = None
 
+        self._auth_lock = asyncio.Lock()
+        self._is_authenticating = False
         self._access_token = None
         self._access_token_obtain_date = None
         self._access_token_expire_date = None
@@ -28,23 +31,28 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
         self._last_request_time = datetime.datetime.now() - datetime.timedelta(
             weeks=100
         )
-        self._cooldown_seconds = 0.5
+        self._cooldown_seconds = 1
 
-    async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
-        return self
+    @classmethod
+    async def get_session(cls):
+        if cls._session is None or cls._session.closed:
+            cls._session = aiohttp.ClientSession()
+        return cls._session
 
-    async def __aexit__(self, *err):
-        await self._session.close()
-        self._session = None
+    @classmethod
+    async def close_session(cls):
+        if cls._session and not cls._session.closed:
+            await cls._session.close()
+        cls._session = None
 
-    async def _check_token_expired(self):
+    def _check_token_expired(self):
         return (
                 datetime.datetime.now() + datetime.timedelta(minutes=1)
                 > self._access_token_expire_date
         )
 
     async def _get_access_token(self):
+        """Gets the access token from osu! api"""
         params = {
             "client_id": self._client_id,
             "client_secret": self._client_secret,
@@ -52,9 +60,8 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
             "scope": self._scopes,
         }
 
-        async with aiohttp.ClientSession() as c:
-            async with c.post("https://osu.ppy.sh/oauth/token", json=params) as r:
-                token_response = await r.json()
+        async with self._session.post("https://osu.ppy.sh/oauth/token", json=params) as r:
+            token_response = await r.json()
 
         self._access_token = token_response["access_token"]
 
@@ -64,14 +71,14 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
                 + datetime.timedelta(seconds=token_response["expires_in"])
         )
 
-        self._default_headers = CIMultiDict(
-            {"Authorization": f"Bearer {self._access_token}"}
-        )
+        self._auth_header = {"Authorization": f"Bearer {self._access_token}"}
+        logger.info(f"Successfully authenticated with osu! api on {self.__class__.__name__}")
 
     async def _get_endpoint(self, endpoint: str, params: dict = None):
         await self.wait_cooldown()
 
-        async with self._session.get(f"{self._api_base_url}{endpoint}", params=params) as resp:
+        async with self._session.get(f"{self._api_base_url}{endpoint}", params=params,
+                                     headers=self._auth_header) as resp:
             contents = await resp.json()
 
         self._last_request_time = datetime.datetime.now()
@@ -82,7 +89,7 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
         await self.wait_cooldown()
 
         async with self._session.post(
-                f"{self._api_base_url}{endpoint}", params=params, json=data
+                f"{self._api_base_url}{endpoint}", params=params, json=data, headers=self._auth_header
         ) as resp:
             contents = await resp.json()
 
@@ -90,9 +97,18 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
 
         return contents
 
+    async def ensure_authenticated(self):
+        async with self._auth_lock:
+            if (self._access_token is None or self._check_token_expired()) and not self._is_authenticating:
+                self._is_authenticating = True
+                try:
+                    await self._get_access_token()
+                finally:
+                    self._is_authenticating = False
+
     async def wait_cooldown(self):
-        if self._access_token is None or await self._check_token_expired():
-            await self._get_access_token()
+        self._session = await BaseOsuApiV2.get_session()
+        await self.ensure_authenticated()
         seconds_since_last_request = (
                 datetime.datetime.now() - self._last_request_time
         ).total_seconds()
@@ -105,7 +121,7 @@ class OsuApiV2(BaseOsuApiV2):
         super().__init__(client_id, client_secret)
         self._scopes = "public"
 
-    async def get_beatmap(self, beatmap_id: int) -> Tuple[Dict, Dict]:
+    async def get_beatmap(self, beatmap: Beatmap) -> Tuple[Dict, Dict]:
         """
         Gets beatmap data for the specified beatmap ID.
         :param beatmap_id: The ID of the beatmap.
@@ -113,15 +129,18 @@ class OsuApiV2(BaseOsuApiV2):
 
         This endpoint returns a single beatmap dict.
         """
-        logger.debug(f"Requesting beatmap information for id: {beatmap_id}")
-        beatmap_info = await self._get_endpoint(f"beatmaps/{beatmap_id}")
-        beatmapset_info = beatmap_info["beatmapset"]
-        return beatmap_info, beatmapset_info
+        logger.debug(f"Requesting beatmap information for id: {beatmap.id}")
+        match beatmap.type:
+            case BeatmapType.MAP:
+                beatmap_info = await self._get_endpoint(f"beatmaps/{beatmap.id}")
+                beatmapset_info = beatmap_info["beatmapset"]
+            case BeatmapType.MAPSET:
+                beatmapset_info = await self._get_endpoint(f"beatmapsets/{beatmap.id}")
+                beatmap_info = beatmapset_info["beatmaps"][0]
+            case _:
+                beatmap_info = None
+                beatmapset_info = None
 
-    async def get_beatmapset(self, beatmapset_id: int) -> Tuple[Dict, Dict]:
-        logger.debug(f"Requesting beatmapset information for id: {beatmapset_id}")
-        beatmapset_info = await self._get_endpoint(f"beatmapsets/{beatmapset_id}")
-        beatmap_info = beatmapset_info["beatmaps"][0]
         return beatmap_info, beatmapset_info
 
     async def get_beatmap_attributes(
@@ -149,7 +168,7 @@ class OsuApiV2(BaseOsuApiV2):
         This endpoint returns the detail of specified user.
         It's highly recommended to pass key parameter to avoid getting unexpected result
         (mainly when looking up user with numeric username or nonexistent user id).
-        :param user_id: Id or username of the user.
+        :param user_id: ID or username of the user.
         :param key: Type of user passed in url parameter.
                     Can be either id or username to limit lookup by their respective type.
                     Passing empty or invalid value will result in id lookup followed by username lookup if not found.

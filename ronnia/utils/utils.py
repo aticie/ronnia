@@ -1,4 +1,5 @@
-from itertools import islice
+import sys
+from typing import AsyncIterable, AsyncGenerator
 
 
 def convert_seconds_to_readable(seconds: str) -> str:
@@ -11,7 +12,14 @@ def convert_seconds_to_readable(seconds: str) -> str:
         return f"{hours:g}:{minutes:02g}:{seconds:02g}"
 
 
-def batcher(iterable, batch_size):
-    iterator = iter(iterable)
-    while batch := list(islice(iterator, batch_size)):
-        yield batch
+async def async_batcher(iterable: AsyncIterable, batch_size: int) -> AsyncGenerator:
+    i = 0
+    batch = []
+    async for item in iterable:
+        batch.append(item)
+        i += 1
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+
+    yield batch
