@@ -43,6 +43,7 @@ class TwitchBot(Client):
         self.listener_update_sleep = listener_update_sleep
         self.main_prefix = None
         self.server_socket = None
+        self.receiver_task = None
         self.user_last_request = {}
 
     async def streaming_channel_receiver(self):
@@ -63,11 +64,12 @@ class TwitchBot(Client):
         try:
             while True:
                 try:
+                    # update_sleep + 5 seconds buffer
                     data = await asyncio.wait_for(reader.readline(),
-                                                  timeout=self.listener_update_sleep + 5)  # 30 seconds + 5 seconds buffer
+                                                  timeout=self.listener_update_sleep + 5)
                     raw_message = data.decode()
                     streaming_users = raw_message.strip("\n").split(",")
-                    logger.info(f"Twitch Bot received {len(streaming_users)} from {addr}")
+                    logger.info(f"Twitch Bot received {len(streaming_users)} users from {addr}")
                     await self.join_streaming_channels(streaming_users)
 
                 except asyncio.TimeoutError as e:
@@ -416,7 +418,7 @@ class TwitchBot(Client):
         logger.info(f"Connected channels: {self.connected_channels}")
         logger.info("Successfully initialized bot!")
         logger.info(f"Ready | {self.nick}")
-        _ = self.loop.create_task(self.streaming_channel_receiver())
+        self.receiver_task = self.loop.create_task(self.streaming_channel_receiver())
         self.routine_show_connected_channels.start(stop_on_error=False)
 
     @routines.routine(minutes=1)
