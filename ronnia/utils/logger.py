@@ -1,21 +1,19 @@
-import logging
-import os
-import sys
+import datetime
+
+from pythonjsonlogger import jsonlogger
 
 
-class RonniaLogger(object):
-    def __new__(cls, name, *args, **kwargs):
-        logger = logging.getLogger()
-        logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
-        loggers_formatter = logging.Formatter(
-            '[{asctime}] [{levelname:<8}] {name}: {message}', style='{',
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+class CustomJsonFormatter(jsonlogger.JsonFormatter):
+    def add_fields(self, log_record, record, message_dict):
+        super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
+        if not log_record.get('timestamp'):
+            # this doesn't use record.created, so it is slightly off
+            now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            log_record['timestamp'] = now
+        if log_record.get('level'):
+            log_record['level'] = log_record['level'].upper()
+        else:
+            log_record['level'] = record.levelname
 
-        ch = logging.StreamHandler(stream=sys.stdout)
-        ch.setFormatter(loggers_formatter)
-        logger.addHandler(ch)
 
-        logger.propagate = True
-
-        return logger
+formatter = CustomJsonFormatter('%(timestamp)s %(level)s %(name)s %(message)s')
