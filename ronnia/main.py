@@ -3,7 +3,7 @@ import multiprocessing
 import platform
 
 from ronnia.bots.bot_manager import BotManager
-from ronnia.helpers.logger import RonniaLogger
+from ronnia.utils.logger import RonniaLogger
 
 logger = RonniaLogger(__name__)
 

@@ -6,10 +6,12 @@ from typing import Union, Dict, Optional, Tuple
 import aiohttp
 from multidict import CIMultiDict
 
+from utils.singleton import SingletonMeta
+
 logger = logging.getLogger("ronnia")
 
 
-class BaseOsuApiV2:
+class BaseOsuApiV2(metaclass=SingletonMeta):
     """Async wrapper for osu! api v2"""
 
     def __init__(self, client_id: str, client_secret: str):

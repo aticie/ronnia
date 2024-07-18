@@ -1,6 +1,6 @@
 import unittest
 
-from ronnia.helpers.beatmap_link_parser import parse_single_beatmap, parse_beatmapset, get_mod_from_text
+from ronnia.utils.beatmap_parser import parse_single_beatmap, parse_beatmapset, get_mod_from_text
 
 
 class TestBeatmapLinkParser(unittest.TestCase):

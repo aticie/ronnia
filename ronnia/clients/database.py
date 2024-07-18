@@ -7,33 +7,12 @@ from motor.motor_asyncio import (
     AsyncIOMotorDatabase,
     AsyncIOMotorCollection,
 )
-from pydantic import BaseModel, Field
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
 
+from models.database import DBUser
+
 logger = logging.getLogger(__name__)
-
-
-class DBSettings(BaseModel):
-    echo: bool = True
-    enable: bool = True
-    sub_only: bool = Field(False, alias="sub-only")
-    points_only: bool = Field(False, alias="points-only")
-    test: bool = False
-    cooldown: float = 0
-    sr: List[float] = [0, -1]
-
-
-class DBUser(BaseModel):
-    osuUsername: str
-    twitchUsername: str
-    twitchId: int
-    osuId: int
-    osuAvatarUrl: str
-    twitchAvatarUrl: str
-    excludedUsers: List[str] = []
-    settings: DBSettings = DBSettings()
-    isLive: bool = False
 
 
 class RonniaDatabase(AsyncIOMotorClient):

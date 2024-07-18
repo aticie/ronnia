@@ -7,10 +7,10 @@ from typing import AnyStr, Tuple, Union
 from twitchio import Message, Channel, Chatter, Client
 from twitchio.ext import routines
 
-from ronnia.helpers.beatmap_link_parser import parse_beatmap_link
-from ronnia.helpers.database_helper import RonniaDatabase
-from ronnia.helpers.osu_api_helper import OsuApiV2, OsuChatApiV2
-from ronnia.helpers.utils import convert_seconds_to_readable
+from ronnia.utils.beatmap_parser import parse_beatmap_link
+from clients.database import RonniaDatabase
+from clients.osu import OsuApiV2, OsuChatApiV2
+from ronnia.utils.utils import convert_seconds_to_readable
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +64,12 @@ class TwitchBot(Client):
         try:
             while True:
                 try:
-                    # update_sleep + 5 seconds buffer
+                    # listener_update_sleep + 5 seconds buffer
                     data = await asyncio.wait_for(reader.readline(),
                                                   timeout=self.listener_update_sleep + 5)
                     raw_message = data.decode()
                     streaming_users = raw_message.strip("\n").split(",")
-                    logger.info(f"Twitch Bot received {len(streaming_users)} users from {addr}")
+                    logger.info(f"Twitch Bot received streaming users: {streaming_users}")
                     await self.join_streaming_channels(streaming_users)
 
                 except asyncio.TimeoutError as e:

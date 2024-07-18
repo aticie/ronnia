@@ -1,6 +1,6 @@
 import unittest
 
-from ronnia.helpers.utils import convert_seconds_to_readable
+from ronnia.utils.utils import convert_seconds_to_readable
 
 
 class TestConvertSecondsToReadable(unittest.TestCase):
