@@ -3,3 +3,4 @@ motor==3.5.1
 pydantic==2.8.2
 aiohttp==3.9.5
 tenacity==8.5.0
+sentry-sdk==2.10.0
