@@ -36,7 +36,6 @@ class TwitchBot(Client):
 
         token = os.getenv("TMI_TOKEN").replace("oauth:", "")
         initial_channels = [os.getenv("BOT_NICK"), *initial_channel_names]
-        self.joined_channels = {user for user in initial_channels}
         super().__init__(token=token,
                          client_secret=os.getenv("TWITCH_CLIENT_SECRET"),
                          initial_channels=initial_channels)
@@ -98,8 +97,9 @@ class TwitchBot(Client):
     async def join_streaming_channels(self, message: list[str]):
         """Join the channels that started streaming and leave the ones that stopped streaming."""
         streaming_users_set = set(message)
-        new_channels = list(streaming_users_set.difference(self.joined_channels))
-        closed_channels = list(self.joined_channels.difference(streaming_users_set))
+        currently_joined_channels = set(channel.name for channel in list(filter(None, self.connected_channels)))
+        new_channels = list(streaming_users_set.difference(currently_joined_channels))
+        closed_channels = list(currently_joined_channels.difference(streaming_users_set))
 
         logger.info(f"Joining new channels: {new_channels}")
         logger.info(f"Parting closed channels: {closed_channels}")
@@ -107,8 +107,6 @@ class TwitchBot(Client):
         async with self._join_lock:
             await self.join_channels(new_channels)
             await self.part_channels(closed_channels)
-
-        self.joined_channels = streaming_users_set
 
     async def event_message(self, message: Message):
         if message.author is None:
@@ -252,11 +250,14 @@ class TwitchBot(Client):
             logger.info("Task group had an exception")
             for exception in error.exceptions:
                 if isinstance(exception, AssertionError):
-                    logger.info(msg=f"TwitchBot check failed: {error}")
+                    logger.info(msg=f"TwitchBot check failed: {exception}")
                 else:
                     logger.exception(msg="TaskGroup exception", exc_info=exception)
         else:
             logger.exception(msg="TwitchBot emitted event_error", exc_info=error)
+
+    async def event_channel_join_failure(self, channel: str):
+        logger.exception(msg="Channel join failure.", extra={"channel": channel})
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
@@ -377,7 +378,6 @@ class TwitchBot(Client):
         :param message: Twitch Message object
         :return:
         """
-        logger.debug("Checking if message contains beatmap link")
         content = message.content
 
         for candidate_link in content.split(" "):
@@ -403,12 +403,12 @@ class TwitchBot(Client):
         version = beatmap_info["version"]
         bpm = beatmap_info["bpm"]
         beatmap_status = str(beatmap_info["status"]).capitalize()
-        difficultyrating = float(beatmap_info["difficulty_rating"])
+        difficulty_rating = float(beatmap_info["difficulty_rating"])
         beatmap_id = beatmap_info["id"]
         beatmap_length = convert_seconds_to_readable(beatmap_info["hit_length"])
         beatmap_info = (
             f"[https://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] "
-            f"({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
+            f"({bpm} BPM, {difficulty_rating:.2f}*, {beatmap_length}) {given_mods}"
         )
         extra_postfix = ""
         extra_prefix = ""
@@ -432,14 +432,3 @@ class TwitchBot(Client):
         logger.info("Successfully initialized bot!")
         logger.info(f"Ready | {self.nick}")
         self.receiver_task = self.loop.create_task(self.streaming_channel_receiver())
-        self.routine_show_connected_channels.start(stop_on_error=False)
-
-    @routines.routine(minutes=1)
-    async def routine_show_connected_channels(self):
-        """
-        Shows the currently connected users every minute. Used for debugging.
-        """
-        connected_channel_names = [
-            channel.name for channel in list(filter(None, self.connected_channels))
-        ]
-        logger.info(f"Connected channels: {connected_channel_names}")

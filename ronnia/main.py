@@ -1,15 +1,15 @@
 import asyncio
+import logging
 import multiprocessing
 import os
 import platform
+import sys
 
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 from ronnia.bots.bot_manager import BotManager
-from ronnia.utils.logger import RonniaLogger
-
-logger = RonniaLogger(__name__)
+from utils.logger import CustomJsonFormatter
 
 if __name__ == "__main__":
 
@@ -24,6 +24,14 @@ if __name__ == "__main__":
 
     # Required for multiprocessing to work on Linux
     multiprocessing.set_start_method("spawn")
+
+    logger = logging.getLogger()
+
+    logger.setLevel(logging.INFO)
+    logHandler = logging.StreamHandler(sys.stdout)
+    formatter = CustomJsonFormatter('%(timestamp)s %(level)s %(name)s %(message)s')
+    logHandler.setFormatter(formatter)
+    logger.addHandler(logHandler)
 
     if platform.system() == 'Windows':
         loop_policy = asyncio.WindowsProactorEventLoopPolicy()

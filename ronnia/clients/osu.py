@@ -77,10 +77,17 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
     async def _get_endpoint(self, endpoint: str, params: dict = None):
         await self.wait_cooldown()
 
-        async with self._session.get(f"{self._api_base_url}{endpoint}", params=params,
+        url = f"{self._api_base_url}{endpoint}"
+        async with self._session.get(url, params=params,
                                      headers=self._auth_header) as resp:
             contents = await resp.json()
 
+        logger.debug("Response after GET request to the osu! api.",
+                     extra={"response": contents,
+                            "url": url,
+                            "params": params
+                            }
+                     )
         self._last_request_time = datetime.datetime.now()
 
         return contents
@@ -88,11 +95,19 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
     async def _post_endpoint(self, endpoint: str, data: dict, params: dict = None):
         await self.wait_cooldown()
 
+        url = f"{self._api_base_url}{endpoint}"
         async with self._session.post(
-                f"{self._api_base_url}{endpoint}", params=params, json=data, headers=self._auth_header
+                url, params=params, json=data, headers=self._auth_header
         ) as resp:
             contents = await resp.json()
 
+        logger.debug("Response after POST request to the osu! api.",
+                     extra={"response": contents,
+                            "url": url,
+                            "params": params,
+                            "data": data
+                            }
+                     )
         self._last_request_time = datetime.datetime.now()
 
         return contents
@@ -124,8 +139,8 @@ class OsuApiV2(BaseOsuApiV2):
     async def get_beatmap(self, beatmap: Beatmap) -> Tuple[Dict, Dict]:
         """
         Gets beatmap data for the specified beatmap ID.
-        :param beatmap_id: The ID of the beatmap.
-        :return: Returns Beatmap object.
+        :param beatmap: The beatmap object.
+        :return: Returns a tuple of information about beatmap and beatmapset.
 
         This endpoint returns a single beatmap dict.
         """
