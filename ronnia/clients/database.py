@@ -173,7 +173,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param requested_channel_name: Channel id of the chat where the beatmap is requested
         :param mods: Requested mods (optional)
         """
-        logger.debug(f"Adding request statistics to the database")
+        logger.debug("Adding request statistics to the database")
         await self.statistics_col.insert_one(
             {
                 "requester_channel_name": requester_channel_name,

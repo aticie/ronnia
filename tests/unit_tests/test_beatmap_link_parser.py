@@ -155,12 +155,12 @@ class TestBeatmapLinkParser(unittest.TestCase):
             self.assertEqual(expected_mods_text, mods_text)
 
     def test_parse_beatmap_link(self):
-        map = Beatmap(id=1170505,
-                      type=BeatmapType.MAP,
-                      mods="")
+        beatmap = Beatmap(id=1170505,
+                          type=BeatmapType.MAP,
+                          mods="")
 
         returned_map = BeatmapParser.parse_beatmap_link(self.official_beatmap_link, self.official_beatmap_link)
 
-        self.assertEqual(map.id, returned_map.id)
-        self.assertEqual(map.mods, returned_map.mods)
-        self.assertEqual(map.type, returned_map.type)
+        self.assertEqual(beatmap.id, returned_map.id)
+        self.assertEqual(beatmap.mods, returned_map.mods)
+        self.assertEqual(beatmap.type, returned_map.type)
