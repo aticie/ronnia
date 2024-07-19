@@ -1,5 +1,6 @@
 import unittest
 
+from models.beatmap import Beatmap, BeatmapType
 from ronnia.utils.beatmap import BeatmapParser
 
 
@@ -7,7 +8,7 @@ class TestBeatmapLinkParser(unittest.TestCase):
 
     @classmethod
     def setUp(cls) -> None:
-        official_beatmap_link = 'https://osu.ppy.sh/beatmapsets/1341551#osu/2778999'
+        official_beatmap_link = 'https://osu.ppy.sh/beatmapsets/552726#osu/1170505'
         official_beatmap_link_alt = 'https://osu.ppy.sh/beatmaps/806017?mode=osu'
         official_beatmap_link_alt_2 = 'https://osu.ppy.sh/beatmaps/806017'
         old_beatmap_link = 'https://osu.ppy.sh/b/2778999'
@@ -31,10 +32,13 @@ class TestBeatmapLinkParser(unittest.TestCase):
         cls.beatmapset_links = [official_beatmapset_link, old_beatmapset_link, old_beatmapset_link_alt]
 
     def test_parse_single_beatmap_returns_beatmap_id_for_official_links(self):
-        expected_id = '2778999'
+        expected_id = '1170505'
+        expected_set_id = '552726'
         result_id = BeatmapParser.parse_single_beatmap(self.official_beatmap_link)
+        result_set_id = BeatmapParser.parse_beatmapset(self.official_beatmap_link)
 
         self.assertEqual(expected_id, result_id)
+        self.assertEqual(expected_set_id, result_set_id)
 
     def test_parse_single_beatmap_returns_beatmap_id_for_official_links_alternate(self):
         expected_id = '806017'
@@ -149,3 +153,14 @@ class TestBeatmapLinkParser(unittest.TestCase):
             mods_text = BeatmapParser.get_mod_from_text(content, beatmap_link)
 
             self.assertEqual(expected_mods_text, mods_text)
+
+    def test_parse_beatmap_link(self):
+        map = Beatmap(id=1170505,
+                      type=BeatmapType.MAP,
+                      mods="")
+
+        returned_map = BeatmapParser.parse_beatmap_link(self.official_beatmap_link, self.official_beatmap_link)
+
+        self.assertEqual(map.id, returned_map.id)
+        self.assertEqual(map.mods, returned_map.mods)
+        self.assertEqual(map.type, returned_map.type)

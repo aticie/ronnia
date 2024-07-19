@@ -377,7 +377,6 @@ class TwitchBot(Client):
         :param message: Twitch Message object
         :return:
         """
-        logger.debug("Checking if message contains beatmap link")
         content = message.content
 
         for candidate_link in content.split(" "):
@@ -403,12 +402,12 @@ class TwitchBot(Client):
         version = beatmap_info["version"]
         bpm = beatmap_info["bpm"]
         beatmap_status = str(beatmap_info["status"]).capitalize()
-        difficultyrating = float(beatmap_info["difficulty_rating"])
+        difficulty_rating = float(beatmap_info["difficulty_rating"])
         beatmap_id = beatmap_info["id"]
         beatmap_length = convert_seconds_to_readable(beatmap_info["hit_length"])
         beatmap_info = (
             f"[https://osu.ppy.sh/b/{beatmap_id} {artist} - {title} [{version}]] "
-            f"({bpm} BPM, {difficultyrating:.2f}*, {beatmap_length}) {given_mods}"
+            f"({bpm} BPM, {difficulty_rating:.2f}*, {beatmap_length}) {given_mods}"
         )
         extra_postfix = ""
         extra_prefix = ""
