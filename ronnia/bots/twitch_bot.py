@@ -258,8 +258,6 @@ class TwitchBot(Client):
 
     async def event_channel_join_failure(self, channel: str):
         logger.exception(msg="Channel join failure.", extra={"channel": channel})
-        self._connection._cache.pop(channel, None)
-        pass
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
