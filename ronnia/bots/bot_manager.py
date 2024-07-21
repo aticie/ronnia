@@ -7,7 +7,7 @@ from typing import AsyncIterable
 from pymongo import UpdateOne
 
 from ronnia.bots.twitch_bot import TwitchBot
-from ronnia.clients.database import RonniaDatabase
+from ronnia.clients.mongo import RonniaDatabase
 from ronnia.clients.twitch import TwitchAPI
 from ronnia.models.database import DBUser
 

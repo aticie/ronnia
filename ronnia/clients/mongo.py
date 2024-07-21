@@ -46,6 +46,13 @@ class RonniaDatabase(AsyncIOMotorClient):
 
         logger.info(f"Successfully initialized {self.__class__.__name__}")
 
+    async def remove_user(self, twitch_username: str) -> bool:
+        """
+        Removes the user with the matching twitch username
+        """
+        result = await self.users_col.delete_one({"twitchUsername": twitch_username})
+        return result.acknowledged
+
     async def get_user_from_twitch_id(self, twitch_id: int) -> DBUser:
         """
         Gets the user details from database using Twitch username

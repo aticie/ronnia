@@ -2,11 +2,11 @@ import asyncio
 import datetime
 import logging
 import os
+from collections import Counter
 
 from twitchio import Message, Channel, Chatter, Client
-from twitchio.ext import routines
 
-from clients.database import RonniaDatabase
+from clients.mongo import RonniaDatabase
 from clients.osu import OsuApiV2, OsuChatApiV2
 from ronnia.models.beatmap import Beatmap
 from ronnia.utils.beatmap import BeatmapParser
@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchBot(Client):
+    MAX_CHANNEL_JOIN_TRIES = 5
+
     def __init__(self, initial_channel_names: set[str], listener_update_sleep: int = 60):
         self.ronnia_db = RonniaDatabase(os.getenv("MONGODB_URL"))
         self.osu_api = OsuApiV2(
@@ -29,6 +31,7 @@ class TwitchBot(Client):
 
         self._join_lock = asyncio.Lock()
 
+        self.join_fail_channels = Counter()
         self.listener_update_sleep = listener_update_sleep
         self.server_socket = None
         self.receiver_task: asyncio.Task | None = None
@@ -256,8 +259,17 @@ class TwitchBot(Client):
         else:
             logger.exception(msg="TwitchBot emitted event_error", exc_info=error)
 
+    async def event_channel_joined(self, channel: Channel):
+        if channel in self.join_fail_channels:
+            self.join_fail_channels.pop(channel.name)
+
     async def event_channel_join_failure(self, channel: str):
-        logger.exception(msg="Channel join failure.", extra={"channel": channel})
+        self.join_fail_channels[channel] += 1
+        if self.join_fail_channels[channel] > self.MAX_CHANNEL_JOIN_TRIES:
+            logger.exception(msg=f"Bot could not join channel after {self.MAX_CHANNEL_JOIN_TRIES} tries. Removing user",
+                             extra={"channel": channel})
+            await self.ronnia_db.remove_user(twitch_username=channel)
+            self.join_fail_channels.pop(channel)
 
     @staticmethod
     async def check_if_author_is_broadcaster(message: Message):
