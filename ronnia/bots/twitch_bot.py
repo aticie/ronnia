@@ -8,7 +8,7 @@ from twitchio import Message, Channel, Chatter, Client
 
 from clients.mongo import RonniaDatabase
 from clients.osu import OsuApiV2, OsuChatApiV2
-from ronnia.models.beatmap import Beatmap
+from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.utils.beatmap import BeatmapParser
 from ronnia.utils.utils import convert_seconds_to_readable
 
@@ -124,15 +124,26 @@ class TwitchBot(Client):
         except AssertionError as e:
             logger.info(f"Check unsuccessful: {e}")
 
+    async def get_beatmap(self, beatmap: Beatmap) -> tuple[dict, dict]:
+        db_beatmap = await self.ronnia_db.get_beatmap(beatmap=beatmap)
+        if db_beatmap is None:
+            beatmap_info, beatmapset_info = await self.osu_api.get_beatmap(beatmap=beatmap)
+            if beatmap.type is BeatmapType.MAP:
+                _ = asyncio.create_task(self.ronnia_db.add_beatmap(beatmap_info))
+        else:
+            beatmap_info = db_beatmap
+            beatmapset_info = db_beatmap["beatmapset"]
+
+        return beatmap_info, beatmapset_info
+
     async def handle_request(self, message: Message):
         """Parses the beatmap link and then sends it to Twitch IRC."""
         beatmap = self._check_message_contains_beatmap_link(message)
         if not beatmap:
             return
 
-        beatmap_info, beatmapset_info = await self.osu_api.get_beatmap(
-            beatmap
-        )
+        beatmap_info, beatmapset_info = await self.get_beatmap(beatmap)
+
         if beatmap_info:
             await self.check_request_criteria(message, beatmap_info)
 

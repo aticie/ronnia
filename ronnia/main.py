@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     logger = logging.getLogger()
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(os.getenv("LOG_LEVEL"))
     logHandler = logging.StreamHandler(sys.stdout)
     formatter = CustomJsonFormatter('%(timestamp)s %(level)s %(name)s %(message)s')
     logHandler.setFormatter(formatter)

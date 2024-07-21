@@ -9,6 +9,7 @@ from motor.motor_asyncio import (
     AsyncIOMotorCollection, )
 from pymongo.errors import BulkWriteError
 
+from models.beatmap import Beatmap, BeatmapType
 from ronnia.models.database import DBUser
 
 logger = logging.getLogger(__name__)
@@ -199,3 +200,16 @@ class RonniaDatabase(AsyncIOMotorClient):
         beatmap_id = beatmap_info["id"]
         logger.debug(f"Adding {beatmap_id} to the database")
         await self.beatmaps_col.update_one({"id": beatmap_id}, {"$set": beatmap_info}, upsert=True)
+
+    async def get_beatmap(self, beatmap: Beatmap):
+        """
+        Get a beatmap from the database
+        """
+        logger.debug(f"Getting {beatmap.type} {beatmap.id} from the database")
+        match beatmap.type:
+            case BeatmapType.MAP:
+                return await self.beatmaps_col.find_one({"id": beatmap.id})
+            case BeatmapType.MAPSET:
+                return await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
+            case _:
+                return None
