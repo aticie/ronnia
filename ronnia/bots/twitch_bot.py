@@ -4,7 +4,7 @@ import logging
 import os
 from collections import Counter
 
-from twitchio import Message, Channel, Chatter, Client
+from twitchio import Message, Channel, Chatter, Client, IRCCooldownError
 
 from clients.mongo import RonniaDatabase
 from clients.osu import OsuApiV2, OsuChatApiV2
@@ -277,8 +277,8 @@ class TwitchBot(Client):
     async def event_channel_join_failure(self, channel: str):
         self.join_fail_channels[channel] += 1
         if self.join_fail_channels[channel] > self.MAX_CHANNEL_JOIN_TRIES:
-            logger.exception(msg=f"Bot could not join channel after {self.MAX_CHANNEL_JOIN_TRIES} tries. Removing user",
-                             extra={"channel": channel})
+            logger.warning(msg=f"Bot could not join channel after {self.MAX_CHANNEL_JOIN_TRIES} tries. Removing user",
+                           extra={"channel": channel})
             await self.ronnia_db.remove_user(twitch_username=channel)
             self.join_fail_channels.pop(channel)
 
@@ -390,7 +390,10 @@ class TwitchBot(Client):
         title = beatmapset_info["title"]
         version = beatmap_info["version"]
         bmap_info_text = f"{artist} - {title} [{version}]"
-        await message.channel.send(f"{bmap_info_text} - Request sent!")
+        try:
+            await message.channel.send(f"{bmap_info_text} - Request sent!")
+        except IRCCooldownError as e:
+            logger.warning("IRC Cooldown", exc_info=e)
 
     @staticmethod
     def _check_message_contains_beatmap_link(
