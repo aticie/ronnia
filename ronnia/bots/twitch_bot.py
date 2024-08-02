@@ -179,11 +179,6 @@ class TwitchBot(Client):
                         mods=beatmap.mods,
                     )
                 )
-                tg.create_task(
-                    self.ronnia_db.add_beatmap(
-                        beatmap_info=beatmap_info
-                    )
-                )
 
     async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         """Check if the beatmap's star rating is matching the user settings."""
