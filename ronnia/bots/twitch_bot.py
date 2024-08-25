@@ -403,7 +403,8 @@ class TwitchBot(Client):
 
         for candidate_link in content.split(" "):
             beatmap = BeatmapParser.parse_beatmap_link(candidate_link, content)
-            return beatmap
+            if beatmap:
+                return beatmap
 
     @staticmethod
     async def _prepare_irc_message(

@@ -164,3 +164,16 @@ class TestBeatmapLinkParser(unittest.TestCase):
         self.assertEqual(beatmap.id, returned_map.id)
         self.assertEqual(beatmap.mods, returned_map.mods)
         self.assertEqual(beatmap.type, returned_map.type)
+
+    def test_parse_beatmap_link_with_text(self):
+        content = "@h1dron_ https://osu.ppy.sh/beatmapsets/1925316#osu/3975312 this one"
+        beatmap_link = "https://osu.ppy.sh/beatmapsets/1925316#osu/3975312"
+        beatmap = Beatmap(id=3975312,
+                          type=BeatmapType.MAP,
+                          mods="")
+
+        returned_map = BeatmapParser.parse_beatmap_link(beatmap_link, content)
+
+        self.assertEqual(beatmap.id, returned_map.id)
+        self.assertEqual(beatmap.mods, returned_map.mods)
+        self.assertEqual(beatmap.type, returned_map.type)
