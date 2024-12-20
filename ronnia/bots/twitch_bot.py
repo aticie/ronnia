@@ -82,7 +82,7 @@ class TwitchBot(Client):
 
                 except asyncio.TimeoutError as e:
                     logger.exception(f"Timeout waiting for message from {addr}", exc_info=e)
-                    continue
+                    break
 
                 except asyncio.IncompleteReadError as e:
                     logger.exception(f"Client {addr} disconnected", exc_info=e)

@@ -43,11 +43,10 @@ class BotManager:
         logger.info(
             f"Started Twitch bot instance for {len(streaming_user_names)} users"
         )
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(self.twitch_bot.start())
-            await self.twitch_bot.wait_for_ready()
-            await asyncio.sleep(1)  # wait for twitch_bot to initialize the server
-            tg.create_task(self.listener(self.twitch_bot.server_socket))
+        twitch_bot_task = asyncio.create_task(self.twitch_bot.start())
+        await self.twitch_bot.wait_for_ready()
+        await asyncio.sleep(1)  # wait for twitch_bot to initialize the server
+        await self.listener(self.twitch_bot.server_socket)
 
     async def listener(self, server_sock: socket.socket):
         """
@@ -59,20 +58,20 @@ class BotManager:
         _, writer = await asyncio.open_connection(*address[:2])
         while True:
             try:
-                # Wait for STREAMING_USERS_UPDATE_SLEEP seconds before sending connected users
-                await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)
-
                 streaming_users = await self.get_streaming_users()
                 logger.info(f'Sending streaming users to the Twitch Bot: {streaming_users}')
                 message = ",".join(streaming_users) + "\n"
                 writer.write(message.encode())
                 await writer.drain()
-
-            except BaseException as e:
+            except Exception as e:
                 logger.exception("Bot manager sender error exiting...", exc_info=e)
                 writer.close()
                 await writer.wait_closed()
-                raise e
+                logger.info("Reinitializing connection to TwitchBot...")
+                _, writer = await asyncio.open_connection(*address[:2])
+            finally:
+                # Wait for STREAMING_USERS_UPDATE_SLEEP seconds before sending connected users
+                await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)
 
     async def get_streaming_users(self) -> set:
         """Gets the currently streaming users from TwitchAPI."""
