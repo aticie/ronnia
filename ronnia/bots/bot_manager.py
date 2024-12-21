@@ -64,10 +64,13 @@ class BotManager:
                 writer.write(message.encode())
                 await writer.drain()
             except Exception as e:
-                logger.exception("Bot manager sender error exiting...", exc_info=e)
-                writer.close()
-                await writer.wait_closed()
-                logger.info("Reinitializing connection to TwitchBot...")
+                if writer is not None and not writer.is_closing():
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass  # Suppress exceptions during cleanup
+                logger.info("Initializing connection to TwitchBot...")
                 _, writer = await asyncio.open_connection(*address[:2])
             finally:
                 # Wait for STREAMING_USERS_UPDATE_SLEEP seconds before sending connected users
