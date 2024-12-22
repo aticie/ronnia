@@ -64,11 +64,14 @@ class BotManager:
                 writer.write(message.encode())
                 await writer.drain()
             except Exception as e:
+                logger.exception("An exception occurred in listener", exc_info=e)
                 if writer is not None and not writer.is_closing():
                     writer.close()
                     try:
                         await writer.wait_closed()
                     except Exception:
+                        logger.exception("Another exception occurred in listener while trying to close writer",
+                                         exc_info=e)
                         pass  # Suppress exceptions during cleanup
                 logger.info("Initializing connection to TwitchBot...")
                 _, writer = await asyncio.open_connection(*address[:2])
