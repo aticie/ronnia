@@ -305,15 +305,16 @@ class TwitchBot(Client):
         :return: Exception if user has requested a beatmap before channel_cooldown seconds passed.
         """
         author_id = author.id
+        user_key = author_id + channel.name
         time_right_now = datetime.datetime.now()
 
         channel_cooldown = await self.ronnia_db.get_setting("cooldown", channel.name)
         await self._prune_cooldowns(time_right_now, channel_cooldown)
 
-        if author_id not in self.user_last_request:
-            self.user_last_request[author_id] = time_right_now
+        if user_key not in self.user_last_request:
+            self.user_last_request[user_key] = time_right_now
         else:
-            last_message_time = self.user_last_request[author_id]
+            last_message_time = self.user_last_request[user_key]
             seconds_since_last_request = (
                     time_right_now - last_message_time
             ).total_seconds()
