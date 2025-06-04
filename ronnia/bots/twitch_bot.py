@@ -6,8 +6,8 @@ from collections import Counter
 
 from twitchio import Message, Channel, Chatter, Client, IRCCooldownError
 
-from clients.mongo import RonniaDatabase
-from clients.osu import OsuApiV2, OsuChatApiV2
+from ronnia.clients.mongo import RonniaDatabase
+from ronnia.clients.osu import OsuApiV2, OsuChatApiV2
 from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.utils.beatmap import BeatmapParser
 from ronnia.utils.utils import convert_seconds_to_readable
