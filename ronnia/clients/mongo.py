@@ -217,12 +217,8 @@ class RonniaDatabase(AsyncMongoClient):
             return None
 
         bmap_db_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
-        bmap_osu_last_update = bmap.get("last_updated")
-        if bmap_osu_last_update:
-            bmap_osu_last_update = datetime.datetime.fromisoformat(bmap_osu_last_update).replace(tzinfo=datetime.timezone.utc)
-        else:
-            return None
-
+        bmap_osu_last_update = bmap.get("last_updated", datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+        bmap_osu_last_update.replace(tzinfo=datetime.timezone.utc)
         if bmap_osu_last_update > bmap_db_last_update:
             return None
 
