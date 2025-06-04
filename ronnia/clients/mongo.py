@@ -3,26 +3,25 @@ import datetime
 import logging
 from typing import Optional, Union, Any, Sequence, AsyncGenerator
 
-from motor.motor_asyncio import (
-    AsyncIOMotorClient,
-    AsyncIOMotorDatabase,
-    AsyncIOMotorCollection, )
+from pymongo import AsyncMongoClient
 from pymongo.errors import BulkWriteError
+from pymongo.asynchronous.collection import AsyncCollection
 
-from models.beatmap import Beatmap, BeatmapType
+from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.models.database import DBUser
 
 logger = logging.getLogger(__name__)
+BEATMAP_CACHE_DAYS = 10
 
 
-class RonniaDatabase(AsyncIOMotorClient):
+class RonniaDatabase(AsyncMongoClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.db: AsyncIOMotorDatabase = self["Ronnia"]
-        self.users_col: AsyncIOMotorCollection = self.db["Users"]
-        self.settings_col: AsyncIOMotorCollection = self.db["Settings"]
-        self.statistics_col: AsyncIOMotorCollection = self.db["Statistics"]
-        self.beatmaps_col: AsyncIOMotorCollection = self.db["Beatmaps"]
+        self.db = self.get_database("Ronnia")
+        self.users_col = self.db.get_collection("Users")
+        self.settings_col = self.db.get_collection("Settings")
+        self.statistics_col = self.db.get_collection("Statistics")
+        self.beatmaps_col = self.db.get_collection("Beatmaps")
 
     async def initialize(self):
         """Initialize the Database, define hardcoded settings."""
@@ -93,7 +92,7 @@ class RonniaDatabase(AsyncIOMotorClient):
     @staticmethod
     async def bulk_write_operations(
             operations: Sequence,
-            col: AsyncIOMotorCollection,
+            col: AsyncCollection,
     ):
         """Bulk write multiple operations to the given collection."""
         try:
@@ -146,7 +145,7 @@ class RonniaDatabase(AsyncIOMotorClient):
             user = await self.get_user_from_twitch_id(twitch_username_or_id)
         else:
             user = await self.get_user_from_twitch_username(twitch_username_or_id)
-        settings = user.settings.dict(by_alias=True)
+        settings = user.settings.model_dump(by_alias=True)
         return settings[setting_key]
 
     async def get_enabled_users(self) -> AsyncGenerator[DBUser, None]:
@@ -198,6 +197,7 @@ class RonniaDatabase(AsyncIOMotorClient):
         :param beatmap_info: Beatmap to add
         """
         beatmap_id = beatmap_info["id"]
+        beatmap_info["ronnia_updated_at"] = datetime.datetime.now(datetime.timezone.utc)
         logger.debug(f"Adding {beatmap_id} to the database")
         await self.beatmaps_col.update_one({"id": beatmap_id}, {"$set": beatmap_info}, upsert=True)
 
@@ -208,8 +208,14 @@ class RonniaDatabase(AsyncIOMotorClient):
         logger.debug(f"Getting {beatmap.type} {beatmap.id} from the database")
         match beatmap.type:
             case BeatmapType.MAP:
-                return await self.beatmaps_col.find_one({"id": beatmap.id})
+                bmap = await self.beatmaps_col.find_one({"id": beatmap.id})
             case BeatmapType.MAPSET:
-                return await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
+                bmap = await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
             case _:
-                return None
+                bmap = None
+
+        bmap_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1))
+        if bmap_last_update < datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=BEATMAP_CACHE_DAYS):
+            return None
+
+        return bmap
