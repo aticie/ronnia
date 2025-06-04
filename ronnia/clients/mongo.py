@@ -212,7 +212,7 @@ class RonniaDatabase(AsyncMongoClient):
             case BeatmapType.MAPSET:
                 bmap = await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
             case _:
-                bmap = None
+                return None
 
         bmap_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC))
         if bmap_last_update < datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=BEATMAP_CACHE_DAYS):
