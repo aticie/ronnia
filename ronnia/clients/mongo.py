@@ -3,27 +3,25 @@ import datetime
 import logging
 from typing import Optional, Union, Any, Sequence, AsyncGenerator
 
-from motor.motor_asyncio import (
-    AsyncIOMotorClient,
-    AsyncIOMotorDatabase,
-    AsyncIOMotorCollection, )
+from pymongo import AsyncMongoClient
 from pymongo.errors import BulkWriteError
+from pymongo.asynchronous.collection import AsyncCollection
 
-from models.beatmap import Beatmap, BeatmapType
+from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.models.database import DBUser
 
 logger = logging.getLogger(__name__)
 BEATMAP_CACHE_DAYS = 10
 
 
-class RonniaDatabase(AsyncIOMotorClient):
+class RonniaDatabase(AsyncMongoClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.db: AsyncIOMotorDatabase = self["Ronnia"]
-        self.users_col: AsyncIOMotorCollection = self.db["Users"]
-        self.settings_col: AsyncIOMotorCollection = self.db["Settings"]
-        self.statistics_col: AsyncIOMotorCollection = self.db["Statistics"]
-        self.beatmaps_col: AsyncIOMotorCollection = self.db["Beatmaps"]
+        self.db = self.get_database("Ronnia")
+        self.users_col = self.db.get_collection("Users")
+        self.settings_col = self.db.get_collection("Settings")
+        self.statistics_col = self.db.get_collection("Statistics")
+        self.beatmaps_col = self.db.get_collection("Beatmaps")
 
     async def initialize(self):
         """Initialize the Database, define hardcoded settings."""
@@ -94,7 +92,7 @@ class RonniaDatabase(AsyncIOMotorClient):
     @staticmethod
     async def bulk_write_operations(
             operations: Sequence,
-            col: AsyncIOMotorCollection,
+            col: AsyncCollection,
     ):
         """Bulk write multiple operations to the given collection."""
         try:
@@ -147,7 +145,7 @@ class RonniaDatabase(AsyncIOMotorClient):
             user = await self.get_user_from_twitch_id(twitch_username_or_id)
         else:
             user = await self.get_user_from_twitch_username(twitch_username_or_id)
-        settings = user.settings.dict(by_alias=True)
+        settings = user.settings.model_dump(by_alias=True)
         return settings[setting_key]
 
     async def get_enabled_users(self) -> AsyncGenerator[DBUser, None]:
