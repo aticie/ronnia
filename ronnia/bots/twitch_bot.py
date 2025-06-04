@@ -266,8 +266,14 @@ class TwitchBot(Client):
             logger.exception(msg="TwitchBot emitted event_error", exc_info=error)
 
     async def event_channel_joined(self, channel: Channel):
-        if channel in self.join_fail_channels:
-            self.join_fail_channels.pop(channel.name)
+        if isinstance(channel, Channel):
+            if channel.name in self.join_fail_channels:
+                self.join_fail_channels.pop(channel.name)
+        elif isinstance(channel, str):
+            if channel in self.join_fail_channels:
+                self.join_fail_channels.pop(channel)
+        else:
+            raise AssertionError(f"Channel type {type(channel)} is not supported on event_channel_joined()")
 
     async def event_channel_join_failure(self, channel: str):
         self.join_fail_channels[channel] += 1
