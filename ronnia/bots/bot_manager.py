@@ -97,8 +97,7 @@ class BotManager:
                 operations.append(
                     UpdateOne(
                         {"twitchId": twitch_id},
-                        {"$set": {"isLive": True, "twitchUsername": twitch_username}},
-                        upsert=True,
+                        {"$set": {"isLive": True, "twitchUsername": twitch_username}}
                     )
                 )
 
@@ -107,7 +106,7 @@ class BotManager:
             operations=operations, col=self.db_client.users_col
         )
         await self.db_client.users_col.update_many(
-            {"twitchId": {"$nin": streaming_twitch_user_ids}},
+            {"isLive": True, "twitchId": {"$nin": streaming_twitch_user_ids}},
             {"$set": {"isLive": False}},
         )
         return streaming_usernames
