@@ -3,6 +3,7 @@ import datetime
 import logging
 from typing import Optional, Union, Any, Sequence, AsyncGenerator
 
+import pymongo
 from pymongo import AsyncMongoClient
 from pymongo.errors import BulkWriteError
 from pymongo.asynchronous.collection import AsyncCollection
@@ -11,7 +12,7 @@ from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.models.database import DBUser
 
 logger = logging.getLogger(__name__)
-BEATMAP_CACHE_DAYS = 10
+BEATMAP_EXPIRE_SECONDS = 24 * 60 * 60  # Beatmaps should expire after a day
 
 
 class RonniaDatabase(AsyncMongoClient):
@@ -43,6 +44,15 @@ class RonniaDatabase(AsyncMongoClient):
             tg.create_task(self.define_setting(
                 "sr", [0, -1], "Star rating limit for requests.", "range"
             ))
+            tg.create_task(self.beatmaps_col.create_index([("id", pymongo.DESCENDING)], background=True))
+            tg.create_task(self.beatmaps_col.create_index([("ronnia_updated_at", pymongo.DESCENDING)], background=True,
+                                                          expireAfterSeconds=BEATMAP_EXPIRE_SECONDS))
+            tg.create_task(self.statistics_col.create_index(
+                [("requested_beatmap_id", pymongo.DESCENDING), ("timestamp", pymongo.DESCENDING),
+                 ("mods", pymongo.DESCENDING)], background=True))
+            tg.create_task(self.users_col.create_index(
+                [("isLive", pymongo.DESCENDING), ("osuId", pymongo.DESCENDING), ("twitchId", pymongo.DESCENDING)],
+                background=True))
 
         logger.info(f"Successfully initialized {self.__class__.__name__}")
 
@@ -208,18 +218,10 @@ class RonniaDatabase(AsyncMongoClient):
         logger.debug(f"Getting {beatmap.type} {beatmap.id} from the database")
         match beatmap.type:
             case BeatmapType.MAP:
-                bmap = await self.beatmaps_col.find_one({"id": beatmap.id})
+                return await self.beatmaps_col.find_one({"id": beatmap.id})
             case BeatmapType.MAPSET:
-                bmap = await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
+                return await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
             case _:
-                bmap = None
-
-        if bmap is None:
-            return None
-
-        bmap_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1))
-        bmap_last_update = bmap_last_update.replace(tzinfo=datetime.timezone.utc)
-        if bmap_last_update < datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=BEATMAP_CACHE_DAYS):
-            return None
+                return None
 
         return bmap
