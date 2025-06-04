@@ -197,7 +197,7 @@ class RonniaDatabase(AsyncMongoClient):
         :param beatmap_info: Beatmap to add
         """
         beatmap_id = beatmap_info["id"]
-        beatmap_info["ronnia_updated_at"] = datetime.datetime.now(datetime.timezone.utc)
+        beatmap_info["ronnia_updated_at"] = datetime.datetime.now(datetime.UTC)
         logger.debug(f"Adding {beatmap_id} to the database")
         await self.beatmaps_col.update_one({"id": beatmap_id}, {"$set": beatmap_info}, upsert=True)
 
@@ -214,8 +214,8 @@ class RonniaDatabase(AsyncMongoClient):
             case _:
                 bmap = None
 
-        bmap_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1))
-        if bmap_last_update < datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=BEATMAP_CACHE_DAYS):
+        bmap_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC))
+        if bmap_last_update < datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=BEATMAP_CACHE_DAYS):
             return None
 
         return bmap
