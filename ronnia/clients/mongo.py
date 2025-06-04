@@ -223,5 +223,3 @@ class RonniaDatabase(AsyncMongoClient):
                 return await self.beatmaps_col.find_one({"beatmapset_id": beatmap.id})
             case _:
                 return None
-
-        return bmap
