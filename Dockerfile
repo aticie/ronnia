@@ -1,16 +1,21 @@
-FROM python:3.11-slim-bullseye
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
+
 ENV PYTHONPATH=/app
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 
-COPY ronnia /app/ronnia
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-install-project --no-dev
 
-WORKDIR /app/ronnia
+COPY . /app
 
-RUN pip install -r requirements.txt --no-cache-dir
-
-COPY tests /tests
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
 
 WORKDIR /app
 
-ENTRYPOINT ["python", "ronnia/main.py"]
+ENTRYPOINT ["uv", "run", "python", "ronnia/main.py"]

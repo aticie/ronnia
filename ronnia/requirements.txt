@@ -1,7 +1,0 @@
-twitchio==2.10.0
-motor==3.6.0
-pydantic==2.8.2
-aiohttp==3.11.11
-tenacity==8.5.0
-sentry-sdk==2.10.0
-python-json-logger==2.0.7
