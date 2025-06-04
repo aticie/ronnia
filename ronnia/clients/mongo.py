@@ -11,6 +11,7 @@ from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.models.database import DBUser
 
 logger = logging.getLogger(__name__)
+BEATMAP_CACHE_DAYS = 10
 
 
 class RonniaDatabase(AsyncMongoClient):
@@ -216,10 +217,8 @@ class RonniaDatabase(AsyncMongoClient):
         if bmap is None:
             return None
 
-        bmap_db_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
-        bmap_osu_last_update = bmap.get("last_updated", datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
-        bmap_osu_last_update.replace(tzinfo=datetime.timezone.utc)
-        if bmap_osu_last_update > bmap_db_last_update:
+        bmap_last_update = bmap.get("ronnia_updated_at", datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc))
+        if bmap_last_update < datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=BEATMAP_CACHE_DAYS):
             return None
 
         return bmap
