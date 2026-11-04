@@ -6,9 +6,16 @@ from collections import Counter
 
 from twitchio import Message, Channel, Chatter, Client, IRCCooldownError
 
+from ronnia.clients.legacy_api import (
+    LegacyAPI,
+    LegacyAPIError,
+    LegacyUserUnavailable,
+    env_flag,
+)
 from ronnia.clients.mongo import RonniaDatabase
 from ronnia.clients.osu import OsuApiV2, OsuChatApiV2
 from ronnia.models.beatmap import Beatmap, BeatmapType
+from ronnia.models.database import DBUser
 from ronnia.utils.beatmap import BeatmapParser
 from ronnia.utils.utils import convert_seconds_to_readable
 
@@ -18,8 +25,17 @@ logger = logging.getLogger(__name__)
 class TwitchBot(Client):
     MAX_CHANNEL_JOIN_TRIES = 5
 
-    def __init__(self, initial_channel_names: set[str], listener_update_sleep: int = 60):
-        self.ronnia_db = RonniaDatabase(os.getenv("MONGODB_URL"))
+    def __init__(
+            self,
+            initial_channel_names: set[str],
+            listener_update_sleep: int = 60,
+            database: RonniaDatabase | None = None,
+            legacy_api: LegacyAPI | None = None,
+    ):
+        self.ronnia_db = database or RonniaDatabase(
+            os.getenv("MONGODB_URL"), legacy_api=legacy_api
+        )
+        self.legacy_api = legacy_api or getattr(self.ronnia_db, "legacy_api", None)
         self.osu_api = OsuApiV2(
             os.getenv("OSU_CLIENT_ID"), os.getenv("OSU_CLIENT_SECRET")
         )
@@ -28,6 +44,7 @@ class TwitchBot(Client):
         )
 
         self.environment = os.getenv("ENVIRONMENT")
+        self.dry_run = env_flag("DRY_RUN")
 
         self._join_lock = asyncio.Lock()
 
@@ -121,8 +138,12 @@ class TwitchBot(Client):
 
         try:
             await self.handle_request(message)
+        except LegacyUserUnavailable as e:
+            logger.info(f"Skipping message for a channel without an eligible legacy user: {e}")
         except AssertionError as e:
             logger.info(f"Check unsuccessful: {e}")
+        except LegacyAPIError:
+            logger.exception("Legacy API failure while handling a Twitch message")
 
     async def get_beatmap(self, beatmap: Beatmap) -> tuple[dict, dict]:
         db_beatmap = await self.ronnia_db.get_beatmap(beatmap=beatmap)
@@ -147,38 +168,173 @@ class TwitchBot(Client):
         if beatmap_info:
             await self.check_request_criteria(message, beatmap_info)
 
-            logger.info(f"Sending beatmap {beatmap_info['id']} to user {message.channel.name}")
+            logger.info(f"Beatmap {beatmap_info['id']} requested in {message.channel.name}")
             if self.environment == "testing":
                 return
-            async with asyncio.TaskGroup() as tg:
-                # If user has enabled echo setting, send twitch chat a message
-                if await self.ronnia_db.get_echo_status(
-                        twitch_username=message.channel.name
-                ):
-                    logger.info(f"Sending echo message to {message.channel.name}")
-                    tg.create_task(
-                        self._send_twitch_message(
-                            message=message,
-                            beatmap_info=beatmap_info,
-                            beatmapset_info=beatmapset_info,
-                        )
-                    )
+
+            if self.legacy_api is not None:
+                await self._handle_legacy_bridge_request(
+                    message=message,
+                    beatmap=beatmap,
+                    beatmap_info=beatmap_info,
+                    beatmapset_info=beatmapset_info,
+                )
+            else:
+                await self._handle_legacy_mongo_request(
+                    message=message,
+                    beatmap=beatmap,
+                    beatmap_info=beatmap_info,
+                    beatmapset_info=beatmapset_info,
+                )
+
+    async def _handle_legacy_mongo_request(
+            self,
+            message: Message,
+            beatmap: Beatmap,
+            beatmap_info: dict,
+            beatmapset_info: dict,
+    ):
+        """Original request path, used only when the internal bridge is disabled."""
+        logger.info(f"Sending beatmap {beatmap_info['id']} to user {message.channel.name}")
+        async with asyncio.TaskGroup() as tg:
+            # If user has enabled echo setting, send twitch chat a message
+            if await self.ronnia_db.get_echo_status(
+                    twitch_username=message.channel.name
+            ):
+                logger.info(f"Sending echo message to {message.channel.name}")
                 tg.create_task(
-                    self._send_beatmap_to_in_game(
+                    self._send_twitch_message(
                         message=message,
                         beatmap_info=beatmap_info,
                         beatmapset_info=beatmapset_info,
-                        given_mods=beatmap.mods,
                     )
                 )
-                tg.create_task(
-                    self.ronnia_db.add_request(
-                        requested_beatmap_id=int(beatmap_info["id"]),
-                        requested_channel_name=message.channel.name,
-                        requester_channel_name=message.author.name,
-                        mods=beatmap.mods,
-                    )
+            tg.create_task(
+                self._send_beatmap_to_in_game(
+                    message=message,
+                    beatmap_info=beatmap_info,
+                    beatmapset_info=beatmapset_info,
+                    given_mods=beatmap.mods,
                 )
+            )
+            tg.create_task(
+                self.ronnia_db.add_request(
+                    requested_beatmap_id=int(beatmap_info["id"]),
+                    requested_channel_name=message.channel.name,
+                    requester_channel_name=message.author.name,
+                    mods=beatmap.mods,
+                )
+            )
+
+    async def _handle_legacy_bridge_request(
+            self,
+            message: Message,
+            beatmap: Beatmap,
+            beatmap_info: dict,
+            beatmapset_info: dict,
+    ):
+        """Claim, PM, report and echo a request through the internal API.
+
+        A rejected claim (migrated channel or duplicate delivery) means nothing
+        is sent. A failed osu! PM is reported as failed and never retried here.
+        """
+        twitch_message_id = message.id
+        if not twitch_message_id:
+            logger.warning("Cannot claim a legacy delivery without a Twitch message id")
+            return
+
+        try:
+            channel_user: DBUser = await self.ronnia_db.get_user_from_twitch_username(
+                message.channel.name
+            )
+        except LegacyUserUnavailable as e:
+            logger.info(f"Skipping request for unavailable legacy user: {e}")
+            return
+
+        irc_message = await self._prepare_irc_message(
+            message=message,
+            beatmap_info=beatmap_info,
+            beatmapset_info=beatmapset_info,
+            given_mods=beatmap.mods,
+        )
+
+        try:
+            claim = await self.legacy_api.claim(
+                twitch_message_id=twitch_message_id,
+                twitch_id=channel_user.twitchId,
+                target_osu_id=channel_user.osuId,
+                message=irc_message,
+            )
+        except LegacyAPIError:
+            logger.exception("Failed to claim legacy delivery; not sending the request")
+            return
+
+        if not claim.claimed:
+            logger.debug(
+                "Legacy delivery %s was not claimed (%s); skipping",
+                twitch_message_id,
+                claim.reason or "migrated or duplicate",
+            )
+            return
+
+        try:
+            await self.osu_chat_api.send_message(
+                target_id=channel_user.osuId,
+                message=irc_message,
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to send legacy osu! PM to %s; reporting failure",
+                channel_user.osuId,
+            )
+            await self._report_legacy_delivery(
+                twitch_message_id=twitch_message_id,
+                sent=False,
+                error=str(e) or e.__class__.__name__,
+            )
+            return
+
+        await self._report_legacy_delivery(
+            twitch_message_id=twitch_message_id,
+            sent=True,
+            statistics={
+                "requesterChannelName": message.author.name,
+                "requestedBeatmapId": int(beatmap_info["id"]),
+                "requestedChannelName": message.channel.name,
+                "mods": beatmap.mods or None,
+                "timestamp": int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
+            },
+        )
+
+        if channel_user.settings.echo:
+            logger.info(f"Sending echo message to {message.channel.name}")
+            await self._send_twitch_message(
+                message=message,
+                beatmap_info=beatmap_info,
+                beatmapset_info=beatmapset_info,
+            )
+
+    async def _report_legacy_delivery(
+            self,
+            twitch_message_id: str,
+            sent: bool,
+            error: str | None = None,
+            statistics: dict | None = None,
+    ):
+        """Report a delivery outcome without letting a reporting failure crash the bot."""
+        try:
+            await self.legacy_api.report_delivery(
+                twitch_message_id=twitch_message_id,
+                sent=sent,
+                error=error,
+                statistics=statistics,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to report legacy delivery %s (sent=%s); the PM was not replayed",
+                twitch_message_id,
+                sent,
+            )
 
     async def check_beatmap_star_rating(self, message: Message, beatmap_info):
         """Check if the beatmap's star rating is matching the user settings."""
@@ -298,7 +454,10 @@ class TwitchBot(Client):
         :param ctx: Message context
         :return:
         """
-        user = await self.ronnia_db.get_user_from_twitch_username(ctx.author.name)
+        try:
+            user = await self.ronnia_db.get_user_from_twitch_username(ctx.author.name)
+        except LegacyUserUnavailable:
+            raise AssertionError("User does not exist in the new dashboard")
         assert user is not None, "User does not exist"
         assert (
                 ctx.message.channel.name == ctx.author.name
@@ -455,6 +614,68 @@ class TwitchBot(Client):
             extra_postfix += "+ USED POINTS"
 
         return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
+
+    async def announce_migration(self, users: list[DBUser], migration_url: str):
+        """Send the one-per-session migration notice to Twitch chat and osu! PM.
+
+        Failures are logged and never escape, so one bad channel/user does not
+        prevent the remaining announcements or crash the bot.
+        """
+        if self.environment == "testing" or getattr(self, "dry_run", False):
+            logger.info("Migration announcements are suppressed in testing/dry-run mode")
+            return
+
+        twitch_text = (
+            "Ronnia migration: please log in at "
+            f"{migration_url} and re-authorize the Twitch bot to keep beatmap requests working."
+        )
+        osu_text = (
+            "Ronnia migration: please log in at "
+            f"{migration_url} and re-authorize the Twitch bot to keep beatmap requests working."
+        )
+
+        for user in users:
+            try:
+                channel = self.get_channel(user.twitchUsername)
+                if channel is None:
+                    await self.join_channels([user.twitchUsername])
+                    await asyncio.sleep(1)
+                    channel = self.get_channel(user.twitchUsername)
+                if channel is None:
+                    raise RuntimeError(
+                        f"Could not join Twitch channel {user.twitchUsername}"
+                    )
+                await channel.send(twitch_text)
+                logger.info(
+                    "Sent migration announcement to Twitch channel %s",
+                    user.twitchUsername,
+                )
+            except IRCCooldownError as e:
+                logger.warning(
+                    "Twitch IRC cooldown while announcing migration to %s",
+                    user.twitchUsername,
+                    exc_info=e,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send migration announcement to Twitch channel %s",
+                    user.twitchUsername,
+                )
+
+            try:
+                await self.osu_chat_api.send_message(
+                    target_id=user.osuId,
+                    message=osu_text,
+                )
+                logger.info(
+                    "Sent migration announcement to osu! user %s",
+                    user.osuId,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send migration announcement to osu! user %s",
+                    user.osuId,
+                )
 
     async def event_ready(self):
         logger.info(f"Connected channels: {self.connected_channels}")

@@ -116,12 +116,49 @@ DB_DIR=/mount
 ENVIRONMENT=testing  # testing or production
 PYTHONUNBUFFERED=1
 LOG_LEVEL=DEBUG  # https://docs.python.org/3/howto/logging.html#logging-levels Check other logging options here
+
+# Coexistence bridge (new dashboard is the source of truth)
+RONNIA_API_URL=http://127.0.0.1:4343  # New dashboard internal API origin
+RONNIA_INTERNAL_TOKEN=****  # Same value as the new service's INTERNAL_API_TOKEN
+RONNIA_MIGRATION_URL=https://ronnia.example  # Shown in migration announcements
+RONNIA_LEGACY_MODE=true  # Optional; true by default when URL+token are set
+DRY_RUN=false  # Optional; suppresses migration announcements when true
 ```
+
+### Legacy bridge mode
+
+The new dashboard/SQLite service owns accounts and settings. When
+`RONNIA_API_URL` and `RONNIA_INTERNAL_TOKEN` are both configured, the old bot:
+
+- reads enabled users and settings from `GET /internal/legacy/channels*`,
+- claims each request with `POST /internal/legacy/claim` before sending an osu! PM,
+- reports the delivery outcome/statistics with `POST /internal/legacy/deliveries/{id}`,
+- publishes the exact current live channel set (including an empty set) with
+  `POST /internal/legacy/live` on every polling cycle, and uses the live Twitch
+  login for migration announcements,
+- never reads Mongo `Users`/`Settings`, never deletes accounts, and never writes
+  old Mongo request statistics.
+
+`remove_user` is a no-op in bridge mode, so failed Twitch channel joins cannot
+delete an account from the new dashboard. If a claim is rejected (channel
+migrated or duplicate delivery) the bot sends nothing. If the osu! PM fails,
+the delivery is reported as failed and is not retried. Once per Twitch live
+session, each eligible legacy user is sent one Twitch chat message and one osu!
+PM containing `RONNIA_MIGRATION_URL`.
+
+If the bridge is not configured, the bot keeps the original Mongo behaviour.
+Setting `RONNIA_LEGACY_MODE=true` without both API settings is a startup error;
+setting it to `false` forces the old behaviour even if the API settings exist.
+Internal tokens are never logged.
+
 
 ### Tests
 
-To run the tests, you need to add the `src` folder to the PYTHONPATH variable. You can do this by adding:
+Run the unit tests from the repository root:
 
-`sys.path.insert(0, 'src')`
+```
+python -m unittest discover -s tests -p "test_*.py" -t .
+```
 
-to `run.py`.
+The bridge tests use an in-process aiohttp fake server; they never contact the
+real dashboard, Twitch, or osu!.
