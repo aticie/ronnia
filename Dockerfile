@@ -14,6 +14,5 @@ USER 10001:10001
 WORKDIR /data
 ENV DATABASE_PATH=/data/ronnia.sqlite3 BIND_IP=0.0.0.0 BIND_PORT=8080
 EXPOSE 8080
-VOLUME ["/data"]
 ENTRYPOINT ["/usr/local/bin/ronnia"]
 CMD ["serve"]
