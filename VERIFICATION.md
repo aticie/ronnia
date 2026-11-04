@@ -1,8 +1,34 @@
 # Verification record
 
-Date: 2026-11-01. Environment: Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
+Current repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01, Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
 
-These results describe the current Rust tree. They do not claim production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real TLS/provider accounts were not used.
+The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
+
+## Repository split (2026-11-04; verified)
+
+The Rust bot/API, migrations, and Python verification harness now live at the root of `aticie/ronnia`; the legacy Python application, configuration, tests, assets, and deployment files are removed. Dashboard source and frontend build checks live separately in [aticie/ronnia-web](https://github.com/aticie/ronnia-web). The legacy bridge is independently maintained in [PR #56](https://github.com/aticie/ronnia/pull/56), to be run from a separate checkout; its Rust internal API remains present.
+
+The following checks passed from the Rust-only repository root on 2026-11-04:
+
+```text
+cargo fmt --all -- --check                         PASS
+cargo clippy --locked --all-targets -- -D warnings PASS
+cargo test --locked                              PASS — 103 passed, 0 failed
+cargo build --locked --release                   PASS
+python3 scripts/smoke.py --binary target/release/ronnia --keep
+                                                 PASS
+```
+
+The actual root-built release executable passed all 16 original HTTP routes plus `/health` and `/ready`, import/maintenance, both signup orders, encrypted device authorization, EventSub delivery/recovery, hybrid state, ambiguous-delivery safety, and isolated same-process DNS recovery. Artifact: `/tmp/ronnia-smoke-g3q1gr6z`. Rust tests also included zero-test binary and doc-test suites; none failed. The complete sequential check command finished in 220.71 seconds. These checks used this checkout's `target/`, not a borrowed executable.
+
+The root Dockerfile also built successfully as `ronnia:split-web-runtime-20261104` (manifest `sha256:96583bea15970d4bc73ba1e1aa91ecf1e843098655e820deeb6ea1941b8ec8b4`). The frontend verification owner exercised two real, separate Compose projects on the disposable `ronnia-split-proof-20261104` network with synthetic configuration, a fresh backend volume, API-only mode, and loopback ports 28857/23857. Chromium rendered the dashboard and provider links; `/api/ready` returned HTTP 200 with `{"status":"ready"}`, `/api/user/me` returned HTTP 200 `null`, and `/api/internal/` returned Nginx HTTP 404. Both projects, their network, and the disposable database volume were removed afterward. No live credentials, deployments, or provider OAuth calls were used. Browser external fonts were intentionally blocked by the localhost-only test policy.
+
+The dashboard changes and frontend-specific checks are in [ronnia-web PR #24](https://github.com/aticie/ronnia-web/pull/24). This split proof is API-only; historical full-bot and provider-simulator coverage is recorded separately below.
+
+Backend `compose.yaml` now contains only the backend, loopback-published on `BIND_PORT` (default 8080). Start backend Compose first to create `${RONNIA_NETWORK:-ronnia}`; the separate frontend Compose joins that external network and defaults its upstream to `http://ronnia:${BIND_PORT:-8080}`. Both projects need matching `BIND_PORT` and `RONNIA_NETWORK`. The frontend repository owns its browser/build checks; the current cross-project proof above supersedes earlier integrated two-service Compose evidence for this layout.
+
+For memory comparison, defaults now use sibling `../ronnia-legacy` and `../ronnia-backend` source checkouts, not the current Rust tree. Prepare the legacy bot interpreter at `../ronnia-legacy/.venv/bin/python` and backend interpreter at `/tmp/ronnia-backend-baseline/bin/python`, or override the corresponding flags. `scripts/memory.py` starts isolated processes and MongoDB only when explicitly run; no benchmark was rerun for the split.
+
 
 ## Static and unit verification
 
@@ -93,9 +119,9 @@ The debug documentation surface was opened in a real headless Chromium against `
 - SQLite integrity/foreign-key checks passed. Created a consistent backup in `/data`, force-recreated the container, and confirmed the backup remained present and passed integrity checks in the persistent volume.
 - Removed only the isolated test project's containers, network, and test volume afterward. No authenticated external provider calls were made.
 
-## Local dashboard integration
+## Historical integrated dashboard verification
 
-- Imported `aticie/ronnia-web` at commit `ec0ff76ef8e3b06c873f5213c71a0901ef6514f9` into the single repository, without a nested Git repository.
+- Before the split, imported `aticie/ronnia-web` at commit `ec0ff76ef8e3b06c873f5213c71a0901ef6514f9` into the integrated source tree. That frontend source now belongs only to `aticie/ronnia-web`.
 - `npm ci --ignore-scripts`, `npm run build` (Vue/TypeScript check plus Vite), and `npm audit` passed; audit reports zero vulnerabilities after compatible transitive build dependency updates.
 - Built the Node-24/static-Nginx frontend image and started the real two-service Compose stack. A real headless Chromium rendered the production dashboard at `http://localhost:3000/login`; `/api/ready` passed through Nginx, both relative login links were present, no development router was exposed, and no browser errors were reported.
 - Browser registration tests used the actual Vue app and Rust API with an isolated SQLite database and local HTTP OAuth token/profile fixtures. Only the third-party authorization-page redirects were simulated; no real provider account consent was submitted.

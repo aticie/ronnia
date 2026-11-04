@@ -13,8 +13,8 @@ difference rather than a different amount of work.
 
 Example (from repository root):
   scripts/memory.py --binary target/release/ronnia \
-    --bot-source .. --bot-python ../.venv/bin/python \
-    --backend-source ../../ronnia-backend \
+    --bot-source ../ronnia-legacy --bot-python ../ronnia-legacy/.venv/bin/python \
+    --backend-source ../ronnia-backend \
     --backend-python /tmp/ronnia-backend-baseline/bin/python \
     --output scripts/memory-results.json
 
@@ -367,9 +367,9 @@ def measure_python(args, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", default="target/release/ronnia")
-    parser.add_argument("--bot-source", type=Path, default=Path(".."))
-    parser.add_argument("--bot-python", type=Path, default=Path("../.venv/bin/python"))
-    parser.add_argument("--backend-source", type=Path, default=Path("../../ronnia-backend"))
+    parser.add_argument("--bot-source", type=Path, default=Path("../ronnia-legacy"))
+    parser.add_argument("--bot-python", type=Path, default=Path("../ronnia-legacy/.venv/bin/python"))
+    parser.add_argument("--backend-source", type=Path, default=Path("../ronnia-backend"))
     parser.add_argument("--backend-python", type=Path, default=Path("/tmp/ronnia-backend-baseline/bin/python"))
     parser.add_argument("--mongo-image", default="mongo:7")
     parser.add_argument("--seconds", type=float, default=75.0)

@@ -20,20 +20,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-  web:
-    build: ./web
-    restart: unless-stopped
-    init: true
-    environment:
-      API_UPSTREAM: http://ronnia:${BIND_PORT:-8080}
-    ports:
-      - "127.0.0.1:${WEB_PORT:-3000}:80"
-    depends_on:
-      - ronnia
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 volumes:
   ronnia-data:
+networks:
+  default:
+    name: ${RONNIA_NETWORK:-ronnia}

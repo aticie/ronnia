@@ -1,6 +1,6 @@
 # Intentional differences from the Python implementations
 
-This is a clean Rust cutover, not a Python wrapper. The reference behavior is current source in `ronnia` and `ronnia-backend`, not historical architecture descriptions. Existing website routes, fields, settings, link families, relay formatting, request-history concepts, and both signup orders remain. Original source trees are not runtime dependencies.
+This is a clean Rust cutover, not a Python wrapper. The reference behavior is the legacy Python `aticie/ronnia` and `aticie/ronnia-backend` sources, not historical architecture descriptions. This branch contains the Rust bot/API at repository root; Python application/config/tests/assets are removed, but Python verification drivers remain in `scripts/`. Existing website routes, fields, settings, link families, relay formatting, request-history concepts, and both signup orders remain. Original source trees are not runtime dependencies.
 
 ## Reliability and delivery
 
@@ -87,7 +87,7 @@ These are concrete structural resource improvements, not a claim that every work
 
 - All users use the new dashboard/API. The old Python bot remains only as an IRC relay for enabled channels that have never granted Twitch `channel:bot`.
 - The new SQLite database is the sole user/settings source. A one-time Mongo import precedes rollout; there is no bidirectional database sync.
-- The old bot was patched to fetch legacy channels and current settings from authenticated internal endpoints, and to claim/report each request. Its Mongo Users/Settings are bypassed in bridge mode; Mongo remains only for its beatmap cache.
+- The old bot patch lives independently in [PR #56 (`migration/coexistence-bridge`)](https://github.com/aticie/ronnia/pull/56); run it from a separate checkout, never this Rust root. It fetches legacy channels and current settings from authenticated internal endpoints and claims/reports each request. Its Mongo Users/Settings are bypassed in bridge mode; Mongo remains only for its beatmap cache. The Rust `/internal/legacy/*` API is retained unchanged.
 - A claim creates a delivery tombstone understood by the new bot. The old bot cannot send after a channel migrates, and the new bot skips any legacy-claimed Twitch message.
 - New grants become active for the new bot after a configurable grace period (`MIGRATION_GRANT_GRACE_SECS`, default ten seconds), while removal from the old bot is immediate. This prevents overlapping delivery during handoff.
 - Legacy request statistics are written by the old bot through the bridge with the same Twitch-message source identity as the new bot; repeated reports are idempotent.
@@ -95,11 +95,12 @@ These are concrete structural resource improvements, not a claim that every work
 - Internal bridge routes require a shared bearer token, are hidden when unconfigured, and are blocked through the dashboard proxy.
 - At cutoff, stopping the old bot requires no second data merge.
 
-## Local Vue dashboard integration
+## Separately deployed Vue dashboard
 
-The frontend from `aticie/ronnia-web` is included under `web/` at upstream commit `ec0ff76ef8e3b06c873f5213c71a0901ef6514f9`; it is not a new Rust UI implementation. Its source attribution and unchanged upstream licensing status are in `web/README.md`.
+Frontend integration lives in [aticie/ronnia-web](https://github.com/aticie/ronnia-web), based on its upstream commit `ec0ff76ef8e3b06c873f5213c71a0901ef6514f9`; there is no `web/` source in this repository. Attribution and upstream licensing status are documented there.
 
-- Compose now includes a static Nginx `web` service on `WEB_PORT` (default 3000). Browser calls use `/api`; the proxy forwards to the Rust service. Provider credentials and the root `.env` never enter the frontend image or bundle.
+- Backend Compose runs only the Rust service, published at `127.0.0.1:${BIND_PORT:-8080}`. Start it first to create `${RONNIA_NETWORK:-ronnia}`. The separate frontend Compose joins that external Docker network, runs static Nginx on `WEB_PORT` (default 3000), and defaults `API_UPSTREAM` to `http://ronnia:${BIND_PORT:-8080}`. Set matching `BIND_PORT` and `RONNIA_NETWORK` in both projects; frontend `API_UPSTREAM` can be overridden. No host-gateway mapping or public backend publication is required.
+- Browser calls use `/api`; the frontend proxy forwards to the Rust service. `PUBLIC_ORIGIN=http://localhost:3000` and `API_ORIGIN=http://localhost:8080` are the local defaults; provider callbacks go directly to the backend origin. Credentials and the backend `.env` never enter the frontend image or bundle. Existing deployment configuration is not rewritten by this split.
 - Removed compiled-in production API/auth URLs and the page's HTTP-upgrading CSP. Local origins and HTTP cookie settings are explicit, while existing direct backend OAuth callback registrations remain usable.
 - Fixed anonymous `null` profile handling and unconditional navigation away from partial signup. Either provider can be first, and only the missing provider remains visible.
 - Settings reload waits for account hydration. Session expiration produces a visible login message instead of exceptions or an automatic refetch loop.
