@@ -14,4 +14,4 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --locked --release
       - run: python3 scripts/smoke.py --binary target/release/ronnia
-      - run: docker build -t ronnia:check .
+      - run: docker build -f Dockerfile.docker -t ronnia:check .

@@ -2,6 +2,7 @@
 !.env.example
 !Cargo.toml
 !Cargo.lock
+!railpack.json
 !src/
 !src/**
 !migrations/

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "rust",
+  "packages": {
+    "rust": "1.99.1"
+  },
+  "steps": {
+    "build": {
+      "caches": ["...", "cargo_registry", "cargo_git"]
+    }
+  },
+  "deploy": {
+    "aptPackages": ["...", "ca-certificates"],
+    "variables": {
+      "DATABASE_PATH": "/data/ronnia.sqlite3",
+      "BIND_IP": "0.0.0.0",
+      "BIND_PORT": "8080"
+    }
+  }
+}

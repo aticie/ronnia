@@ -1,8 +1,46 @@
 # Verification record
 
-Current grant-activation review checks: 2026-11-05. Repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01, Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
+Current Railpack and grant-activation review checks: 2026-11-05. Repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01, Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
 
 The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
+
+## Native Railpack backend (2026-11-05; verified locally)
+
+Read the primary [Railpack index](https://railpack.com/llms.txt), [Rust provider documentation](https://railpack.com/languages/rust), [configuration/schema](https://railpack.com/config/file), and Railway's [Dockerfile precedence](https://docs.railway.com/config-as-code/reference#specify-the-builder), [Docker cache support](https://docs.railway.com/builds/dockerfiles#cache-mounts), and [healthcheck port contract](https://docs.railway.com/deployments/healthchecks#configure-the-healthcheck-port). A root Dockerfile takes precedence over Railpack; the retained Dockerfile is now `Dockerfile.docker`, with Compose/CI and direct-build instructions updated. No Railway service, variables, secrets, or deployment were read or mutated.
+
+The official Railpack 0.43.0 Linux x86-64 release was downloaded from [its release](https://github.com/railwayapp/railpack/releases/tag/v0.43.0); archive SHA-256 `248a8f60f36854aabed6124113631078a802de3461660855fc4de9c26065c1fb` matched the published asset digest. The first real build reported a missing `BUILDKIT_HOST`; starting a disposable local `moby/buildkit` container supplied that prerequisite. No build/runtime prerequisites remained unavailable.
+
+Executed from this backend checkout:
+
+```sh
+railpack prepare --plan-out /tmp/ronnia-railpack-plan.json \
+  --info-out /tmp/ronnia-railpack-info.json .
+BUILDKIT_HOST=docker-container://ronnia-railpack-buildkit-20261105 \
+  railpack build --name ronnia:railpack-20261105 \
+  --cache-key ronnia-railpack-proof-20261105 --progress plain .
+docker compose --env-file /dev/null config --no-env-resolution --format json
+```
+
+The actual plan selected the Rust provider, pinned Rust **1.99.1**, retained native `cargo build --release` and `cp target/release/ronnia bin`, and started **`./bin/ronnia`** in `/app`. Its build step mounts the provider-defined registry/git caches plus the default target cache; the configuration only extends the cache list, never replaces Cargo commands. The separate native dummy-source install step was optimized out by BuildKit, which is why extending the real build step's caches is necessary. Runtime includes CA certificates and excludes `target`; `.dockerignore` continues to allow only the manifest, lockfile, source, migrations, example environment, and Railpack configuration.
+
+The initial native image built successfully in **116.53 s**. After adding the registry/git mounts, the final configured image built successfully in **6.04 s**, with Rust/toolchain and runtime-package layers cached and Cargo reporting `Finished release` in **1.41 s** without recompiling crates. Registry downloads occurred while filling the newly mounted cache. These are local observations with retained builder state, **not** a controlled cold/warm benchmark, a Railway timing guarantee, or a runtime-memory improvement. Docker cache mounts are supported on Railway too. Final image manifest: `sha256:d0d5ef93430dc2246874aaffc2f2591bd700bb9d21197b008a7ec8cae88ee40f`.
+
+The final image was run with its **unmodified default command**, `BOT_ENABLED=false`, `PORT=8080`, an automatically assigned loopback host port, and a fresh temporary directory mounted at `/data`. No provider credentials were supplied:
+
+| Check | Actual result |
+|---|---|
+| `GET /ready` | HTTP 200, `{"status":"ready"}` |
+| `GET /health` | HTTP 200, `{"status":"ok"}` |
+| `GET /live/users` | HTTP 200, `[]` |
+| Default database | `/data/ronnia.sqlite3`, all 16 application tables created |
+| SQLite after shutdown | `PRAGMA integrity_check` → `ok` |
+| Graceful container stop | Exit code 0 |
+| Runtime link dependencies | `libgcc_s`, `libm`, `libc`, dynamic loader; no dynamic SQLite/OpenSSL dependency |
+| CA/runtime files | Nonempty `/etc/ssl/certs/ca-certificates.crt`; `ca-certificates` version `20250419+deb13u1`; no `/app/target` |
+
+Runtime evidence: `/tmp/ronnia-railpack-runtime-odl03a_o/proof.json`. The Railpack image uses the provider runtime's default user; the unchanged Docker image continues to use UID/GID 10001. Compose configuration resolved `Dockerfile.docker`, loopback host port 8080, listener `0.0.0.0:8080`, and the persistent `/data` volume without loading a real `.env`. This is local API-only build/start/readiness evidence, not a live Railway deployment or authenticated provider check. Existing Rust unit/smoke results below are historical to this deployment-only change and were not rerun.
+
+The retained Docker path also built successfully with `docker build -f Dockerfile.docker -t ronnia:docker-railpack-cutover-20261105 .` (89.02 s); its Docker manifest list is `sha256:6adebb804d8c433ede9da0196591c8430e9db71335c43ba371fb2e703644e721`. This exercises the renamed Dockerfile's original locked release build; its contents and Compose runtime/data contract are unchanged.
 
 ## PR #57 P2 grant-activation regression (2026-11-05)
 
@@ -117,7 +155,7 @@ Rust service RSS is **4.25%** of the Python service RSS in this workload (≈23.
 ## Container
 
 ```sh
-docker build -t ronnia-rust:verified .
+docker build -f Dockerfile.docker -t ronnia-rust:verified .
 docker run --rm -e BOT_ENABLED=false -p 127.0.0.1:38081:8080 ronnia-rust:verified serve --api-only
 ```
 

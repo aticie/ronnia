@@ -1,6 +1,8 @@
 services:
   ronnia:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.docker
     command: ["serve"]
     restart: unless-stopped
     init: true
