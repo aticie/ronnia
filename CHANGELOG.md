@@ -5,7 +5,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- There are no unreleased changes.
+### Added
+- Legacy bridge mode for the new dashboard: authenticated user/settings reads,
+  request claiming, delivery statistics reporting, live channel reporting with
+  current Twitch logins, and one-per-live-session migration announcements over
+  Twitch chat and osu! PM.
+
+### Changed
+- In bridge mode, Mongo `Users`/`Settings` are no longer read, `remove_user` is a
+  no-op, and old Mongo request statistics are not written.
+- Invalid or incomplete bridge configuration fails at startup; unconfigured
+  bridge keeps the original Mongo behaviour.
 
 
 ## [1.4.7] - 2021-10-06

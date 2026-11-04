@@ -1,7 +1,7 @@
 import asyncio
 import datetime
 import logging
-from typing import Optional, Union, Any, Sequence, AsyncGenerator
+from typing import Optional, Union, Any, Sequence, AsyncGenerator, TYPE_CHECKING
 
 import pymongo
 from pymongo import AsyncMongoClient
@@ -11,13 +11,17 @@ from pymongo.asynchronous.collection import AsyncCollection
 from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.models.database import DBUser
 
+if TYPE_CHECKING:
+    from ronnia.clients.legacy_api import LegacyAPI
+
 logger = logging.getLogger(__name__)
 BEATMAP_EXPIRE_SECONDS = 24 * 60 * 60  # Beatmaps should expire after a day
 
 
 class RonniaDatabase(AsyncMongoClient):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, legacy_api: Optional["LegacyAPI"] = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.legacy_api = legacy_api
         self.db = self.get_database("Ronnia")
         self.users_col = self.db.get_collection("Users")
         self.settings_col = self.db.get_collection("Settings")
@@ -27,39 +31,56 @@ class RonniaDatabase(AsyncMongoClient):
     async def initialize(self):
         """Initialize the Database, define hardcoded settings."""
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(self.define_setting("enable", True, "Enables the bot.", "toggle"))
-            tg.create_task(self.define_setting(
-                "echo", True, "Enables Twitch chat acknowledge message.", "toggle"
-            ))
-            tg.create_task(self.define_setting(
-                "sub-only", False, "Subscribers only request mode.", "toggle"
-            ))
-            tg.create_task(self.define_setting(
-                "points-only", False, "Channel Points only request mode.", "toggle"
-            ))
-            tg.create_task(self.define_setting(
-                "test", False, "Enables test mode. (Removes all restrictions.)", "toggle"
-            ))
-            tg.create_task(self.define_setting("cooldown", 30, "Cooldown for requests.", "value"))
-            tg.create_task(self.define_setting(
-                "sr", [0, -1], "Star rating limit for requests.", "range"
-            ))
+            if self.legacy_api is None:
+                tg.create_task(self.define_setting("enable", True, "Enables the bot.", "toggle"))
+                tg.create_task(self.define_setting(
+                    "echo", True, "Enables Twitch chat acknowledge message.", "toggle"
+                ))
+                tg.create_task(self.define_setting(
+                    "sub-only", False, "Subscribers only request mode.", "toggle"
+                ))
+                tg.create_task(self.define_setting(
+                    "points-only", False, "Channel Points only request mode.", "toggle"
+                ))
+                tg.create_task(self.define_setting(
+                    "test", False, "Enables test mode. (Removes all restrictions.)", "toggle"
+                ))
+                tg.create_task(self.define_setting("cooldown", 30, "Cooldown for requests.", "value"))
+                tg.create_task(self.define_setting(
+                    "sr", [0, -1], "Star rating limit for requests.", "range"
+                ))
+                tg.create_task(self.statistics_col.create_index(
+                    [("requested_beatmap_id", pymongo.DESCENDING), ("timestamp", pymongo.DESCENDING),
+                     ("mods", pymongo.DESCENDING)], background=True))
+                tg.create_task(self.users_col.create_index(
+                    [("isLive", pymongo.DESCENDING), ("osuId", pymongo.DESCENDING), ("twitchId", pymongo.DESCENDING)],
+                    background=True))
+            else:
+                logger.info(
+                    "Legacy bridge mode: users/settings come from the internal API; "
+                    "Mongo is used only for the beatmap cache."
+                )
+
             tg.create_task(self.beatmaps_col.create_index([("id", pymongo.DESCENDING)], background=True))
             tg.create_task(self.beatmaps_col.create_index([("ronnia_updated_at", pymongo.DESCENDING)], background=True,
                                                           expireAfterSeconds=BEATMAP_EXPIRE_SECONDS))
-            tg.create_task(self.statistics_col.create_index(
-                [("requested_beatmap_id", pymongo.DESCENDING), ("timestamp", pymongo.DESCENDING),
-                 ("mods", pymongo.DESCENDING)], background=True))
-            tg.create_task(self.users_col.create_index(
-                [("isLive", pymongo.DESCENDING), ("osuId", pymongo.DESCENDING), ("twitchId", pymongo.DESCENDING)],
-                background=True))
 
         logger.info(f"Successfully initialized {self.__class__.__name__}")
 
     async def remove_user(self, twitch_username: str) -> bool:
         """
         Removes the user with the matching twitch username
+
+        In legacy bridge mode this is intentionally a no-op: deleting the new
+        dashboard's account from the old Mongo database must never happen.
         """
+        if self.legacy_api is not None:
+            logger.warning(
+                "Ignoring remove_user(%s) in legacy bridge mode; accounts are owned by the new dashboard",
+                twitch_username,
+            )
+            return True
+
         result = await self.users_col.delete_one({"twitchUsername": twitch_username})
         return result.acknowledged
 
@@ -69,6 +90,9 @@ class RonniaDatabase(AsyncMongoClient):
         :param twitch_id: Twitch ID
         :return: User details of the user associated with twitch username
         """
+        if self.legacy_api is not None:
+            return await self.legacy_api.get_user_by_id(twitch_id)
+
         user = await self.users_col.find_one({"twitchId": twitch_id})
         return DBUser(**user)
 
@@ -78,6 +102,9 @@ class RonniaDatabase(AsyncMongoClient):
         :param twitch_username:
         :return: User details of the user associated with twitch username
         """
+        if self.legacy_api is not None:
+            return await self.legacy_api.get_user_by_login(twitch_username)
+
         user = await self.users_col.find_one({"twitchUsername": twitch_username})
         return DBUser(**user)
 
@@ -163,6 +190,11 @@ class RonniaDatabase(AsyncMongoClient):
         Gets all enabled users in db
         :return:
         """
+        if self.legacy_api is not None:
+            for user in await self.legacy_api.fetch_enabled_users():
+                yield user
+            return
+
         async for user in self.users_col.find({"settings.enable": True}):
             yield DBUser.model_validate(user)
 
@@ -190,6 +222,13 @@ class RonniaDatabase(AsyncMongoClient):
         :param requested_channel_name: Channel id of the chat where the beatmap is requested
         :param mods: Requested mods (optional)
         """
+        if self.legacy_api is not None:
+            logger.debug(
+                "Skipping Mongo statistics write in legacy bridge mode; "
+                "delivery statistics are reported to the internal API"
+            )
+            return
+
         logger.debug("Adding request statistics to the database")
         await self.statistics_col.insert_one(
             {
