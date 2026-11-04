@@ -357,6 +357,7 @@ struct Runtime<'a> {
     pending: Pending,
     seen: Seen,
     known: BTreeSet<i64>,
+    known_granted: BTreeSet<i64>,
 }
 
 impl<'a> Runtime<'a> {
@@ -382,6 +383,7 @@ impl<'a> Runtime<'a> {
             pending: Pending::default(),
             seen: Seen::default(),
             known: BTreeSet::new(),
+            known_granted: BTreeSet::new(),
         })
     }
 
@@ -406,6 +408,7 @@ impl<'a> Runtime<'a> {
         // no transition is missed; the snapshot then corrects any stale state.
         self.reconcile(shutdown).await?;
         self.known = self.store.enabled_twitch_ids().await?.into_iter().collect();
+        self.known_granted = self.store.granted_twitch_ids().await?.into_iter().collect();
         self.snapshot().await;
         self.reconcile(shutdown).await?;
         tracing::info!(
@@ -493,20 +496,31 @@ impl<'a> Runtime<'a> {
         }
     }
 
-    /// Wake path for enable/grant/import/delete changes: no waiting for the
-    /// periodic full reconciliation, and only genuinely new channels are polled.
+    /// Wake path for enable/grant/import/delete changes: poll newly enabled
+    /// channels and newly active grants, including already-enabled legacy users.
     async fn refresh_membership(&mut self, shutdown: &CancellationToken) {
         if let Err(error) = self.reconcile(shutdown).await {
             tracing::warn!(error = %error, "subscription reconcile after a channel change failed");
         }
+        let granted: BTreeSet<i64> = match self.store.granted_twitch_ids().await {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!(error = %error, "could not read granted channels");
+                return;
+            }
+        };
         match self.store.enabled_twitch_ids().await {
             Ok(ids) => {
                 let fresh: Vec<i64> = ids
                     .iter()
                     .copied()
-                    .filter(|id| !self.known.contains(id))
+                    .filter(|id| {
+                        !self.known.contains(id)
+                            || (granted.contains(id) && !self.known_granted.contains(id))
+                    })
                     .collect();
                 self.known = ids.into_iter().collect();
+                self.known_granted = granted;
                 if !fresh.is_empty() {
                     match streams::targeted(self.store, self.providers, &fresh).await {
                         Ok(skipped) => {
@@ -515,7 +529,7 @@ impl<'a> Runtime<'a> {
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(error = %error, "initial state lookup for new channels failed; retrying");
+                            tracing::warn!(error = %error, "initial state lookup for enabled or newly granted channels failed; retrying");
                             for id in fresh {
                                 self.pending.retry(id, 0);
                             }

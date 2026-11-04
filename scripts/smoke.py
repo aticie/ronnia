@@ -562,6 +562,7 @@ def exercise_api(service):
     check(browser.request("/openapi.json")[0] == 404, "Debug docs exposed without DEBUG_MODE")
     check(browser.ok("/user/me") is None, "Anonymous /user/me must be JSON null")
     check(browser.request("/user/settings")[0] == 401, "Missing session must return 401")
+    before_streams = service.providers.count_path("/twitch/helix/streams")
     browser.oauth("twitch", 101)
     user = browser.ok("/user/me")
     check(user["osuId"] == 201 and user["twitchId"] == 101, "Existing imported account login failed")
@@ -594,8 +595,10 @@ def exercise_api(service):
         check("result" not in rows[0], "Mongo lookup internals leaked into API")
     check(browser.request("/live/users?limit=0")[0] in (400, 422), "Invalid pagination accepted")
     eventually(lambda: browser.ok("/live/users?limit=100&offset=0") == ["streamer"],
-               "Granted+online osu channel not exposed after reconciliation", timeout=45)
+               "Existing imported account becomes eligible immediately on grant activation", timeout=15)
     check(browser.ok("/user/me")["isLive"] is True, "Verified grant+osu live state not reflected")
+    check(service.providers.count_path("/twitch/helix/streams") == before_streams + 1,
+          "Existing enabled imported account did not get exactly one grant-driven stream lookup")
 
     # Reauthorizing the same identity is allowed and rotates the browser session.
     old_token = next(cookie.value for cookie in browser.cookies if cookie.name == "token")
@@ -656,6 +659,45 @@ def exercise_api(service):
     check(browser.ok("/user/me")["twitchId"] == 101, "Original account session was not recoverable")
     check(EXPECTED_ROUTES <= browser.routes, f"Unexercised routes: {EXPECTED_ROUTES - browser.routes}")
     return browser
+
+
+def exercise_grant_grace(service, browser):
+    """An already-enabled account refreshes state at activation, not the 600s audit."""
+    providers = service.providers
+    service.stop()
+    service.env["MIGRATION_GRANT_GRACE_SECS"] = "2"
+    # Reuse the imported account with no consent at startup, as during cutover.
+    with sqlite3.connect(service.database) as conn:
+        conn.execute("DELETE FROM twitch_channel_grants WHERE twitch_id=101")
+    providers.live = {}
+    service.start()
+    eventually(lambda: "EventSub conduit connected" in service.logs[-1].read_text(errors="replace"),
+               "grace regression startup snapshot completed", timeout=25)
+    check(browser.ok("/live/users?limit=100") == [], "Offline startup snapshot was not applied")
+    before_streams = providers.count_path("/twitch/helix/streams")
+    providers.live = {101: "streamer"}
+    browser.oauth("twitch", 101)
+    check(service.scalar("SELECT active_at>unixepoch() FROM twitch_channel_grants WHERE twitch_id=101"),
+          "Grace regression did not create a future activation")
+    check(browser.ok("/user/me")["twitchBotAuthorized"] is True,
+          "Grace must not hide verified public consent")
+    check(browser.ok("/live/users?limit=100") == [], "Grant became eligible before grace expired")
+    browser.ok("/user/settings", "POST", settings(echo=False))
+    check(providers.count_path("/twitch/helix/streams") == before_streams,
+          "Unrelated settings notification during grace triggered a stream lookup")
+    eventually(lambda: browser.ok("/live/users?limit=100") == ["streamer"],
+               "Grace expiry refreshes existing enabled account without periodic reconciliation", timeout=15)
+    check(providers.count_path("/twitch/helix/streams") == before_streams + 1,
+          "Grace expiry did not trigger exactly one stream lookup")
+    browser.ok("/user/settings", "POST", settings())
+    browser.ok("/user/settings", "POST", settings())
+    time.sleep(0.5)
+    check(providers.count_path("/twitch/helix/streams") == before_streams + 1,
+          "Unrelated settings notifications repeatedly polled stream state")
+    service.stop()
+    service.env["MIGRATION_GRANT_GRACE_SECS"] = "0"
+    service.start()
+    eventually(service.eventsub.joined, "chat subscription after grace regression", timeout=25)
 
 
 def exercise_bot(service, browser):
@@ -1228,6 +1270,7 @@ def main():
         check(providers.device_pending_polls >= 1, "CLI never observed authorization_pending")
         service.stop()
         providers.bot_401 = True
+        providers.live = {}
         service.start()
         eventually(lambda: providers.refreshes >= 1, "Validate 401 did not trigger a token refresh")
         eventually(lambda: providers.bot_401_hits >= 1, "Bot never validated its stored credential")
@@ -1243,8 +1286,15 @@ def main():
         time.sleep(0.5)
         check(service.process.poll() is None, "Transport refusal killed the service")
         eventsub.start()
+        # Finish startup with the enabled imported account offline and ungranted.
+        # Going live now must be discovered by consent, not startup or a state event.
+        eventually(lambda: "EventSub conduit connected" in service.logs[-1].read_text(errors="replace"),
+                   "ungranted imported account startup snapshot completed", timeout=25)
+        check(initial.ok("/live/users?limit=100") == [], "Ungranted startup account became eligible")
+        providers.live = {101: "streamer"}
 
         browser = exercise_api(service)
+        exercise_grant_grace(service, browser)
         exercise_bot(service, browser)
         exercise_hybrid(service, browser)
         exercise_transport(service, browser)
@@ -1257,7 +1307,7 @@ def main():
         check(not providers.errors, f"Fake provider protocol errors: {providers.errors}")
         print("PASS: Mongo import, all 16 HTTP routes, /health+/ready, both signup orders with channel:bot,")
         print("      encrypted device authorization, EventSub conduit/shard/subscriptions, real WS chat→osu PMs,")
-        print("      hybrid online/offline/category ordering, targeted lookup, watch wakeups and reconciliation,")
+        print("      hybrid online/offline/category ordering, existing-account grant/grace lookup, watch wakeups,")
         print("      refused connect + DNS EAI_NONAME recovery, reconnect/handoff/keepalive, revocation safety,")
         print("      token refresh/401, is_sent=false, ambiguous accepted POST not replayed, dry-run.")
         print("PASS: CLI import --check no-commit (valid/invalid), check, backup/restore, deliveries, backfill,")

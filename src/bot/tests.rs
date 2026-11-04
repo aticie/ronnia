@@ -475,6 +475,7 @@ struct Helix {
     deleted: StdMutex<Vec<String>>,
     shard_ok: AtomicBool,
     stream_mode: AtomicU8,
+    stream_calls: AtomicUsize,
     last_stream_query: StdMutex<String>,
 }
 
@@ -559,6 +560,7 @@ async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>)
         State(state): State<Arc<Helix>>,
         RawQuery(query): RawQuery,
     ) -> axum::Json<Value> {
+        state.stream_calls.fetch_add(1, Ordering::SeqCst);
         *state.last_stream_query.lock().unwrap() = query.unwrap_or_default();
         if state.stream_mode.load(Ordering::SeqCst) == 0 {
             axum::Json(
@@ -691,6 +693,116 @@ async fn hybrid_snapshots_see_offline_states_and_never_filter_by_category() {
     super::streams::full(&store, &providers).await.unwrap();
     assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
     server.abort();
+}
+
+async fn assert_existing_channel_grant_refresh(grace_secs: u64) {
+    let (state, address, server) = helix_server().await;
+    let (url, websocket) = ws_server(|mut socket| async move {
+        socket
+            .send(WsMessage::text(welcome_json("membership", 60)))
+            .await
+            .unwrap();
+        pending::<()>().await;
+    });
+    let mut config = mock_config(address);
+    let settings = Arc::get_mut(&mut config).unwrap();
+    settings.twitch_eventsub_url = url;
+    settings.twitch_token_key = Some([7; 32]);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    store
+        .call(|db| {
+            db.execute("INSERT INTO twitch_conduit(singleton,client_id,conduit_id,updated_at) VALUES(1,'client','conduit-1',0)", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    let providers = Providers::new(config.clone(), shutdown.clone()).unwrap();
+    let auth = TwitchAuth::new(config.clone(), store.clone()).unwrap();
+    let (requests, _receiver) = mpsc::channel(4);
+    let mut runtime = Runtime::new(
+        &config,
+        &store,
+        &providers,
+        &auth,
+        BotIdentity {
+            user_id: "bot".into(),
+            login: "bot".into(),
+        },
+        requests,
+    )
+    .await
+    .unwrap();
+    // Startup already knows the enabled, ungranted imported/legacy account.
+    // Its initial snapshot is offline; Twitch goes live without a state event.
+    state.stream_mode.store(1, Ordering::SeqCst);
+    let mut link = runtime.prepare(&shutdown).await.unwrap();
+    assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    let initial_calls = state.stream_calls.load(Ordering::SeqCst);
+    state.stream_mode.store(0, Ordering::SeqCst);
+    store
+        .call(move |db| {
+            db.execute(
+                "INSERT INTO twitch_channel_grants(twitch_id,granted_at,active_at,status) VALUES(1,unixepoch(),unixepoch()+?1,'granted')",
+                [grace_secs],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    if grace_secs != 0 {
+        // An unrelated settings notification during grace must not consume
+        // the later activation transition or poll an already-known channel.
+        store
+            .set_settings(1, crate::domain::Settings::default())
+            .await
+            .unwrap();
+        runtime.refresh_membership(&shutdown).await;
+        assert_eq!(state.stream_calls.load(Ordering::SeqCst), initial_calls);
+        assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+        sleep(Duration::from_secs(grace_secs)).await;
+    }
+    store.notify_channels_changed();
+    runtime.refresh_membership(&shutdown).await;
+    assert_eq!(
+        state.stream_calls.load(Ordering::SeqCst),
+        initial_calls + 1,
+        "activating an existing enabled account must trigger one targeted lookup"
+    );
+    assert_eq!(
+        *state.last_stream_query.lock().unwrap(),
+        "first=100&user_id=1",
+        "activation must look up only the newly granted channel"
+    );
+    assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    assert_eq!(store.live_users(100, 0).await.unwrap(), vec!["streamer"]);
+
+    let settings = crate::domain::Settings {
+        echo: false,
+        ..Default::default()
+    };
+    store.set_settings(1, settings).await.unwrap();
+    runtime.refresh_membership(&shutdown).await;
+    runtime.refresh_membership(&shutdown).await;
+    assert_eq!(
+        state.stream_calls.load(Ordering::SeqCst),
+        initial_calls + 1,
+        "unrelated settings/state notifications must not repeatedly poll Helix"
+    );
+    websocket.abort();
+    link.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn membership_refreshes_existing_enabled_channel_on_grant_activation() {
+    assert_existing_channel_grant_refresh(0).await;
+}
+
+#[tokio::test]
+async fn membership_refreshes_existing_enabled_channel_after_grant_grace() {
+    assert_existing_channel_grant_refresh(1).await;
 }
 
 #[tokio::test]

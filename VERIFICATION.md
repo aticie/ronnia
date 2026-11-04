@@ -1,8 +1,30 @@
 # Verification record
 
-Current repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01, Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
+Current grant-activation review checks: 2026-11-05. Repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01, Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
 
 The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
+
+## PR #57 P2 grant-activation regression (2026-11-05)
+
+The runtime now tracks enabled accounts and active grants separately. An already-enabled imported/legacy account receives a targeted stream-state lookup when its verified grant becomes active, including the delayed migration-grace notification. New enable/import lookups, subscription reconciliation, revision guards, and targeted retries remain on their existing paths; unrelated settings notifications do not repeatedly poll Helix.
+
+Before the fix, `cargo test --locked membership_refreshes_existing_enabled_channel -- --nocapture` failed both new regressions: immediate activation and grace expiry each left the stream-call count at 1 instead of the expected 2. Both use the existing fake Helix and WebSocket/state fixtures, complete real runtime startup with an enabled ungranted account offline, then change the provider to online/osu! without a state event or periodic snapshot. They assert one channel-targeted lookup, immediate stored/public live eligibility, no lookup during grace, and no repeated lookup on unrelated settings notifications.
+
+After the fix:
+
+```text
+cargo fmt --all                                   PASS
+cargo test --locked membership_refreshes_existing_enabled_channel -- --nocapture
+                                                 PASS — 2 passed, 0 failed
+cargo fmt --all -- --check                        PASS
+cargo clippy --locked --all-targets -- -D warnings PASS
+cargo test --locked                              PASS — 105 passed, 0 failed
+cargo build --locked --release                   PASS
+python3 scripts/smoke.py --binary target/release/ronnia --keep
+                                                 PASS
+```
+
+The updated smoke ran the newly built release executable, completed startup before granting the already-enabled imported account, and verified an offline-to-online/osu! transition immediately after OAuth consent with exactly one stream lookup. A separate restart with two-second migration grace verifies no premature eligibility/polling, activation via the real delayed OAuth notification, and no repeated stream lookups from unrelated settings writes. Both paths keep `RECONCILE_INTERVAL_SECS=600` and emit no stream-state event to supply the missing state. The full existing smoke also passed enable/delete wakeups, stale-snapshot ordering, delivery, transport recovery, and maintenance coverage. Artifact: `/tmp/ronnia-smoke-tlwulf02`. The complete sequential formatting/regression/clippy/test/build/smoke command finished in 169.50 seconds. No live providers, credentials, deployments, or PR #56 files were touched.
 
 ## Repository split (2026-11-04; verified)
 
