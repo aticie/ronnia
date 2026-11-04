@@ -9,6 +9,18 @@
 
 Ronnia is a Twitch/osu! bot that sends beatmap requests from Twitch chat to the streamer's in-game messages.
 
+# Rust rewrite and migration 🦀
+
+The Rust port, SQLite-backed account API, EventSub bot, and Vue dashboard live under [`rust/`](rust/README.md). That directory is self-contained and documents:
+
+- local Compose deployment with the account dashboard,
+- the MongoDB → SQLite import,
+- Twitch EventSub Conduit + managed authorization,
+- coexistence with this Python bot while users complete `channel:bot` consent,
+- verification and the measured memory comparison.
+
+The Python bot remains the request relay for channels that have not migrated. See the coexistence section in [`rust/README.md`](rust/README.md#coexistence-with-the-old-bot) for the required bridge environment and cutoff procedure.
+
 # Usage✍️
 
 ### [Sign-up for the bot from here!](https://ronnia.me/)

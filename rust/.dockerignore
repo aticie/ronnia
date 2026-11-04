@@ -1,0 +1,8 @@
+*
+!.env.example
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!migrations/
+!migrations/**

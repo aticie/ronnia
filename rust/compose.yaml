@@ -1,0 +1,39 @@
+services:
+  ronnia:
+    build: .
+    command: ["serve"]
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      BIND_IP: 0.0.0.0
+      BIND_PORT: ${BIND_PORT:-8080}
+      BOT_ENABLED: "true"
+      DATABASE_PATH: /data/ronnia.sqlite3
+    ports:
+      - "127.0.0.1:${BIND_PORT:-8080}:${BIND_PORT:-8080}"
+    volumes:
+      - ronnia-data:/data
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  web:
+    build: ./web
+    restart: unless-stopped
+    init: true
+    environment:
+      API_UPSTREAM: http://ronnia:${BIND_PORT:-8080}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:80"
+    depends_on:
+      - ronnia
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  ronnia-data:
