@@ -1,7 +1,7 @@
 //! Twitch cloud-bot transport.
 //!
-//! Incoming chat and stream state arrive over one EventSub conduit shard
-//! (`WebSocket`, `wss://eventsub.wss.twitch.tv/ws`). Outgoing chat uses the
+//! Incoming chat and stream state arrive over independently supervised EventSub
+//! conduit shards (`WebSocket`, `wss://eventsub.wss.twitch.tv/ws`). Outgoing chat uses the
 //! managed bot user token; conduit and subscription management use the
 //! application token manager in [`Providers`]. Only EventSub events for
 //! channels this process subscribed to are trusted, and no account is ever
@@ -19,30 +19,29 @@ use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
-    future::pending,
+    collections::{HashSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
 use tokio::{
-    sync::{mpsc, watch},
-    task::JoinHandle,
-    time::{Instant, MissedTickBehavior, interval, sleep, sleep_until, timeout},
+    sync::{Semaphore, mpsc, watch},
+    time::{Instant, sleep, sleep_until, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
 mod conduit;
 mod eventsub;
+mod maintenance;
+mod scheduler;
+mod shards;
 mod streams;
 
 use self::{
-    conduit::{Conduit, Subscriptions},
-    eventsub::{Backoff, Connection, Incoming, Welcome},
+    conduit::Conduit,
+    eventsub::{Backoff, Incoming},
+    scheduler::{RequestEnvelope, process_requests},
 };
 
-/// Room for the HTTP attach call after a welcome; Twitch closes an unattached
-/// session ten seconds after the welcome.
-const SHARD_ATTACH_DEADLINE: Duration = Duration::from_secs(9);
 /// Revalidate the managed bot grant well inside Twitch's validation window.
 const AUTH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const AUTH_DEADLINE: Duration = Duration::from_secs(20);
@@ -51,9 +50,6 @@ const AUDIT_INTERVAL: Duration = Duration::from_secs(600);
 /// Coalesce targeted category lookups triggered by `stream.online` bursts.
 const TARGET_DEBOUNCE: Duration = Duration::from_millis(300);
 const MAX_RESYNC_ATTEMPTS: u32 = 5;
-const READER_QUEUE: usize = 64;
-/// Time allowed for a graceful WebSocket close before the task is aborted.
-const GRACEFUL_CLOSE: Duration = Duration::from_secs(2);
 const SEEN_CAPACITY: usize = 2048;
 
 #[derive(Clone, Debug)]
@@ -67,6 +63,13 @@ struct Message {
     subscriber: bool,
     vip: bool,
     points: bool,
+}
+
+/// Admission always carries the scheduler's single shared memory budget.
+#[derive(Clone)]
+struct RequestIngress {
+    requests: mpsc::Sender<RequestEnvelope>,
+    permits: Arc<Semaphore>,
 }
 
 struct Echo {
@@ -106,7 +109,8 @@ pub async fn run(config: Arc<Config>, store: Store, shutdown: CancellationToken)
             Ok(())
         })
         .await?;
-    let capacity = config.request_queue_capacity.clamp(1, 4096);
+    let capacity = config.request_queue_capacity;
+    let permits = Arc::new(Semaphore::new(capacity));
     let (requests_tx, requests_rx) = mpsc::channel(capacity);
     let (echo_tx, echo_rx) = mpsc::channel(capacity);
     let (identity_tx, identity_rx) = watch::channel::<Option<String>>(None);
@@ -134,7 +138,10 @@ pub async fn run(config: Arc<Config>, store: Store, shutdown: CancellationToken)
             providers,
             auth,
             identity_tx,
-            requests_tx,
+            RequestIngress {
+                requests: requests_tx,
+                permits
+            },
             shutdown,
         ),
     );
@@ -189,7 +196,7 @@ async fn supervise(
     providers: Providers,
     auth: TwitchAuth,
     identity_tx: watch::Sender<Option<String>>,
-    requests: mpsc::Sender<(Message, Beatmap)>,
+    ingress: RequestIngress,
     shutdown: CancellationToken,
 ) {
     let mut backoff = Backoff::new();
@@ -204,12 +211,12 @@ async fn supervise(
         identity_tx.send_replace(Some(identity.user_id.clone()));
         let started = Instant::now();
         let result = Runtime::new(
-            &config,
-            &store,
-            &providers,
-            &auth,
+            config.clone(),
+            store.clone(),
+            providers.clone(),
+            auth.clone(),
             identity,
-            requests.clone(),
+            ingress.clone(),
         )
         .await;
         let result = match result {
@@ -345,45 +352,86 @@ async fn send_feedback(
     }
 }
 
-struct Runtime<'a> {
-    config: &'a Config,
-    store: &'a Store,
-    providers: &'a Providers,
-    auth: &'a TwitchAuth,
-    identity: BotIdentity,
-    requests: mpsc::Sender<(Message, Beatmap)>,
-    conduit: Conduit,
-    subs: Subscriptions,
-    pending: Pending,
-    seen: Seen,
-    known: BTreeSet<i64>,
-    known_granted: BTreeSet<i64>,
+/// A single in-flight authorization check, independent of event consumption.
+async fn validate_identity(
+    auth: TwitchAuth,
+    bot_id: String,
+    shutdown: CancellationToken,
+) -> Outcome {
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return Outcome::Cancelled,
+            _ = sleep(AUTH_INTERVAL) => {},
+        }
+        let result = tokio::select! {
+            _ = shutdown.cancelled() => return Outcome::Cancelled,
+            result = timeout(AUTH_DEADLINE, auth.ready_bot(&shutdown)) => result,
+        };
+        match result {
+            Ok(Ok(Some(current))) if current.user_id == bot_id => {}
+            Ok(Ok(Some(changed))) => {
+                tracing::info!(login = %changed.login, "Twitch bot identity changed; restarting the transport");
+                return Outcome::Restart;
+            }
+            Ok(Ok(None)) => {
+                tracing::warn!("Twitch bot authorization was revoked; waiting for authorize-bot");
+                return Outcome::Restart;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "Twitch bot revalidation failed; returning to the authorization wait");
+                return Outcome::Restart;
+            }
+            Err(_) => tracing::warn!("Twitch bot revalidation timed out"),
+        }
+    }
 }
 
-impl<'a> Runtime<'a> {
+struct Runtime {
+    config: Arc<Config>,
+    store: Store,
+    providers: Providers,
+    auth: TwitchAuth,
+    identity: BotIdentity,
+    ingress: RequestIngress,
+    conduit: Conduit,
+    channels: watch::Receiver<u64>,
+    signals: watch::Sender<maintenance::Signal>,
+    actions: mpsc::Sender<maintenance::Action>,
+    maintenance_rx: Option<(
+        watch::Receiver<maintenance::Signal>,
+        mpsc::Receiver<maintenance::Action>,
+    )>,
+    seen: Seen,
+}
+
+impl Runtime {
     async fn new(
-        config: &'a Config,
-        store: &'a Store,
-        providers: &'a Providers,
-        auth: &'a TwitchAuth,
+        config: Arc<Config>,
+        store: Store,
+        providers: Providers,
+        auth: TwitchAuth,
         identity: BotIdentity,
-        requests: mpsc::Sender<(Message, Beatmap)>,
+        ingress: RequestIngress,
     ) -> Result<Self> {
-        let conduit = conduit::ensure(config, store, providers).await?;
-        let subs = Subscriptions::new(conduit.id.clone(), identity.user_id.clone());
+        // Subscribe before any startup membership read (and even before ensure's
+        // HTTP), so startup changes cannot consume an activation edge.
+        let channels = store.channel_changes();
+        let conduit = conduit::ensure(&config, &store, &providers).await?;
+        let (signals, signal_rx) = watch::channel(maintenance::Signal::default());
+        let (actions, action_rx) = maintenance::actions();
         Ok(Self {
             config,
             store,
             providers,
             auth,
             identity,
-            requests,
+            ingress,
             conduit,
-            subs,
-            pending: Pending::default(),
+            channels,
+            signals,
+            actions,
+            maintenance_rx: Some((signal_rx, action_rx)),
             seen: Seen::default(),
-            known: BTreeSet::new(),
-            known_granted: BTreeSet::new(),
         })
     }
 
@@ -391,379 +439,101 @@ impl<'a> Runtime<'a> {
         &self.identity.user_id
     }
 
-    /// Initial connect: welcome, shard attach, remote subscription list, owned
-    /// subscriptions from the persisted state, then a snapshot that corrects
-    /// it — so no transition can slip between subscription setup and the first
-    /// reconciliation.
-    async fn prepare(&mut self, shutdown: &CancellationToken) -> Result<Link> {
-        let mut link = Link::new();
-        let generation = link
-            .open(&self.config.twitch_eventsub_url, shutdown)
-            .await?;
-        link.current = generation;
-        let welcome = link.welcome(generation).await?;
-        self.attach(&welcome.session_id, shutdown).await?;
-        self.subs.refresh_remote(self.providers, shutdown).await?;
-        // State and chat subscriptions are established before the snapshot so
-        // no transition is missed; the snapshot then corrects any stale state.
-        self.reconcile(shutdown).await?;
-        self.known = self.store.enabled_twitch_ids().await?.into_iter().collect();
-        self.known_granted = self.store.granted_twitch_ids().await?.into_iter().collect();
-        self.snapshot().await;
-        self.reconcile(shutdown).await?;
-        tracing::info!(
-            conduit = %self.conduit.id,
-            session = %welcome.session_id,
-            bot = %self.identity.login,
-            "EventSub conduit connected"
-        );
-        Ok(link)
-    }
-
-    async fn attach(&self, session_id: &str, shutdown: &CancellationToken) -> Result<()> {
-        let attach = timeout(
-            SHARD_ATTACH_DEADLINE,
-            conduit::attach(self.providers, &self.conduit.id, session_id),
-        );
-        tokio::select! {
-            _ = shutdown.cancelled() => bail!("conduit shard attach cancelled"),
-            result = attach => result.context("conduit shard attach exceeded the shard deadline")?,
-        }
-    }
-
-    async fn reconcile(&mut self, shutdown: &CancellationToken) -> Result<()> {
-        let grants = self.store.granted_twitch_ids().await?;
-        let desired = conduit::desired(&grants, self.bot_id());
-        let summary = self
-            .subs
-            .reconcile(self.providers, &desired, shutdown)
-            .await?;
-        if summary.created != 0 || summary.removed != 0 || summary.deferred != 0 {
-            tracing::info!(
-                created = summary.created,
-                removed = summary.removed,
-                kept = summary.kept,
-                deferred = summary.deferred,
-                "EventSub subscription reconciliation complete"
-            );
-        }
-        Ok(())
-    }
-
-    /// A failed snapshot keeps the previous state; it never marks everyone offline.
-    async fn snapshot(&mut self) {
-        match streams::full(self.store, self.providers).await {
-            Ok(skipped) => {
-                for id in skipped {
-                    self.pending.retry(id, 0);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "stream snapshot failed; retaining the previous channel state"
-                );
-            }
-        }
-    }
-
-    async fn run_pending(&mut self, shutdown: &CancellationToken) {
-        let due = self.pending.take_due(Instant::now());
-        if due.is_empty() {
-            return;
-        }
-        let ids: Vec<i64> = due.iter().map(|(id, _)| *id).collect();
-        match streams::targeted(self.store, self.providers, &ids).await {
-            Ok(skipped) => {
-                let skipped: HashSet<i64> = skipped.into_iter().collect();
-                for (id, attempt) in due {
-                    if skipped.contains(&id) && attempt < MAX_RESYNC_ATTEMPTS {
-                        self.pending.retry(id, attempt);
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "targeted stream lookup failed; keeping known state and retrying");
-                for (id, attempt) in due {
-                    if attempt < MAX_RESYNC_ATTEMPTS {
-                        self.pending.retry(id, attempt);
-                    }
-                }
-            }
-        }
-        if let Err(error) = self.reconcile(shutdown).await {
-            tracing::warn!(error = %error, "subscription reconcile after targeted lookup failed");
-        }
-    }
-
-    /// Wake path for enable/grant/import/delete changes: poll newly enabled
-    /// channels and newly active grants, including already-enabled legacy users.
-    async fn refresh_membership(&mut self, shutdown: &CancellationToken) {
-        if let Err(error) = self.reconcile(shutdown).await {
-            tracing::warn!(error = %error, "subscription reconcile after a channel change failed");
-        }
-        let granted: BTreeSet<i64> = match self.store.granted_twitch_ids().await {
-            Ok(ids) => ids.into_iter().collect(),
-            Err(error) => {
-                tracing::warn!(error = %error, "could not read granted channels");
-                return;
-            }
-        };
-        match self.store.enabled_twitch_ids().await {
-            Ok(ids) => {
-                let fresh: Vec<i64> = ids
-                    .iter()
-                    .copied()
-                    .filter(|id| {
-                        !self.known.contains(id)
-                            || (granted.contains(id) && !self.known_granted.contains(id))
-                    })
-                    .collect();
-                self.known = ids.into_iter().collect();
-                self.known_granted = granted;
-                if !fresh.is_empty() {
-                    match streams::targeted(self.store, self.providers, &fresh).await {
-                        Ok(skipped) => {
-                            for id in skipped {
-                                self.pending.retry(id, 0);
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(error = %error, "initial state lookup for enabled or newly granted channels failed; retrying");
-                            for id in fresh {
-                                self.pending.retry(id, 0);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(error = %error, "could not read enabled channels"),
-        }
-    }
-
     async fn run(&mut self, shutdown: &CancellationToken) -> Result<Outcome> {
-        // Subscribe before startup reconciliation so an enable/grant that lands
-        // mid-startup still wakes the targeted lookup after it.
-        let mut channels = self.store.channel_changes();
-        let mut link = self.prepare(shutdown).await?;
-        let mut reconcile_tick = interval(Duration::from_secs(
-            self.config.reconcile_interval_secs.max(1),
+        let local = shutdown.child_token();
+        let (targets, target_rx) = watch::channel(1);
+        let mut pool = shards::Pool::start(
+            self.config.clone(),
+            self.providers.clone(),
+            self.conduit.clone(),
+            target_rx,
+            local.clone(),
+        );
+        let (signals, actions) = self.maintenance_rx.take().expect("runtime runs once");
+        let worker = maintenance::Maintenance::new(
+            self.config.clone(),
+            self.store.clone(),
+            self.providers.clone(),
+            self.conduit.id.clone(),
+            self.identity.user_id.clone(),
+            maintenance::Channels {
+                membership: self.channels.clone(),
+                signals,
+                actions,
+                targets,
+                topology: pool.topology.clone(),
+            },
+        );
+        let worker_cancel = local.clone();
+        let worker_job = tokio::spawn(async move {
+            tokio::select! {
+                _ = worker_cancel.cancelled() => {},
+                _ = worker.run(worker_cancel.clone()) => {},
+            }
+        });
+        let mut auth_job = tokio::spawn(validate_identity(
+            self.auth.clone(),
+            self.identity.user_id.clone(),
+            local.clone(),
         ));
-        reconcile_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        reconcile_tick.tick().await;
-        let mut audit_tick = interval(AUDIT_INTERVAL);
-        audit_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        audit_tick.tick().await;
-        let mut auth_tick = interval(AUTH_INTERVAL);
-        auth_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        auth_tick.tick().await;
-
-        enum Wake {
-            Cancel,
-            Message(Option<(u64, Incoming)>),
-            Channels(bool),
-            Reconcile,
-            Audit,
-            Pending,
-            Auth,
-        }
-
-        loop {
-            let pending_deadline = self.pending.next_deadline();
-            let pending_wake = async move {
-                match pending_deadline {
-                    Some(deadline) => sleep_until(deadline).await,
-                    None => pending().await,
+        let mut auth_finished = false;
+        // Foreground consumption begins immediately. Socket welcome/attach,
+        // subscription creation and snapshots all progress independently.
+        let result = loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break Ok(Outcome::Cancelled),
+                result = &mut auth_job => {
+                    auth_finished = true;
+                    break match result {
+                        Ok(outcome) => Ok(outcome),
+                        Err(error) => Err(anyhow!("authorization monitor failed: {error}")),
+                    };
                 }
-            };
-            let wake = tokio::select! {
-                _ = shutdown.cancelled() => Wake::Cancel,
-                message = link.rx.recv() => Wake::Message(message),
-                changed = channels.changed() => Wake::Channels(changed.is_ok()),
-                _ = reconcile_tick.tick() => Wake::Reconcile,
-                _ = audit_tick.tick() => Wake::Audit,
-                _ = pending_wake => Wake::Pending,
-                _ = auth_tick.tick() => Wake::Auth,
-            };
-            match wake {
-                Wake::Cancel => {
-                    link.shutdown().await;
-                    return Ok(Outcome::Cancelled);
-                }
-                Wake::Message(message) => {
-                    if let Some(outcome) = self.handle_message(&mut link, message, shutdown).await?
-                    {
-                        link.shutdown().await;
-                        return Ok(outcome);
+                changed = pool.topology.changed() => {
+                    if changed.is_err() {
+                        break Err(anyhow!("EventSub shard topology supervisor stopped"));
+                    }
+                    let topology = *pool.topology.borrow_and_update();
+                    if topology.remote_count > 0 && topology.remote_count == topology.attached_count {
+                        maintenance::request(&self.signals, true, true);
                     }
                 }
-                Wake::Channels(alive) => {
-                    if alive {
-                        self.refresh_membership(shutdown).await;
-                    } else {
-                        tracing::warn!(
-                            "channel change notifications stopped; relying on the periodic audit"
-                        );
-                    }
+                event = pool.events.recv() => {
+                    let Some(event) = event else {
+                        break Err(anyhow!("EventSub shard event channel closed"));
+                    };
+                    tracing::trace!(shard = event.shard_id, "dispatching EventSub event");
+                    let result = match event.incoming {
+                        Incoming::Notification { subscription, event, timestamp, message_id } => {
+                            self.notification(&subscription, &event, &timestamp, &message_id).await
+                        }
+                        Incoming::Revocation { subscription } => self.revocation(&subscription).await,
+                        _ => Ok(()),
+                    };
+                    if let Err(error) = result { break Err(error); }
                 }
-                Wake::Reconcile => {
-                    self.snapshot().await;
-                    if let Err(error) = self.reconcile(shutdown).await {
-                        tracing::warn!(error = %error, "periodic subscription reconcile failed");
-                    }
-                }
-                Wake::Audit => {
-                    if let Err(error) = self.subs.refresh_remote(self.providers, shutdown).await {
-                        tracing::warn!(error = %error, "EventSub subscription audit failed; keeping the local cache");
-                    } else if let Err(error) = self.reconcile(shutdown).await {
-                        tracing::warn!(error = %error, "audit subscription reconcile failed");
-                    }
-                }
-                Wake::Pending => self.run_pending(shutdown).await,
-                Wake::Auth => match timeout(AUTH_DEADLINE, self.auth.ready_bot(shutdown)).await {
-                    Ok(Ok(Some(current))) if current.user_id == self.identity.user_id => {}
-                    Ok(Ok(Some(changed))) => {
-                        tracing::info!(login = %changed.login, "Twitch bot identity changed; restarting the transport");
-                        link.shutdown().await;
-                        return Ok(Outcome::Restart);
-                    }
-                    Ok(Ok(None)) => {
-                        tracing::warn!(
-                            "Twitch bot authorization was revoked; waiting for authorize-bot"
-                        );
-                        link.shutdown().await;
-                        return Ok(Outcome::Restart);
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            error = %error,
-                            "Twitch bot revalidation failed; returning to the authorization wait"
-                        );
-                        link.shutdown().await;
-                        return Ok(Outcome::Restart);
-                    }
-                    Err(_) => tracing::warn!("Twitch bot revalidation timed out"),
-                },
             }
-        }
-    }
-
-    async fn handle_message(
-        &mut self,
-        link: &mut Link,
-        message: Option<(u64, Incoming)>,
-        shutdown: &CancellationToken,
-    ) -> Result<Option<Outcome>> {
-        let Some((generation, incoming)) = message else {
-            return Err(anyhow!("EventSub reader channel closed"));
         };
-        let known = generation == link.current
-            || Some(generation) == link.pending
-            || link.retired.contains(&generation);
-        if !known {
-            return Ok(None);
+        local.cancel();
+        pool.shutdown().await;
+        let _ = worker_job.await;
+        if !auth_finished {
+            let _ = auth_job.await;
         }
-        match incoming {
-            Incoming::Welcome(welcome) => {
-                if Some(generation) == link.pending {
-                    self.attach(&welcome.session_id, shutdown).await?;
-                    link.complete(generation).await;
-                    tracing::info!(
-                        session = %welcome.session_id,
-                        "EventSub connection handoff complete"
-                    );
-                    // Session recovery: re-list owned subscriptions and resync
-                    // state now instead of waiting for the periodic audit.
-                    if let Err(error) = self.subs.refresh_remote(self.providers, shutdown).await {
-                        tracing::warn!(error = %error, "subscription refresh after session recovery failed");
-                    }
-                    if let Err(error) = self.reconcile(shutdown).await {
-                        tracing::warn!(error = %error, "reconcile after session recovery failed");
-                    }
-                    self.snapshot().await;
-                } else if generation == link.current {
-                    tracing::debug!(session = %welcome.session_id, "duplicate welcome on the active session");
-                }
-            }
-            Incoming::Keepalive => {}
-            Incoming::Ignored => {}
-            Incoming::Notification {
-                subscription,
-                event,
-                timestamp,
-                message_id,
-            } => {
-                // A superseded but still draining connection may carry the last
-                // events of the handoff; timestamps and message ids deduplicate.
-                self.notification(&subscription, &event, &timestamp, &message_id)
-                    .await?;
-            }
-            Incoming::Reconnect { url } => {
-                if generation != link.current || link.pending.is_some() {
-                    return Ok(None);
-                }
-                let url = match eventsub::validate_reconnect_url(
-                    &self.config.twitch_eventsub_url,
-                    &url,
-                ) {
-                    Ok(url) => url,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "refusing an EventSub reconnect URL outside the configured origin");
-                        return Ok(None);
-                    }
-                };
-                match link.open(&url, shutdown).await {
-                    Ok(generation) => {
-                        link.pending = Some(generation);
-                        tracing::info!(
-                            generation,
-                            "opened the replacement EventSub session before closing the old one"
-                        );
-                    }
-                    Err(error) => {
-                        // Keep the old connection; Twitch closes it with 4004 if
-                        // the handoff never completes, which triggers a reconnect.
-                        tracing::warn!(error = %error, "could not open the EventSub reconnect URL; keeping the current session");
-                    }
-                }
-            }
-            Incoming::Revocation { subscription } => {
-                // Revocations are idempotent, so a draining old session may
-                // deliver one that the replacement never sees.
-                self.revocation(&subscription, shutdown).await?;
-            }
-            Incoming::Close { code, reason } => {
-                if generation == link.current {
-                    return Err(anyhow!("EventSub closed the connection: {code} {reason}"));
-                }
-                if Some(generation) == link.pending {
-                    tracing::warn!(code, reason = %reason, "replacement EventSub session closed before welcome; keeping the current session");
-                    link.abandon(generation).await;
-                }
-            }
-            Incoming::Failed(error) => {
-                if generation == link.current {
-                    return Err(anyhow!("EventSub transport failed: {error}"));
-                }
-                if Some(generation) == link.pending {
-                    tracing::warn!(error = %error, "replacement EventSub session failed before welcome; keeping the current session");
-                    link.abandon(generation).await;
-                }
-            }
-        }
-        Ok(None)
+        result
     }
 
-    async fn revocation(
-        &mut self,
-        subscription: &Value,
-        shutdown: &CancellationToken,
-    ) -> Result<()> {
+    async fn revocation(&mut self, subscription: &Value) -> Result<()> {
         let kind = subscription["type"].as_str().unwrap_or_default();
         let status = subscription["status"].as_str().unwrap_or_default();
         let ours = subscription["transport"]["method"].as_str() == Some("conduit")
             && subscription["transport"]["conduit_id"].as_str() == Some(self.conduit.id.as_str());
         if !ours || conduit::owned_version(kind).is_none() {
+            return Ok(());
+        }
+        if kind == conduit::CHAT_TYPE.0
+            && subscription["condition"]["user_id"].as_str() != Some(self.bot_id())
+        {
             return Ok(());
         }
         let broadcaster = subscription["condition"]["broadcaster_user_id"]
@@ -775,18 +545,19 @@ impl<'a> Runtime<'a> {
             && let Some(id) = broadcaster
         {
             self.store.revoke_twitch_channel(id).await?;
-            self.subs.forget_kind(kind, id);
             tracing::warn!(
                 broadcaster = id,
                 "channel grant marked revoked; the broadcaster must reauthorize before chat resumes"
             );
-            if let Err(error) = self.reconcile(shutdown).await {
-                tracing::warn!(error = %error, "subscription reconcile after revocation failed");
-            }
-        } else if let Some(id) = broadcaster {
-            self.subs.forget_kind(kind, id);
         }
+        // The maintenance owner re-lists before reconciliation; no second
+        // owner mutates its subscription cache from the event path.
+        maintenance::request(&self.signals, true, false);
         Ok(())
+    }
+
+    fn target(&self, action: maintenance::Action) {
+        maintenance::enqueue(&self.actions, &self.signals, action);
     }
 
     async fn notification(
@@ -852,11 +623,33 @@ impl<'a> Runtime<'a> {
                     );
                     return Ok(());
                 };
-                if self.requests.try_send((chat.message, beatmap)).is_err() {
-                    tracing::warn!(
-                        channel = %event["broadcaster_user_login"].as_str().unwrap_or_default(),
-                        "request queue is full; incoming request rejected"
-                    );
+                let permit = match self.ingress.permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        tracing::warn!(channel = %chat.message.channel,
+                            "request queue is full; incoming request rejected");
+                        return Ok(());
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        tracing::warn!(channel = %chat.message.channel,
+                            "request scheduler is closed; incoming request rejected");
+                        return Ok(());
+                    }
+                };
+                match self.ingress.requests.try_send(RequestEnvelope {
+                    message: chat.message,
+                    beatmap,
+                    permit,
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(envelope)) => {
+                        tracing::warn!(channel = %envelope.message.channel,
+                            "request queue is full; incoming request rejected");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(envelope)) => {
+                        tracing::warn!(channel = %envelope.message.channel,
+                            "request scheduler is closed; incoming request rejected");
+                    }
                 }
             }
             "stream.online" => {
@@ -870,12 +663,30 @@ impl<'a> Runtime<'a> {
                         broadcaster,
                         "stream went online; resolving the category before request acceptance"
                     );
-                    self.pending.schedule(broadcaster);
+                    // Capture this event's revision before accepting another event.
+                    // A later offline/category transition invalidates this lookup,
+                    // even when the targeted action queue is saturated.
+                    match self.store.snapshot_versions(vec![broadcaster]).await {
+                        Ok(versions) => {
+                            if let Some((id, expected_revision)) = versions.into_iter().next() {
+                                self.target(maintenance::Action::Schedule {
+                                    id,
+                                    expected_revision,
+                                });
+                            } else {
+                                maintenance::request(&self.signals, false, true);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, broadcaster,
+                                "could not capture online revision; scheduling a full snapshot correction");
+                            maintenance::request(&self.signals, false, true);
+                        }
+                    }
                     // The category is unknown until the targeted lookup lands.
                 }
             }
             "stream.offline" => {
-                self.pending.cancel(broadcaster);
                 if self
                     .store
                     .apply_stream_event(broadcaster, event_login(event), StreamEvent::Offline, at)
@@ -885,6 +696,7 @@ impl<'a> Runtime<'a> {
                         broadcaster,
                         "stream went offline; request acceptance removed"
                     );
+                    self.target(maintenance::Action::Cancel { id: broadcaster });
                 }
             }
             "channel.update" => {
@@ -1038,244 +850,6 @@ impl Seen {
             }
         }
         true
-    }
-}
-
-/// Debounced targeted category lookups queued by `stream.online`.
-#[derive(Default)]
-struct Pending {
-    due: BTreeMap<i64, (Instant, u32)>,
-}
-
-impl Pending {
-    fn schedule(&mut self, id: i64) {
-        self.due
-            .entry(id)
-            .or_insert_with(|| (Instant::now() + TARGET_DEBOUNCE, 0));
-    }
-
-    fn cancel(&mut self, id: i64) {
-        self.due.remove(&id);
-    }
-
-    fn retry(&mut self, id: i64, attempt: u32) {
-        let delay = Duration::from_secs((1u64 << attempt.min(6)).min(60));
-        self.due.insert(id, (Instant::now() + delay, attempt + 1));
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        self.due.values().map(|(due, _)| *due).min()
-    }
-
-    fn take_due(&mut self, now: Instant) -> Vec<(i64, u32)> {
-        let due: Vec<(i64, u32)> = self
-            .due
-            .iter()
-            .filter(|(_, (deadline, _))| *deadline <= now)
-            .map(|(id, (_, attempt))| (*id, *attempt))
-            .collect();
-        for (id, _) in &due {
-            self.due.remove(id);
-        }
-        due
-    }
-}
-
-/// One owned EventSub WebSocket generation plus any handoff in flight.
-struct Link {
-    rx: mpsc::Receiver<(u64, Incoming)>,
-    tx: mpsc::Sender<(u64, Incoming)>,
-    readers: BTreeMap<u64, Reader>,
-    current: u64,
-    pending: Option<u64>,
-    next_generation: u64,
-    /// Recently superseded generations. Queued notifications from them are
-    /// still processed (and deduplicated) so a handoff cannot drop events.
-    retired: VecDeque<u64>,
-}
-
-impl Link {
-    fn new() -> Self {
-        let (tx, rx) = mpsc::channel(READER_QUEUE);
-        Self {
-            rx,
-            tx,
-            readers: BTreeMap::new(),
-            current: 0,
-            pending: None,
-            next_generation: 0,
-            retired: VecDeque::new(),
-        }
-    }
-
-    /// Open a connection and spawn its reader. The welcome arrives through the
-    /// shared channel so the old connection keeps delivering during a handoff.
-    async fn open(&mut self, url: &str, shutdown: &CancellationToken) -> Result<u64> {
-        let connection = Connection::open(url).await?;
-        let generation = self.next_generation;
-        self.next_generation = self.next_generation.wrapping_add(1);
-        let tx = self.tx.clone();
-        let token = shutdown.clone();
-        let local = CancellationToken::new();
-        let local_token = local.clone();
-        let reader = Reader {
-            handle: tokio::spawn(async move {
-                let mut connection = connection;
-                let mut idle = eventsub::WELCOME_TIMEOUT;
-                let mut deadline = Instant::now() + idle;
-                loop {
-                    let result = tokio::select! {
-                        _ = token.cancelled() => None,
-                        _ = local_token.cancelled() => None,
-                        result = connection.read(deadline) => Some(result),
-                    };
-                    let Some(result) = result else {
-                        connection.close().await;
-                        return;
-                    };
-                    match result {
-                        Ok(incoming) => {
-                            match &incoming {
-                                Incoming::Welcome(welcome) => {
-                                    idle = welcome.keepalive + Duration::from_secs(1);
-                                    deadline = Instant::now() + idle;
-                                }
-                                // Only protocol liveness resets the timer; ping and
-                                // pong frames deliberately do not.
-                                Incoming::Keepalive | Incoming::Notification { .. } => {
-                                    deadline = Instant::now() + idle;
-                                }
-                                _ => {}
-                            }
-                            let sent = tokio::select! {
-                                _ = token.cancelled() => false,
-                                _ = local_token.cancelled() => false,
-                                result = tx.send((generation, incoming)) => result.is_ok(),
-                            };
-                            if !sent {
-                                connection.close().await;
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            let _ = tx
-                                .send((generation, Incoming::Failed(format!("{error:#}"))))
-                                .await;
-                            return;
-                        }
-                    }
-                }
-            }),
-            cancel: local,
-        };
-        self.readers.insert(generation, reader);
-        Ok(generation)
-    }
-
-    async fn welcome(&mut self, generation: u64) -> Result<Welcome> {
-        let deadline = Instant::now() + eventsub::WELCOME_TIMEOUT + Duration::from_secs(2);
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let message = timeout(remaining, self.rx.recv())
-                .await
-                .map_err(|_| anyhow!("EventSub welcome timed out"))?;
-            let Some((seen, incoming)) = message else {
-                bail!("EventSub closed before the welcome message");
-            };
-            if seen != generation {
-                continue;
-            }
-            match incoming {
-                Incoming::Welcome(welcome) => return Ok(welcome),
-                Incoming::Failed(error) => {
-                    bail!("EventSub connection failed before welcome: {error}")
-                }
-                Incoming::Close { code, reason } => {
-                    bail!("EventSub closed before welcome: {code} {reason}")
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Close the old connection only after the replacement answered its welcome.
-    async fn complete(&mut self, generation: u64) {
-        let old = self.current;
-        if let Some(reader) = self.readers.remove(&old) {
-            reader.close().await;
-        }
-        self.retired.push_back(old);
-        while self.retired.len() > 4 {
-            self.retired.pop_front();
-        }
-        self.current = generation;
-        self.pending = None;
-    }
-
-    async fn abandon(&mut self, generation: u64) {
-        if let Some(reader) = self.readers.remove(&generation) {
-            reader.close().await;
-        }
-        self.pending = None;
-    }
-
-    /// Gracefully close every connection, then abort whatever remains.
-    async fn shutdown(&mut self) {
-        let readers = std::mem::take(&mut self.readers);
-        for (_, reader) in readers {
-            reader.close().await;
-        }
-    }
-
-    fn close_all(&mut self) {
-        for (_, reader) in std::mem::take(&mut self.readers) {
-            reader.cancel.cancel();
-            reader.handle.abort();
-        }
-    }
-}
-
-struct Reader {
-    handle: JoinHandle<()>,
-    cancel: CancellationToken,
-}
-
-impl Reader {
-    /// Ask the reader to send a close frame and wait briefly for it.
-    async fn close(self) {
-        self.cancel.cancel();
-        let _ = timeout(GRACEFUL_CLOSE, self.handle).await;
-    }
-}
-
-impl Drop for Link {
-    fn drop(&mut self) {
-        // Readers hold the connection; without this they would linger until the
-        // channel closes or the keepalive deadline expires.
-        self.close_all();
-    }
-}
-
-async fn process_requests(
-    config: Arc<Config>,
-    store: Store,
-    providers: Providers,
-    mut queue: mpsc::Receiver<(Message, Beatmap)>,
-    echoes: mpsc::Sender<Echo>,
-    shutdown: CancellationToken,
-    clock: Clock,
-) {
-    loop {
-        let (message, beatmap) = tokio::select! { _ = shutdown.cancelled() => return, message = queue.recv() => match message { Some(message) => message, None => return } };
-        // Do not cancel this future midway through bookkeeping: the provider
-        // records a possibly transmitted PM as uncertain on cancellation.
-        if let Err(error) = process_one(
-            &config, &store, &providers, &echoes, &message, &beatmap, clock,
-        )
-        .await
-        {
-            tracing::error!(channel = %message.channel, message_id = %message.id, error = %error, "request processing failed");
-        }
     }
 }
 

@@ -60,7 +60,7 @@ enum Command {
     GenerateTokenKey,
 }
 
-#[tokio::main(worker_threads = 2)]
+#[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt()

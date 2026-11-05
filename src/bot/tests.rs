@@ -1,10 +1,12 @@
+use super::conduit::Subscriptions;
+use super::eventsub::{Connection, Incoming};
 use super::*;
 use axum::{
     Router,
     extract::{Form, Query, RawQuery, State},
     routing::{get, patch, post},
 };
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -15,7 +17,13 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
 };
-use tokio_tungstenite::{WebSocketStream, tungstenite::Message as WsMessage};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        Message as WsMessage,
+        handshake::server::{Callback, ErrorResponse, Request, Response},
+    },
+};
 
 fn request_message() -> Message {
     Message {
@@ -179,29 +187,6 @@ async fn delivery_uniqueness_and_crash_state_are_durable() {
         .unwrap();
 }
 
-#[tokio::test]
-async fn pending_lookups_are_debounced_bounded_and_backed_off() {
-    let mut pending = Pending::default();
-    pending.schedule(1);
-    pending.schedule(2);
-    assert!(pending.take_due(Instant::now()).is_empty());
-    let due = pending.take_due(Instant::now() + TARGET_DEBOUNCE + Duration::from_millis(10));
-    assert_eq!(due, vec![(1, 0), (2, 0)]);
-    pending.retry(1, 0);
-    pending.cancel(2);
-    let deadline = pending.next_deadline().expect("a retry remains scheduled");
-    assert!(
-        deadline > Instant::now(),
-        "a retry is never due immediately"
-    );
-    assert!(pending.take_due(Instant::now()).is_empty());
-    assert_eq!(
-        pending.take_due(Instant::now() + Duration::from_secs(2)),
-        vec![(1, 1)]
-    );
-    assert!(pending.next_deadline().is_none());
-}
-
 fn welcome_json(session: &str, keepalive: u64) -> String {
     serde_json::json!({
         "metadata": {"message_id": "welcome", "message_type": "session_welcome", "message_timestamp": "2024-01-01T00:00:00.000000001Z"},
@@ -351,81 +336,7 @@ async fn keepalive_deadline_fires_without_protocol_traffic() {
     server.abort();
 }
 
-#[tokio::test]
-async fn handoff_keeps_the_old_connection_until_the_new_session_is_welcomed() {
-    let (old_url, old_server) = ws_server(move |mut socket| async move {
-        socket
-            .send(WsMessage::text(welcome_json("old", 10)))
-            .await
-            .unwrap();
-        for index in 0..40 {
-            let _ = socket
-                .send(WsMessage::text(notification_json(
-                    &format!("old-{index}"),
-                    "https://osu.ppy.sh/b/42",
-                    "conduit-1",
-                )))
-                .await;
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    });
-    let (new_url, new_server) = ws_server(move |mut socket| async move {
-        socket
-            .send(WsMessage::text(welcome_json("new", 10)))
-            .await
-            .unwrap();
-        socket
-            .send(WsMessage::text(notification_json(
-                "new-1",
-                "https://osu.ppy.sh/b/42",
-                "conduit-1",
-            )))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    });
-    let token = CancellationToken::new();
-    let mut link = Link::new();
-    let old_generation = link.open(&old_url, &token).await.unwrap();
-    link.current = old_generation;
-    let welcome = link.welcome(old_generation).await.unwrap();
-    assert_eq!(welcome.session_id, "old");
-    // Events from the old connection keep flowing while the replacement opens.
-    loop {
-        let (generation, incoming) = link.rx.recv().await.unwrap();
-        if generation == old_generation && matches!(incoming, Incoming::Notification { .. }) {
-            break;
-        }
-    }
-    let new_generation = link.open(&new_url, &token).await.unwrap();
-    link.pending = Some(new_generation);
-    let welcome = loop {
-        let (generation, incoming) = link.rx.recv().await.unwrap();
-        if generation == new_generation
-            && let Incoming::Welcome(welcome) = incoming
-        {
-            break welcome;
-        }
-    };
-    assert_eq!(welcome.session_id, "new");
-    link.complete(new_generation).await;
-    assert_eq!(link.current, new_generation);
-    assert!(!link.readers.contains_key(&old_generation));
-    loop {
-        let (generation, incoming) = tokio::time::timeout(Duration::from_secs(2), link.rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if generation == new_generation && matches!(incoming, Incoming::Notification { .. }) {
-            break;
-        }
-    }
-    link.shutdown().await;
-    old_server.abort();
-    new_server.abort();
-}
-
-async fn seed_user(store: &Store, twitch_id: i64, login: &str) {
+pub(super) async fn seed_user(store: &Store, twitch_id: i64, login: &str) {
     let user: User = serde_json::from_value(json!({
         "osuId": 1,
         "osuUsername": "a",
@@ -468,18 +379,28 @@ async fn grant_and_go_live(store: &Store, twitch_id: i64, login: &str) {
 }
 
 #[derive(Default)]
-struct Helix {
+pub(super) struct Helix {
     conduit_posts: AtomicUsize,
-    creates: AtomicUsize,
-    deletes: AtomicUsize,
+    pub(super) creates: AtomicUsize,
+    pub(super) deletes: AtomicUsize,
+    pub(super) list_calls: AtomicUsize,
+    pub(super) seeded: StdMutex<Option<Vec<Value>>>,
     deleted: StdMutex<Vec<String>>,
     shard_ok: AtomicBool,
-    stream_mode: AtomicU8,
-    stream_calls: AtomicUsize,
+    wrong_shard: AtomicBool,
+    shard_count: AtomicUsize,
+    resizes: StdMutex<Vec<u32>>,
+    attachments: StdMutex<Vec<(u32, String)>>,
+    shard_delays: StdMutex<HashMap<u32, Duration>>,
+    shard_failures: StdMutex<HashMap<u32, usize>>,
+    pub(super) stream_mode: AtomicU8,
+    pub(super) stream_calls: AtomicUsize,
     last_stream_query: StdMutex<String>,
+    hold_streams: AtomicBool,
+    release_streams: tokio::sync::Notify,
 }
 
-fn mock_config(address: SocketAddr) -> Arc<Config> {
+pub(super) fn mock_config(address: SocketAddr) -> Arc<Config> {
     let mut config = Config::from_env().unwrap();
     config.twitch_client_id = "client".into();
     config.twitch_client_secret = "secret".into();
@@ -489,13 +410,26 @@ fn mock_config(address: SocketAddr) -> Arc<Config> {
     Arc::new(config)
 }
 
-async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>) {
+pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>) {
     async fn token(Form(body): Form<HashMap<String, String>>) -> axum::Json<Value> {
         assert_eq!(body["grant_type"], "client_credentials");
         axum::Json(json!({"access_token":"app-token","expires_in":3600}))
     }
-    async fn conduits(State(_): State<Arc<Helix>>) -> axum::Json<Value> {
-        axum::Json(json!({"data":[{"id":"conduit-1","shard_count":1}],"pagination":{}}))
+    async fn conduits(State(state): State<Arc<Helix>>) -> axum::Json<Value> {
+        axum::Json(
+            json!({"data":[{"id":"conduit-1","shard_count":state.shard_count.load(Ordering::SeqCst)}],"pagination":{}}),
+        )
+    }
+    async fn resize_conduit(
+        State(state): State<Arc<Helix>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        assert_eq!(body["id"], "conduit-1");
+        let count = body["shard_count"].as_u64().unwrap() as u32;
+        assert!(count > 0);
+        state.shard_count.store(count as usize, Ordering::SeqCst);
+        state.resizes.lock().unwrap().push(count);
+        axum::Json(json!({"data":[{"id":"conduit-1","shard_count":count}]}))
     }
     async fn create_conduit(State(state): State<Arc<Helix>>) -> axum::Json<Value> {
         state.conduit_posts.fetch_add(1, Ordering::SeqCst);
@@ -510,18 +444,54 @@ async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>)
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(body["shards"][0]["id"], "0");
-        if state.shard_ok.load(Ordering::SeqCst) {
+        let shard = body["shards"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        assert!((shard as usize) < state.shard_count.load(Ordering::SeqCst));
+        let returned_shard = if state.wrong_shard.load(Ordering::SeqCst) {
+            (shard + 1).to_string()
+        } else {
+            shard.to_string()
+        };
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .push((shard, session.clone()));
+        let delay = state.shard_delays.lock().unwrap().get(&shard).copied();
+        if let Some(delay) = delay {
+            sleep(delay).await;
+        }
+        let fail_once = state
+            .shard_failures
+            .lock()
+            .unwrap()
+            .get_mut(&shard)
+            .is_some_and(|remaining| {
+                if *remaining == 0 {
+                    false
+                } else {
+                    *remaining -= 1;
+                    true
+                }
+            });
+        if state.shard_ok.load(Ordering::SeqCst) && !fail_once {
             axum::Json(
-                json!({"data":[{"id":"0","status":"enabled","transport":{"method":"websocket","session_id":session}}]}),
+                json!({"data":[{"id":returned_shard,"status":"enabled","transport":{"method":"websocket","session_id":session}}]}),
             )
         } else {
             axum::Json(
-                json!({"data":[{"id":"0","status":"websocket_disconnected","errors":[{"code":"websocket_disconnected"}]}]}),
+                json!({"data":[{"id":returned_shard,"status":"websocket_disconnected","errors":[{"code":"websocket_disconnected"}]}]}),
             )
         }
     }
-    async fn list_subscriptions(State(_): State<Arc<Helix>>) -> axum::Json<Value> {
+    async fn list_subscriptions(State(state): State<Arc<Helix>>) -> axum::Json<Value> {
+        state.list_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(rows) = state.seeded.lock().unwrap().clone() {
+            return axum::Json(json!({"data": rows, "pagination": {}}));
+        }
         axum::Json(json!({
             "data": [
                 {"id":"obsolete","status":"enabled","type":"stream.online","version":"1","condition":{"broadcaster_user_id":"999"},"transport":{"method":"conduit","conduit_id":"conduit-1"}},
@@ -562,6 +532,9 @@ async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>)
     ) -> axum::Json<Value> {
         state.stream_calls.fetch_add(1, Ordering::SeqCst);
         *state.last_stream_query.lock().unwrap() = query.unwrap_or_default();
+        if state.hold_streams.load(Ordering::SeqCst) {
+            state.release_streams.notified().await;
+        }
         if state.stream_mode.load(Ordering::SeqCst) == 0 {
             axum::Json(
                 json!({"data":[{"user_id":"1","user_login":"streamer","game_id":"21465"}],"pagination":{}}),
@@ -573,11 +546,12 @@ async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>)
 
     let state = Arc::new(Helix::default());
     state.shard_ok.store(true, Ordering::SeqCst);
+    state.shard_count.store(1, Ordering::SeqCst);
     let router = Router::new()
         .route("/oauth/token", post(token))
         .route(
             "/helix/eventsub/conduits",
-            get(conduits).post(create_conduit),
+            get(conduits).post(create_conduit).patch(resize_conduit),
         )
         .route("/helix/eventsub/conduits/shards", patch(update_shards))
         .route(
@@ -618,17 +592,49 @@ async fn conduit_is_reused_persisted_and_shard_errors_are_rejected() {
     );
     assert_eq!(state.conduit_posts.load(Ordering::SeqCst), 0);
 
-    super::conduit::attach(&providers, "conduit-1", "session-A")
+    assert_eq!(conduit.shard_count, 1);
+    super::conduit::resize(&providers, "conduit-1", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        super::conduit::observe(&providers, "conduit-1")
+            .await
+            .unwrap()
+            .shard_count,
+        3
+    );
+    assert_eq!(*state.resizes.lock().unwrap(), vec![3]);
+    super::conduit::attach(&providers, "conduit-1", 2, "session-A")
         .await
         .unwrap();
     state.shard_ok.store(false, Ordering::SeqCst);
     assert!(
-        super::conduit::attach(&providers, "conduit-1", "session-B")
+        super::conduit::attach(&providers, "conduit-1", 1, "session-B")
             .await
             .is_err(),
         "a shard that is not enabled must not be treated as attached"
     );
     state.shard_ok.store(true, Ordering::SeqCst);
+    state.wrong_shard.store(true, Ordering::SeqCst);
+    assert!(
+        super::conduit::attach(&providers, "conduit-1", 2, "session-C")
+            .await
+            .is_err(),
+        "an enabled response for a different shard must not acknowledge this attachment"
+    );
+    state.wrong_shard.store(false, Ordering::SeqCst);
+    super::conduit::attach(&providers, "conduit-1", 1, "session-D")
+        .await
+        .unwrap();
+    assert_eq!(
+        *state.attachments.lock().unwrap(),
+        vec![
+            (2, "session-A".into()),
+            (1, "session-B".into()),
+            (2, "session-C".into()),
+            (1, "session-D".into())
+        ]
+    );
     server.abort();
 }
 
@@ -641,8 +647,11 @@ async fn subscription_reconcile_only_touches_owned_rows() {
     let mut subs = Subscriptions::new("conduit-1".into(), "bot".into());
     assert_eq!(subs.refresh_remote(&providers, &token).await.unwrap(), 3);
     assert!(subs.is_warm());
-    let desired = conduit::desired(&[1], "bot");
-    let summary = subs.reconcile(&providers, &desired, &token).await.unwrap();
+    let desired = conduit::desired(&[1], "bot").unwrap();
+    let summary = subs
+        .reconcile(&providers, &desired, true, &token)
+        .await
+        .unwrap();
     assert_eq!(summary.kept, 1, "the matching chat subscription is reused");
     assert_eq!(
         summary.removed, 2,
@@ -658,6 +667,68 @@ async fn subscription_reconcile_only_touches_owned_rows() {
     assert!(deleted.contains(&"obsolete".to_owned()));
     assert!(deleted.contains(&"wrong-bot".to_owned()));
     assert!(!deleted.contains(&"foreign".to_owned()));
+    server.abort();
+}
+
+#[tokio::test]
+async fn incomplete_topology_defers_creations_but_still_lists_and_removes_owned_rows() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let providers = Providers::new(config, CancellationToken::new()).unwrap();
+    let token = CancellationToken::new();
+    let mut subs = Subscriptions::new("conduit-1".into(), "bot".into());
+    let desired = conduit::desired(&[1], "bot").unwrap();
+    assert!(!subs.is_warm());
+    let summary = subs
+        .reconcile(&providers, &desired, false, &token)
+        .await
+        .unwrap();
+    assert!(
+        subs.is_warm(),
+        "an incomplete topology must not block the remote cache refresh"
+    );
+    assert_eq!(
+        summary.kept, 1,
+        "the matching chat subscription is retained"
+    );
+    assert_eq!(
+        summary.removed, 2,
+        "obsolete and wrong-bot owned rows must still be deleted"
+    );
+    assert_eq!(summary.created, 0);
+    assert_eq!(
+        summary.deferred, 3,
+        "only missing desired subscriptions await attachment"
+    );
+    assert_eq!(
+        state.creates.load(Ordering::SeqCst),
+        0,
+        "the closed creation gate must send no subscription POSTs"
+    );
+    assert_eq!(state.deletes.load(Ordering::SeqCst), 2);
+    let mut deleted = state.deleted.lock().unwrap().clone();
+    deleted.sort();
+    assert_eq!(
+        deleted,
+        vec!["obsolete", "wrong-bot"],
+        "foreign conduit subscriptions must remain untouched"
+    );
+
+    let summary = subs
+        .reconcile(&providers, &desired, true, &token)
+        .await
+        .unwrap();
+    assert_eq!(
+        summary.created, 3,
+        "opening the gate resumes the deferred creations"
+    );
+    assert_eq!(summary.deferred, 0);
+    assert_eq!(state.creates.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        state.deletes.load(Ordering::SeqCst),
+        2,
+        "cache retention avoids repeating the deletions"
+    );
     server.abort();
 }
 
@@ -695,49 +766,57 @@ async fn hybrid_snapshots_see_offline_states_and_never_filter_by_category() {
     server.abort();
 }
 
+fn maintenance_for_test(
+    config: Arc<Config>,
+    store: Store,
+    providers: Providers,
+) -> (
+    super::maintenance::Maintenance,
+    watch::Receiver<u32>,
+    mpsc::Sender<super::maintenance::Action>,
+) {
+    let (_, signals) = watch::channel(super::maintenance::Signal::default());
+    let (action_tx, actions) = super::maintenance::actions();
+    let (targets, target_rx) = watch::channel(1);
+    let (_, topology) = watch::channel(super::shards::Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    let channels = store.channel_changes();
+    (
+        super::maintenance::Maintenance::new(
+            config,
+            store,
+            providers,
+            "conduit-1".into(),
+            "bot".into(),
+            super::maintenance::Channels {
+                membership: channels,
+                signals,
+                actions,
+                targets,
+                topology,
+            },
+        ),
+        target_rx,
+        action_tx,
+    )
+}
+
 async fn assert_existing_channel_grant_refresh(grace_secs: u64) {
     let (state, address, server) = helix_server().await;
-    let (url, websocket) = ws_server(|mut socket| async move {
-        socket
-            .send(WsMessage::text(welcome_json("membership", 60)))
-            .await
-            .unwrap();
-        pending::<()>().await;
-    });
-    let mut config = mock_config(address);
-    let settings = Arc::get_mut(&mut config).unwrap();
-    settings.twitch_eventsub_url = url;
-    settings.twitch_token_key = Some([7; 32]);
+    let config = mock_config(address);
     let store = Store::open(":memory:").await.unwrap();
     seed_user(&store, 1, "streamer").await;
-    store
-        .call(|db| {
-            db.execute("INSERT INTO twitch_conduit(singleton,client_id,conduit_id,updated_at) VALUES(1,'client','conduit-1',0)", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let shutdown = CancellationToken::new();
-    let providers = Providers::new(config.clone(), shutdown.clone()).unwrap();
-    let auth = TwitchAuth::new(config.clone(), store.clone()).unwrap();
-    let (requests, _receiver) = mpsc::channel(4);
-    let mut runtime = Runtime::new(
-        &config,
-        &store,
-        &providers,
-        &auth,
-        BotIdentity {
-            user_id: "bot".into(),
-            login: "bot".into(),
-        },
-        requests,
-    )
-    .await
-    .unwrap();
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (mut maintenance, _targets, _actions) =
+        maintenance_for_test(config, store.clone(), providers.clone());
     // Startup already knows the enabled, ungranted imported/legacy account.
     // Its initial snapshot is offline; Twitch goes live without a state event.
     state.stream_mode.store(1, Ordering::SeqCst);
-    let mut link = runtime.prepare(&shutdown).await.unwrap();
+    maintenance.refresh_membership().await.unwrap();
+    maintenance.run_pending().await.unwrap();
+    super::streams::full(&store, &providers).await.unwrap();
     assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
     let initial_calls = state.stream_calls.load(Ordering::SeqCst);
     state.stream_mode.store(0, Ordering::SeqCst);
@@ -758,13 +837,15 @@ async fn assert_existing_channel_grant_refresh(grace_secs: u64) {
             .set_settings(1, crate::domain::Settings::default())
             .await
             .unwrap();
-        runtime.refresh_membership(&shutdown).await;
+        maintenance.refresh_membership().await.unwrap();
+        maintenance.run_pending().await.unwrap();
         assert_eq!(state.stream_calls.load(Ordering::SeqCst), initial_calls);
         assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
         sleep(Duration::from_secs(grace_secs)).await;
     }
     store.notify_channels_changed();
-    runtime.refresh_membership(&shutdown).await;
+    maintenance.refresh_membership().await.unwrap();
+    maintenance.run_pending().await.unwrap();
     assert_eq!(
         state.stream_calls.load(Ordering::SeqCst),
         initial_calls + 1,
@@ -783,15 +864,15 @@ async fn assert_existing_channel_grant_refresh(grace_secs: u64) {
         ..Default::default()
     };
     store.set_settings(1, settings).await.unwrap();
-    runtime.refresh_membership(&shutdown).await;
-    runtime.refresh_membership(&shutdown).await;
+    maintenance.refresh_membership().await.unwrap();
+    maintenance.run_pending().await.unwrap();
+    maintenance.refresh_membership().await.unwrap();
+    maintenance.run_pending().await.unwrap();
     assert_eq!(
         state.stream_calls.load(Ordering::SeqCst),
         initial_calls + 1,
         "unrelated settings/state notifications must not repeatedly poll Helix"
     );
-    websocket.abort();
-    link.shutdown().await;
     server.abort();
 }
 
@@ -803,6 +884,68 @@ async fn membership_refreshes_existing_enabled_channel_on_grant_activation() {
 #[tokio::test]
 async fn membership_refreshes_existing_enabled_channel_after_grant_grace() {
     assert_existing_channel_grant_refresh(1).await;
+}
+
+#[tokio::test]
+async fn failed_membership_reads_preserve_the_grant_activation_edge() {
+    for failed_table in ["users", "twitch_channel_grants"] {
+        let (state, address, server) = helix_server().await;
+        let config = mock_config(address);
+        let store = Store::open(":memory:").await.unwrap();
+        seed_user(&store, 1, "streamer").await;
+        let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+        let (mut maintenance, _targets, _actions) =
+            maintenance_for_test(config, store.clone(), providers.clone());
+        state.stream_mode.store(1, Ordering::SeqCst);
+        maintenance.refresh_membership().await.unwrap();
+        maintenance.run_pending().await.unwrap();
+        super::streams::full(&store, &providers).await.unwrap();
+        let initial_calls = state.stream_calls.load(Ordering::SeqCst);
+        state.stream_mode.store(0, Ordering::SeqCst);
+        store.call(|db| {
+            db.execute("INSERT INTO twitch_channel_grants(twitch_id,granted_at,active_at,status) VALUES(1,0,0,'granted')", [])?;
+            Ok(())
+        }).await.unwrap();
+        store
+            .call(move |db| {
+                db.execute_batch(&format!(
+                    "ALTER TABLE {failed_table} RENAME TO unavailable_membership"
+                ))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            maintenance.refresh_membership().await.is_err(),
+            "the {failed_table} read must fail before advancing either known set"
+        );
+        assert_eq!(state.stream_calls.load(Ordering::SeqCst), initial_calls);
+        store
+            .call(move |db| {
+                db.execute_batch(&format!(
+                    "ALTER TABLE unavailable_membership RENAME TO {failed_table}"
+                ))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        maintenance.refresh_membership().await.unwrap();
+        maintenance.run_pending().await.unwrap();
+        assert_eq!(
+            state.stream_calls.load(Ordering::SeqCst),
+            initial_calls + 1,
+            "recovering the {failed_table} read must retain the grant activation lookup"
+        );
+        assert_eq!(
+            *state.last_stream_query.lock().unwrap(),
+            "first=100&user_id=1"
+        );
+        assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+        maintenance.refresh_membership().await.unwrap();
+        maintenance.run_pending().await.unwrap();
+        assert_eq!(state.stream_calls.load(Ordering::SeqCst), initial_calls + 1);
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -943,6 +1086,23 @@ async fn test_mode_receipts_do_not_consume_production_cooldowns_and_dryrun_never
     .await
     .unwrap();
     assert_eq!(sends.load(Ordering::SeqCst), 2);
+    production.id = "production-within-cooldown".into();
+    process_one(
+        &config,
+        &store,
+        &providers,
+        &echoes,
+        &production,
+        &beatmap,
+        clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sends.load(Ordering::SeqCst),
+        2,
+        "the successful production transaction must gate the next same-requester request"
+    );
     store
         .call(|db| {
             assert_eq!(
@@ -1084,4 +1244,862 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
         .await
         .unwrap();
     server.abort();
+}
+
+struct RecordSocketPath(Arc<StdMutex<Vec<String>>>);
+
+impl Callback for RecordSocketPath {
+    fn on_request(
+        self,
+        request: &Request,
+        response: Response,
+    ) -> std::result::Result<Response, ErrorResponse> {
+        self.0.lock().unwrap().push(request.uri().to_string());
+        Ok(response)
+    }
+}
+
+struct PoolSockets {
+    url: String,
+    commands: Arc<StdMutex<HashMap<String, mpsc::Sender<WsMessage>>>>,
+    paths: Arc<StdMutex<Vec<String>>>,
+    accepted: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
+    stop: CancellationToken,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl PoolSockets {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let commands = Arc::new(StdMutex::new(HashMap::new()));
+        let paths = Arc::new(StdMutex::new(Vec::new()));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicUsize::new(0));
+        let stop = CancellationToken::new();
+        let (all_commands, all_accepted, all_closed, stopped) = (
+            commands.clone(),
+            accepted.clone(),
+            closed.clone(),
+            stop.clone(),
+        );
+        let all_paths = paths.clone();
+        let server = tokio::spawn(async move {
+            let mut sockets = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = stopped.cancelled() => break,
+                    result = listener.accept() => {
+                        let (stream, _) = result.unwrap();
+                        let (commands, accepted, closed) =
+                            (all_commands.clone(), all_accepted.clone(), all_closed.clone());
+                        let paths = all_paths.clone();
+                        sockets.spawn(async move {
+                            let handshake = tokio_tungstenite::accept_hdr_async(
+                                stream,
+                                RecordSocketPath(paths),
+                            );
+                            let mut socket = match handshake.await {
+                                Ok(socket) => socket,
+                                // Pool cancellation may release an attempt permit
+                                // while another queued attempt is opening its socket.
+                                // Its TCP connection can close before the upgrade.
+                                Err(tokio_tungstenite::tungstenite::Error::Protocol(
+                                    tokio_tungstenite::tungstenite::error::ProtocolError::HandshakeIncomplete,
+                                )) => return,
+                                Err(error) => panic!("unexpected fixture handshake failure: {error}"),
+                            };
+                            let session = format!("pool-{}", accepted.fetch_add(1, Ordering::SeqCst));
+                            let (tx, mut rx) = mpsc::channel::<WsMessage>(16);
+                            commands.lock().unwrap().insert(session.clone(), tx);
+                            socket.send(WsMessage::text(welcome_json(&session, 60))).await.unwrap();
+                            loop {
+                                tokio::select! {
+                                    command = rx.recv() => {
+                                        let Some(command) = command else { break; };
+                                        if socket.send(command).await.is_err() { break; }
+                                    }
+                                    frame = socket.next() => match frame {
+                                        Some(Ok(WsMessage::Close(_))) => {
+                                            let _ = socket.flush().await;
+                                            break;
+                                        }
+                                        Some(Ok(_)) => {}
+                                        _ => break,
+                                    }
+                                }
+                            }
+                            commands.lock().unwrap().remove(&session);
+                            closed.fetch_add(1, Ordering::SeqCst);
+                        });
+                    }
+                    result = sockets.join_next(), if !sockets.is_empty() => {
+                        result.unwrap().unwrap();
+                    }
+                }
+            }
+            while let Some(result) = sockets.join_next().await {
+                result.unwrap();
+            }
+        });
+        Self {
+            url,
+            commands,
+            paths,
+            accepted,
+            closed,
+            stop,
+            server,
+        }
+    }
+
+    async fn send(&self, session: &str, message: WsMessage) {
+        let command = self.commands.lock().unwrap().get(session).unwrap().clone();
+        command.send(message).await.unwrap();
+    }
+
+    async fn finish(self) {
+        eventually(|| self.closed.load(Ordering::SeqCst) == self.accepted.load(Ordering::SeqCst))
+            .await;
+        assert!(
+            self.commands.lock().unwrap().is_empty(),
+            "all reader sockets must close"
+        );
+        self.stop.cancel();
+        tokio::time::timeout(Duration::from_secs(3), self.server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+async fn eventually(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !condition() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture condition did not converge");
+}
+
+fn start_test_pool(
+    address: SocketAddr,
+    sockets: &PoolSockets,
+    remote_count: u32,
+    cap: u32,
+) -> (super::shards::Pool, watch::Sender<u32>) {
+    let mut config = mock_config(address);
+    let settings = Arc::get_mut(&mut config).unwrap();
+    settings.twitch_eventsub_url = sockets.url.clone();
+    settings.eventsub_max_shards = cap;
+    settings.http_timeout_secs = 30;
+    let shutdown = CancellationToken::new();
+    let providers = Providers::new(config.clone(), shutdown.clone()).unwrap();
+    let (target, targets) = watch::channel(remote_count);
+    let pool = super::shards::Pool::start(
+        config,
+        providers,
+        conduit::Conduit {
+            id: "conduit-1".into(),
+            shard_count: remote_count,
+        },
+        targets,
+        shutdown,
+    );
+    (pool, target)
+}
+
+#[tokio::test]
+async fn persisted_shards_above_the_growth_cap_recover_without_resetting_healthy_peers() {
+    let (state, address, helix) = helix_server().await;
+    state.shard_count.store(2, Ordering::SeqCst);
+    let sockets = PoolSockets::start().await;
+    let (mut pool, _target) = start_test_pool(address, &sockets, 2, 1);
+    eventually(|| pool.topology.borrow().attached_count == 2).await;
+    assert_eq!(pool.topology.borrow().remote_count, 2);
+    assert!(
+        state.resizes.lock().unwrap().is_empty(),
+        "configured cap mismatch must not shrink or replace the conduit"
+    );
+    let attached = state.attachments.lock().unwrap().clone();
+    let failed = attached.iter().find(|(id, _)| *id == 0).unwrap().1.clone();
+    let healthy = attached.iter().find(|(id, _)| *id == 1).unwrap().1.clone();
+    sockets.send(&failed, WsMessage::Close(None)).await;
+    sockets
+        .send(
+            &healthy,
+            WsMessage::text(notification_json(
+                "healthy-before-recovery",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        event.shard_id, 1,
+        "the healthy peer must keep dispatching during recovery"
+    );
+    assert!(matches!(event.incoming, Incoming::Notification { .. }));
+    eventually(|| {
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == 0)
+            .count()
+            >= 2
+    })
+    .await;
+    eventually(|| pool.topology.borrow().attached_count == 2).await;
+    assert_eq!(
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == 1)
+            .count(),
+        1
+    );
+    assert!(state.resizes.lock().unwrap().is_empty());
+    pool.shutdown().await;
+    sockets.finish().await;
+    helix.abort();
+}
+
+#[tokio::test]
+async fn one_shards_attach_deadline_does_not_delay_or_disconnect_its_peer() {
+    let (state, address, helix) = helix_server().await;
+    state.shard_count.store(2, Ordering::SeqCst);
+    state
+        .shard_delays
+        .lock()
+        .unwrap()
+        .insert(0, Duration::from_secs(12));
+    let sockets = PoolSockets::start().await;
+    let (mut pool, _target) = start_test_pool(address, &sockets, 2, 2);
+    eventually(|| pool.topology.borrow().attached_count == 1).await;
+    let healthy = state
+        .attachments
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| *id == 1)
+        .unwrap()
+        .1
+        .clone();
+    sockets
+        .send(
+            &healthy,
+            WsMessage::text(notification_json(
+                "during-attach",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.shard_id, 1);
+    // The first shard's nine-second welcome budget must expire before the
+    // fixture's twelve-second HTTP response; the peer remains attached.
+    tokio::time::timeout(Duration::from_secs(11), async {
+        while sockets.closed.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the independent attach deadline did not close its timed-out socket");
+    assert_eq!(pool.topology.borrow().attached_count, 1);
+    sockets
+        .send(
+            &healthy,
+            WsMessage::text(notification_json(
+                "after-attach-timeout",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.shard_id, 1);
+    state.shard_delays.lock().unwrap().clear();
+    eventually(|| pool.topology.borrow().attached_count == 2).await;
+    assert_eq!(
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == 1)
+            .count(),
+        1
+    );
+    pool.shutdown().await;
+    sockets.finish().await;
+    helix.abort();
+}
+
+#[tokio::test]
+async fn persisted_shard_startup_limits_connection_attempts_to_four() {
+    let (state, address, helix) = helix_server().await;
+    state.shard_count.store(8, Ordering::SeqCst);
+    for id in 0..8 {
+        state
+            .shard_delays
+            .lock()
+            .unwrap()
+            .insert(id, Duration::from_secs(30));
+    }
+    let sockets = PoolSockets::start().await;
+    let (pool, _target) = start_test_pool(address, &sockets, 8, 8);
+    eventually(|| state.attachments.lock().unwrap().len() == 4).await;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        sockets.accepted.load(Ordering::SeqCst),
+        4,
+        "waiting welcome/attach attempts must share the four-connection budget"
+    );
+    assert_eq!(pool.topology.borrow().attached_count, 0);
+    pool.shutdown().await;
+    sockets.finish().await;
+    helix.abort();
+}
+
+#[tokio::test]
+async fn a_remote_conduit_above_the_hard_bound_is_left_untouched() {
+    let (state, address, helix) = helix_server().await;
+    state.shard_count.store(65, Ordering::SeqCst);
+    let sockets = PoolSockets::start().await;
+    let (pool, target) = start_test_pool(address, &sockets, 65, 16);
+    target.send_replace(16);
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        *pool.topology.borrow(),
+        super::shards::Topology {
+            remote_count: 65,
+            attached_count: 0
+        }
+    );
+    assert_eq!(sockets.accepted.load(Ordering::SeqCst), 0);
+    assert!(state.attachments.lock().unwrap().is_empty());
+    assert!(state.resizes.lock().unwrap().is_empty());
+    assert_eq!(state.conduit_posts.load(Ordering::SeqCst), 0);
+    pool.shutdown().await;
+    sockets.finish().await;
+    helix.abort();
+}
+
+#[tokio::test]
+async fn stale_online_actions_do_not_reactivate_after_a_dropped_offline_cancel() {
+    let (state, address, helix) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let revision = store.snapshot_versions(vec![1]).await.unwrap()[0].1;
+    let (mut maintenance, _targets, actions) =
+        maintenance_for_test(config, store.clone(), providers.clone());
+    for _ in 0..1024 {
+        assert!(
+            actions
+                .try_send(super::maintenance::Action::Schedule {
+                    id: 1,
+                    expected_revision: revision,
+                })
+                .is_ok()
+        );
+    }
+    store
+        .apply_stream_event(1, "streamer".into(), StreamEvent::Offline, 3_000)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            actions.try_send(super::maintenance::Action::Cancel { id: 1 }),
+            Err(mpsc::error::TrySendError::Full(_))
+        ),
+        "the bounded action queue must be full so cancellation cannot be delivered"
+    );
+    maintenance.run_pending().await.unwrap();
+    sleep(Duration::from_millis(350)).await;
+    maintenance.run_pending().await.unwrap();
+    assert_eq!(
+        state.stream_calls.load(Ordering::SeqCst),
+        0,
+        "a stale event revision must be discarded before HTTP"
+    );
+    let expected = [(1, revision)].into_iter().collect();
+    assert!(
+        super::streams::targeted_at(&store, &providers, &expected)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(state.stream_calls.load(Ordering::SeqCst), 0);
+    assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    helix.abort();
+}
+
+#[tokio::test]
+async fn late_targeted_http_results_cannot_overwrite_a_newer_offline_event() {
+    let (state, address, helix) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    let providers = Providers::new(config, CancellationToken::new()).unwrap();
+    let expected = store
+        .snapshot_versions(vec![1])
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    state.hold_streams.store(true, Ordering::SeqCst);
+    let lookup_store = store.clone();
+    let lookup = tokio::spawn(async move {
+        super::streams::targeted_at(&lookup_store, &providers, &expected).await
+    });
+    eventually(|| state.stream_calls.load(Ordering::SeqCst) == 1).await;
+    store
+        .apply_stream_event(1, "streamer".into(), StreamEvent::Offline, 3_000)
+        .await
+        .unwrap();
+    state.hold_streams.store(false, Ordering::SeqCst);
+    state.release_streams.notify_one();
+    assert_eq!(lookup.await.unwrap().unwrap(), vec![1]);
+    assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    helix.abort();
+}
+
+async fn delivery_fixture(
+    status: axum::http::StatusCode,
+) -> (
+    Config,
+    Store,
+    Providers,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let sends = Arc::new(AtomicUsize::new(0));
+    let observed = sends.clone();
+    let router = Router::new()
+        .route(
+            "/oauth/token",
+            post(|| async { axum::Json(json!({"access_token":"delegate","expires_in":3600})) }),
+        )
+        .route(
+            "/api/v2/chat/new",
+            post(move || {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    (status, axum::Json(json!({"message_id": 1})))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut config = Config::from_env().unwrap();
+    config.dry_run = false;
+    config.osu_client_id = "test".into();
+    config.osu_client_secret = "test".into();
+    config.osu_oauth_base = format!("http://{address}/oauth");
+    config.osu_api_base = format!("http://{address}/api/v2");
+    let providers = Providers::new(Arc::new(config.clone()), CancellationToken::new()).unwrap();
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    store
+        .cache_put(json!({
+            "id":42,"beatmapset_id":7,"version":"Hard","status":"ranked","bpm":180,
+            "difficulty_rating":5.0,"hit_length":125,
+            "beatmapset":{"id":7,"artist":"Artist","title":"Title"}
+        }))
+        .await
+        .unwrap();
+    (config, store, providers, sends, server)
+}
+
+#[tokio::test]
+async fn failed_or_ambiguous_deliveries_never_replay_or_consume_success_bookkeeping() {
+    for (response, expected_status) in [
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "uncertain"),
+        (axum::http::StatusCode::BAD_REQUEST, "failed"),
+    ] {
+        let (config, store, providers, sends, server) = delivery_fixture(response).await;
+        let (echoes, _echo_rx) = mpsc::channel(4);
+        let beatmap = Beatmap {
+            id: 42,
+            kind: BeatmapKind::Map,
+            mods: String::new(),
+        };
+        let message = request_message();
+        let clock = Clock::new();
+        assert!(
+            process_one(
+                &config, &store, &providers, &echoes, &message, &beatmap, clock
+            )
+            .await
+            .is_err()
+        );
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "a possibly transmitted request must not replay"
+        );
+        store
+            .call(move |db| {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT status FROM deliveries WHERE twitch_message_id='evt-1'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                    expected_status
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM request_cooldowns", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn success_bookkeeping_is_atomic_when_the_cooldown_write_fails() {
+    let (config, store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    store.call(|db| {
+        db.execute_batch("CREATE TRIGGER fail_cooldown BEFORE INSERT ON request_cooldowns BEGIN SELECT RAISE(ABORT, 'injected cooldown write failure'); END")?;
+        Ok(())
+    }).await.unwrap();
+    let (echoes, _echo_rx) = mpsc::channel(4);
+    let beatmap = Beatmap {
+        id: 42,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    let message = request_message();
+    let clock = Clock::new();
+    assert!(
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock
+        )
+        .await
+        .is_err()
+    );
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM deliveries WHERE twitch_message_id='evt-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "sending",
+                "failed bookkeeping must roll back the sent transition too"
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM request_cooldowns", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    process_one(
+        &config, &store, &providers, &echoes, &message, &beatmap, clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sends.load(Ordering::SeqCst),
+        1,
+        "a sent request must not replay after its local commit failed"
+    );
+    server.abort();
+}
+
+fn reconnect_json(url: &str) -> String {
+    json!({
+        "metadata":{"message_type":"session_reconnect"},
+        "payload":{"session":{"reconnect_url":url}}
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn pool_rejects_foreign_reconnects_and_hands_off_without_interrupting_old_or_peer_events() {
+    let (state, address, helix) = helix_server().await;
+    state.shard_count.store(2, Ordering::SeqCst);
+    let sockets = PoolSockets::start().await;
+    let foreign = PoolSockets::start().await;
+    let (mut pool, _target) = start_test_pool(address, &sockets, 2, 2);
+    eventually(|| pool.topology.borrow().attached_count == 2).await;
+    let attached = state.attachments.lock().unwrap().clone();
+    let old = attached.iter().find(|(id, _)| *id == 0).unwrap().1.clone();
+    let peer = attached.iter().find(|(id, _)| *id == 1).unwrap().1.clone();
+    sockets
+        .send(&old, WsMessage::text(reconnect_json(&foreign.url)))
+        .await;
+    // Processing the following notification proves the reconnect frame has
+    // already been considered, rather than relying only on a short sleep.
+    sockets
+        .send(
+            &old,
+            WsMessage::text(notification_json(
+                "after-rejected-url",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .shard_id,
+        0
+    );
+    assert_eq!(foreign.accepted.load(Ordering::SeqCst), 0);
+    state
+        .shard_delays
+        .lock()
+        .unwrap()
+        .insert(0, Duration::from_millis(500));
+    state.shard_failures.lock().unwrap().insert(0, 1);
+    sockets
+        .send(
+            &old,
+            WsMessage::text(reconnect_json(&format!("{}?handoff=1", sockets.url))),
+        )
+        .await;
+    eventually(|| {
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == 0)
+            .count()
+            == 2
+    })
+    .await;
+    assert!(
+        sockets.commands.lock().unwrap().contains_key(&old),
+        "the old socket must remain until the replacement attaches"
+    );
+    sockets
+        .send(
+            &old,
+            WsMessage::text(notification_json(
+                "old-during-handoff",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    sockets
+        .send(
+            &peer,
+            WsMessage::text(notification_json(
+                "peer-during-handoff",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    let mut during_handoff = Vec::new();
+    for _ in 0..2 {
+        during_handoff.push(
+            tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .shard_id,
+        );
+    }
+    during_handoff.sort_unstable();
+    assert_eq!(during_handoff, vec![0, 1]);
+    eventually(|| sockets.closed.load(Ordering::SeqCst) == 1).await;
+    assert!(
+        sockets.commands.lock().unwrap().contains_key(&old),
+        "a failed replacement must not close the old generation"
+    );
+    assert_eq!(pool.topology.borrow().attached_count, 2);
+    sockets
+        .send(
+            &old,
+            WsMessage::text(notification_json(
+                "old-after-failed-handoff",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    sockets
+        .send(
+            &peer,
+            WsMessage::text(notification_json(
+                "peer-after-failed-handoff",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    let mut after_failure = Vec::new();
+    for _ in 0..2 {
+        after_failure.push(
+            tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .shard_id,
+        );
+    }
+    after_failure.sort_unstable();
+    assert_eq!(after_failure, vec![0, 1]);
+    eventually(|| !sockets.commands.lock().unwrap().contains_key(&old)).await;
+    let new = state
+        .attachments
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, _)| *id == 0)
+        .unwrap()
+        .1
+        .clone();
+    sockets
+        .send(
+            &new,
+            WsMessage::text(notification_json(
+                "new-after-handoff",
+                "https://osu.ppy.sh/b/42",
+                "conduit-1",
+            )),
+        )
+        .await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), pool.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .shard_id,
+        0
+    );
+    assert_eq!(
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == 1)
+            .count(),
+        1
+    );
+    assert_eq!(
+        state
+            .attachments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == 0)
+            .count(),
+        3,
+        "the failed handoff must retry without waiting for the old socket to close"
+    );
+    assert_eq!(
+        sockets
+            .paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.as_str() == "/ws?handoff=1")
+            .count(),
+        2,
+        "the replacement retry must retain the validated reconnect URL instead of falling back to the base URL"
+    );
+    pool.shutdown().await;
+    sockets.finish().await;
+    foreign.finish().await;
+    helix.abort();
+}
+
+#[tokio::test]
+async fn pool_grows_the_owned_topology_one_shard_at_a_time_and_never_shrinks() {
+    let (state, address, helix) = helix_server().await;
+    let sockets = PoolSockets::start().await;
+    let (pool, target) = start_test_pool(address, &sockets, 1, 3);
+    eventually(|| pool.topology.borrow().attached_count == 1).await;
+    target.send_replace(3);
+    eventually(|| {
+        *pool.topology.borrow()
+            == super::shards::Topology {
+                remote_count: 3,
+                attached_count: 3,
+            }
+    })
+    .await;
+    assert_eq!(*state.resizes.lock().unwrap(), vec![2, 3]);
+    let mut attached: Vec<u32> = state
+        .attachments
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    attached.sort_unstable();
+    assert_eq!(attached, vec![0, 1, 2]);
+    assert_eq!(state.conduit_posts.load(Ordering::SeqCst), 0);
+    target.send_replace(1);
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(pool.topology.borrow().remote_count, 3);
+    assert_eq!(
+        *state.resizes.lock().unwrap(),
+        vec![2, 3],
+        "removing grants must not shrink the remote topology"
+    );
+    pool.shutdown().await;
+    sockets.finish().await;
+    helix.abort();
 }

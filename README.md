@@ -6,7 +6,7 @@ The Vue dashboard lives separately in [aticie/ronnia-web](https://github.com/ati
 
 ## Design
 
-- Tokio runtime with two worker threads, Axum HTTP API, a persistent Twitch EventSub Conduit WebSocket, and shared Reqwest HTTP pools.
+- Tokio's available-parallelism runtime, Axum HTTP API, independently supervised Twitch EventSub Conduit shards, and shared Reqwest HTTP pools.
 - Current Twitch authorization replaces pasted IRC tokens: streamers consent to `channel:bot`, and the bot account is authorized once through the device-code browser flow. Bot credentials are AES-256-GCM encrypted in SQLite with an external key and renewed automatically.
 - A dedicated database thread owns SQLite. A bounded queue prevents database work from blocking Tokio or spawning unbounded blocking jobs.
 - SQLite WAL, foreign keys, explicit migrations, and unique Twitch/osu! **IDs**. Cached login names are not identity keys: Twitch names can change ownership.
@@ -61,7 +61,10 @@ DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve
 | `ENVIRONMENT` | Legacy `testing` also enables dry-run |
 | `DEBUG_MODE` | `false`; true enables `/openapi.json`, Swagger UI `/docs`, and ReDoc `/redoc`; secure CORS remains enforced |
 | `RECONCILE_INTERVAL_SECS` | `600`, positive; EventSub drives live changes, with a periodic snapshot/remote audit to repair missed events |
-| `REQUEST_QUEUE_CAPACITY` | `128`, positive; overload is logged instead of unbounded accumulation |
+| `EVENTSUB_CHANNELS_PER_SHARD` | `100`, positive; operator tuning threshold for automatic shard growth, not a Twitch subscription limit or throughput guarantee |
+| `EVENTSUB_MAX_SHARDS` | `16`, range 1–64; cap on automatic growth, without automatic shrinking |
+| `REQUEST_WORKERS` | `8`, range 1–64; maximum concurrent requests across independent channels; each channel remains serial |
+| `REQUEST_QUEUE_CAPACITY` | `128`, range 1–4096; shared bound across ingress, pending and active requests; overload is logged instead of unbounded accumulation |
 | `HTTP_TIMEOUT_SECS` | `20`, positive |
 | `SESSION_TTL_SECS` | `2592000` (30 days) |
 | `OAUTH_TTL_SECS` | `600` |
@@ -193,7 +196,11 @@ Restore a backup with the service stopped into a fresh database path, then run `
 
 Request history has no automatic retention cutoff, preserving current behavior. Metadata freshness expires after 24 hours for request lookups, but stored metadata remains available to historical leaderboards. Expired temporary authentication state and cooldown state are cleaned up. Uncertain deliveries remain available for operator inspection.
 
-Chat subscriptions remain active while a channel is offline. Twitch documents a limit of 300 enabled subscriptions per WebSocket connection; the current single-shard conduit uses four subscriptions per channel, so deployments beyond roughly 75 authorized channels would need additional shards. That scaling is not implemented.
+Chat subscriptions remain active while a channel is offline. Conduit shard growth is tuned with `EVENTSUB_CHANNELS_PER_SHARD` and bounded by `EVENTSUB_MAX_SHARDS`; these are operator controls, not Twitch subscription limits or throughput guarantees. The direct-WebSocket 300-subscription limit does not establish a 75-channel Conduit ceiling. Existing subscription-list safety bounds are 100 pages and 10,000 owned subscriptions (four per channel, up to 2,500 active grants); exceeding that capacity leaves existing subscriptions serving while reconciliation reports degraded capacity rather than partially registering a larger set. Shards do not automatically shrink when channels leave. Provider pacing is unchanged, and a single hot broadcaster cannot be divided across shards.
+
+Persisted remote topology is authoritative: all existing shards are attached even if the configured automatic-growth cap is lower, with growth frozen and a warning. An owned conduit reporting more than 64 shards is left untouched; the API stays ready while the bot reports degraded service. Manually reduce that owned conduit to at most 64 shards before recovery. Startup/recovery opens at most four sockets concurrently. Subscription creation waits for complete attachment; existing events, state corrections, and obsolete owned-subscription deletion do not. Twitch routes each broadcaster to a shard; see the [Conduit documentation](https://dev.twitch.tv/docs/eventsub/handling-conduit-events/).
+
+Tokio uses its normal available-parallelism default; `TOKIO_WORKER_THREADS` can override its runtime thread count. This is separate from the bounded `REQUEST_WORKERS` concurrency and does not increase upstream provider rates.
 
 ## Request behavior
 
@@ -249,9 +256,12 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 python3 scripts/smoke.py --binary target/release/ronnia
+python3 scripts/scale.py --binary target/release/ronnia --channels 100 --requests 40
 ```
 
 Smoke runs the actual executable against isolated local Twitch EventSub WebSocket/Helix/OAuth/osu HTTP simulators and a fresh SQLite database. It exercises the real device-code bot authorization, streamer consent, conduit/subscription lifecycle, reconnect handoff, hybrid live tracking, token refresh, and ambiguous delivery handling. On Linux with `cc`, a process-local resolver shim injects two DNS failures and later successful resolution into the same running service. It does not change host DNS or `/etc/hosts`. This is not a live-provider certification.
+
+The scale scenario uses Python's standard library and temporary local fixtures/SQLite. It exercises growth and persisted topology, isolated shard recovery, slow maintenance HTTP, revision races, cross-channel request progress, bounded admission, drain/restart, and shutdown. Initial 400-subscription convergence allows 180 seconds at the unchanged 200 ms creation pace. Results include request accounting, API latency, and Linux peak RSS; they are synthetic evidence, not production channel or throughput guarantees. Private Rust tests assert worker/permit/channel cleanup and reader joining. The binary harness does not prove container bot-mode load.
 
 For the reproducible original-process memory comparison, prepare a sibling `../ronnia-legacy` checkout containing the original Python bot and its `.venv`, a sibling `../ronnia-backend` checkout with its Python dependency environment, a local Docker daemon, and the `mongo:7` image. These are read-only benchmark inputs, not this Rust root; use explicit flags for other checkout locations:
 

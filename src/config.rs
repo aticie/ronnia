@@ -27,6 +27,9 @@ pub struct Config {
     pub osu_oauth_base: String,
     pub dry_run: bool,
     pub reconcile_interval_secs: u64,
+    pub eventsub_channels_per_shard: usize,
+    pub eventsub_max_shards: u32,
+    pub request_workers: usize,
     pub request_queue_capacity: usize,
     pub http_timeout_secs: u64,
     pub session_ttl_secs: i64,
@@ -56,6 +59,12 @@ impl std::fmt::Debug for Config {
             .field("osu_oauth_base", &self.osu_oauth_base)
             .field("dry_run", &self.dry_run)
             .field("reconcile_interval_secs", &self.reconcile_interval_secs)
+            .field(
+                "eventsub_channels_per_shard",
+                &self.eventsub_channels_per_shard,
+            )
+            .field("eventsub_max_shards", &self.eventsub_max_shards)
+            .field("request_workers", &self.request_workers)
             .field("request_queue_capacity", &self.request_queue_capacity)
             .field("http_timeout_secs", &self.http_timeout_secs)
             .field("session_ttl_secs", &self.session_ttl_secs)
@@ -147,6 +156,9 @@ impl Config {
             osu_oauth_base: value("OSU_OAUTH_BASE", "https://osu.ppy.sh/oauth"),
             dry_run: parsed("DRY_RUN", false)? || value("ENVIRONMENT", "") == "testing",
             reconcile_interval_secs: parsed("RECONCILE_INTERVAL_SECS", 600)?,
+            eventsub_channels_per_shard: parsed("EVENTSUB_CHANNELS_PER_SHARD", 100)?,
+            eventsub_max_shards: parsed("EVENTSUB_MAX_SHARDS", 16)?,
+            request_workers: parsed("REQUEST_WORKERS", 8)?,
             request_queue_capacity: parsed("REQUEST_QUEUE_CAPACITY", 128)?,
             http_timeout_secs: parsed("HTTP_TIMEOUT_SECS", 20)?,
             session_ttl_secs: parsed("SESSION_TTL_SECS", 30 * 86400)?,
@@ -158,13 +170,24 @@ impl Config {
             internal_api_token,
             api_origin,
         };
+        if result.eventsub_channels_per_shard == 0 {
+            bail!("EVENTSUB_CHANNELS_PER_SHARD must be positive");
+        }
+        if !(1..=64).contains(&result.eventsub_max_shards) {
+            bail!("EVENTSUB_MAX_SHARDS must be between 1 and 64");
+        }
+        if !(1..=64).contains(&result.request_workers) {
+            bail!("REQUEST_WORKERS must be between 1 and 64");
+        }
+        if !(1..=4096).contains(&result.request_queue_capacity) {
+            bail!("REQUEST_QUEUE_CAPACITY must be between 1 and 4096");
+        }
         if result.reconcile_interval_secs == 0
-            || result.request_queue_capacity == 0
             || result.http_timeout_secs == 0
             || result.session_ttl_secs <= 0
             || result.oauth_ttl_secs <= 0
         {
-            bail!("Intervals, queue capacity and expiration durations must be positive");
+            bail!("Intervals and expiration durations must be positive");
         }
         for (name, origin) in [
             ("PUBLIC_ORIGIN", &result.public_origin),

@@ -23,12 +23,7 @@ async fn versions(store: &Store, ids: &[i64]) -> Result<BTreeMap<i64, i64>> {
 /// arrived while the request was in flight; those need a targeted retry.
 pub async fn full(store: &Store, providers: &Providers) -> Result<Vec<i64>> {
     let ids = store.enabled_twitch_ids().await?;
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let expected = versions(store, &ids).await?;
-    let live = providers.live_streams(&ids).await?;
-    apply(store, &ids, &expected, live).await
+    targeted(store, providers, &ids).await
 }
 
 /// Targeted lookup used after `stream.online` (which carries no category) and
@@ -38,8 +33,32 @@ pub async fn targeted(store: &Store, providers: &Providers, ids: &[i64]) -> Resu
         return Ok(Vec::new());
     }
     let expected = versions(store, ids).await?;
-    let live = providers.live_streams(ids).await?;
-    apply(store, ids, &expected, live).await
+    targeted_at(store, providers, &expected).await
+}
+
+/// An event-triggered lookup keeps the revision captured by the dispatcher.
+/// Discard stale work before HTTP as well as guarding its eventual application.
+pub async fn targeted_at(
+    store: &Store,
+    providers: &Providers,
+    expected: &BTreeMap<i64, i64>,
+) -> Result<Vec<i64>> {
+    let ids: Vec<i64> = expected.keys().copied().collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let current = versions(store, &ids).await?;
+    let expected: BTreeMap<i64, i64> = expected
+        .iter()
+        .filter(|(id, revision)| current.get(id) == Some(revision))
+        .map(|(id, revision)| (*id, *revision))
+        .collect();
+    let ids: Vec<i64> = expected.keys().copied().collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let live = providers.live_streams(&ids).await?;
+    apply(store, &ids, &expected, live).await
 }
 
 async fn apply(

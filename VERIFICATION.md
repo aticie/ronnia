@@ -1,8 +1,55 @@
 # Verification record
 
-Current Railpack and grant-activation review checks: 2026-11-05. Repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01, Linux x86-64, Rust 1.99.1, Python 3.14 harness, Docker 29.9.2.
+Current single-replica scale, Railpack, and grant-activation checks: 2026-11-05. Repository-split checks: 2026-11-04. Historical integrated checks: 2026-11-01. Linux x86-64, Rust 1.99.1, Python 3.14.8, Docker 29.9.2.
 
 The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
+
+## Single-replica bounded scale (2026-11-05)
+
+Implemented in a fresh checkout of `aticie/ronnia` PR #57, `migration/rust-port`, starting at remote `8f6663995c92ce00f644a90e17595307be148b7f`. The legacy checkout, bridge PR #56, and frontend PR #24 were not changed. All provider traffic below used isolated local HTTP/RFC6455 fixtures, synthetic authorization, and temporary SQLite; no production credentials or Railway deployment were used.
+
+Executed against the root-built release executable:
+
+```sh
+cargo fmt --all
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked --release
+python3 scripts/smoke.py --binary target/release/ronnia --keep
+python3 scripts/scale.py --binary target/release/ronnia --channels 100 --requests 40 --keep
+```
+
+Rust verification passed 137 tests, including deterministic worker/admission limits, channel FIFO/fairness, panic/cancellation cleanup, pending/ready/active cleanup, and joining active work at shutdown. Real-socket tests cover independent attachment deadlines, four simultaneous connection attempts, cap mismatch, more-than-64 degradation, foreign reconnect origins, transient failed handoff followed by retry while old/peer notifications continue, and reader abort-and-join. Maintenance regressions cover either membership read failing without consuming the grant edge, exact targeted-action overflow fallback, stale event revisions, owned deletion while creation is topology-gated, the final snapshot after deferred creation passes, and session recovery: a transition missed while a shard was disconnected is repaired by the reconnect-triggered audit plus one guarded full snapshot, while existing owned subscriptions are neither recreated nor deleted. Immediate and migration-grace grant activation each retain one targeted correction without repeated lookups on unrelated settings writes.
+
+The complete existing smoke passed HTTP/OAuth, both grant-activation regressions, delivery/cooldown bookkeeping, ambiguous non-replay, DNS/connect/handoff/keepalive recovery, revocation, and executable maintenance commands. Artifact: `/tmp/ronnia-smoke-oiiwwmpb`.
+
+The scale lifecycle used threshold 2, cap 3, four request workers, 32 total admission permits, 30-second HTTP timeout, and a 600-second reconcile interval. Five active grants grew one conduit to three attached shards and 20 subscriptions; additional grants remained eligible at the cap, removal did not shrink, and restarts reused the persisted topology. A lower configured cap attached all existing remote shards. Isolated reconnects injected two process-local DNS failures while another shard delivered actual PMs and the API stayed ready. The scenario also exercised overlap deduplication, make-before-break, wrong-shard acknowledgements, independent nine-second deadlines, 12-second subscription GET/POST stalls, online/offline and late-result races, targeted-action pressure, held channel-A PM response with channel-B progress, cooldown serialization, failed/ambiguous non-replay, and cancellation with an unwelcomed candidate.
+
+The separate fresh 100-channel workload created all 400 subscriptions in **81.845 seconds**, including two paced creation passes and continuation rather than waiting 600 seconds. Only then was request traffic injected:
+
+| Batch | Injected | Successful | Overflow rejected | Duplicate PMs | Duplicate statistics | Elapsed seconds |
+|---|---:|---:|---:|---:|---:|---:|
+| Held-response saturation | 40 | 32 | 8 | 0 | 0 | 31.120 |
+| After drain | 16 | 16 | 0 | 0 | 0 | 15.991 |
+
+All admitted requests reached terminal outcomes; the workload had 49 successful PM/statistic pairs including a fresh post-restart request. Lifecycle safety cases retained one uncertain and one definite failure without successful statistics or replay. Maximum API probe latency was **0.0109 seconds** across 650 workload probes and **0.0180 seconds** across 369 lifecycle probes; probes alternated readiness and SQLite-backed live listing with five-second timeouts. Linux peak RSS was **16,936 KiB** for the workload and **19,236 KiB** for the lifecycle. Both finished with zero fixture sockets remaining. Scale artifact: `/tmp/ronnia-scale-hhiods8b`.
+
+These are synthetic observations, not promised production channel capacity, equal broadcaster distribution, or throughput. Global provider pacing and SQLite ownership/mailbox/WAL/FULL durability are unchanged. The audit remains bounded to 100 pages and 10,000 owned subscriptions; more than 2,500 active grants reports degraded capacity without partial creation. Private Rust assertions—not external guesses about Tokio task counts—prove worker, permit, queue, and reader-handle invariants. TLS/real-provider interoperability and container bot-mode load were not exercised.
+
+### Configured Railpack image
+
+Downloaded official pinned Railpack **0.43.0** using the [documented GitHub release installation route](https://railpack.com/installation); the Linux archive matched published SHA-256 `248a8f60f36854aabed6124113631078a802de3461660855fc4de9c26065c1fb`. A disposable `moby/buildkit:v0.23.2` supplied BuildKit. The actual root plan selected the configured Rust provider and Rust 1.99.1, retained Cargo release commands, and started `./bin/ronnia`; no root `Dockerfile` was introduced.
+
+```sh
+railpack plan . --out /tmp/ronnia-railpack-plan.json
+BUILDKIT_HOST=docker-container://ronnia-scale-buildkit \
+  railpack build . --name ronnia-scale-api-proof:local --progress plain
+```
+
+The final image built from the final sources in **187.30 seconds** with retained builder caches; this is not a controlled build benchmark. Image manifest: `sha256:4955cf3e45babfdc1bc4a8717c7f2772018585c159a495dbf3b0a6ccfc99753e`.
+
+Ran its unmodified default command with `BOT_ENABLED=false`, an ephemeral loopback port, and isolated temporary `/data`. `/ready` returned HTTP 200 before and after restart; both graceful stops exited 0; SQLite integrity was `ok` with zero foreign-key violations. A marker inserted while stopped survived restart. The temporary bind-mounted files needed ownership adjustment for the host-side marker write; no application durability setting changed. Runtime proof: `/tmp/ronnia-scale-final-container-zf28xha3/proof.json` (image `sha256:4955cf3e…`; two earlier checks on production-identical sources are at `/tmp/ronnia-scale-final-container-x681cffo/proof.json` and `/tmp/ronnia-scale-final-container-8gvjxk8f/proof.json`). Runtime containers and the disposable BuildKit container were removed. This is API-only container evidence; bot behavior was proved by the release-binary scenarios above, not by container bot-mode load.
+
 
 ## Native Railpack backend (2026-11-05; verified locally)
 

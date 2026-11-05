@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import http.server
 import json
+import select
 import socket
 import struct
 import threading
@@ -123,6 +124,10 @@ class EventSub:
         self.clients = {}
         self.connections = 0
         self.attaches = []
+        self.shards = {}  # shard ID -> session ID, never socket number -> shard ID
+        self.attach_history = []
+        self.wrong_shard_responses = 0
+        self.attach_delay = {}
         self.stopped = threading.Event()
         self.started = False
         self.keepalives = True
@@ -155,16 +160,32 @@ class EventSub:
                     owner.connections += 1
                     number = owner.connections
                     owner.clients[number] = {"socket": self.connection, "session": f"session-{number}",
-                                             "alive": True, "lock": threading.Lock(), "welcomed": False}
+                                             "alive": True, "lock": threading.Lock(), "welcomed": False,
+                                             "welcome_at": None, "path": self.path}
                 if "handoff=1" in self.path:
                     owner.handoff_opened.set()
-                    while not owner.delay_welcome.wait(.1):
-                        if owner.stopped.is_set():
-                            return
+                    try:
+                        while not owner.delay_welcome.wait(.1):
+                            if owner.stopped.is_set():
+                                owner.clients[number]["alive"] = False
+                                return
+                            if select.select([self.connection], [], [], 0)[0]:
+                                peek = self.connection.recv(2, socket.MSG_PEEK)
+                                if not peek or peek[0] & 15 == 8:
+                                    owner.clients[number]["alive"] = False
+                                    return
+                    except OSError:
+                        owner.clients[number]["alive"] = False
+                        return
                 owner.clients[number]["welcomed"] = True
-                owner.envelope(number, "session_welcome", {"session": {
-                    "id": f"session-{number}", "status": "connected", "keepalive_timeout_seconds": 10,
-                    "reconnect_url": None, "connected_at": timestamp(), "recovery_url": None}})
+                owner.clients[number]["welcome_at"] = time.monotonic()
+                try:
+                    owner.envelope(number, "session_welcome", {"session": {
+                        "id": f"session-{number}", "status": "connected", "keepalive_timeout_seconds": 10,
+                        "reconnect_url": None, "connected_at": timestamp(), "recovery_url": None}})
+                except OSError:
+                    owner.clients[number]["alive"] = False
+                    return
                 try:
                     while not owner.stopped.is_set():
                         header = self.rfile.read(2)
@@ -230,8 +251,9 @@ class EventSub:
 
     def attached(self):
         with self.lock:
+            sessions = set(self.shards.values())
             return [number for number, client in self.clients.items()
-                    if client["alive"] and client["session"] in self.attaches]
+                    if client["alive"] and client["session"] in sessions]
 
     def joined(self, channel="streamer"):
         # Compatibility of the workload adapter, not an IRC production transport.
@@ -241,6 +263,24 @@ class EventSub:
                              for row in self.providers.subscriptions.values())
         return self.attached() if subscribed else []
 
+    def shard_number(self, shard_id):
+        with self.lock:
+            session = self.shards.get(int(shard_id))
+            return next((number for number, client in self.clients.items()
+                         if client["alive"] and client["session"] == session), None)
+
+    def route(self, uid):
+        with self.providers.lock:
+            subscription = self.providers.subscription("channel.chat.message", uid)
+            conduit = subscription["transport"]["conduit_id"] if subscription else None
+            count = self.providers.conduits.get(conduit, {}).get("shard_count", 1)
+        return int(uid) % count
+
+    def alive(self):
+        with self.lock:
+            return [number for number, client in self.clients.items() if client["alive"]]
+
+
     def subscription(self, kind, uid=101):
         return self.providers.subscription(kind, uid)
 
@@ -248,36 +288,37 @@ class EventSub:
         subscription = self.subscription(kind, uid)
         if not subscription:
             raise AssertionError(f"No real subscription for {kind}/{uid}")
-        numbers = self.attached()
         if number is None:
-            if not numbers:
-                raise AssertionError("EventSub shard is not attached")
-            number = max(numbers)
+            number = self.shard_number(self.route(uid))
+            if number is None:
+                raise AssertionError(f"EventSub shard {self.route(uid)} is not attached")
         self.envelope(number, "notification", {"subscription": subscription, "event": event},
                       subscription, at, message_id)
 
     def inject(self, message_id, text, author="viewer", subscriber=False, moderator=False,
-               vip=False, points=False, user_id=301, number=None):
+               vip=False, points=False, user_id=301, number=None, uid=101):
         badges = [{"set_id": name, "id": "1", "info": ""} for name, enabled in
                   [("subscriber", subscriber), ("moderator", moderator), ("vip", vip),
-                   ("broadcaster", user_id == 101)] if enabled]
-        self.notify("channel.chat.message", {"broadcaster_user_id": "101", "broadcaster_user_login": "streamer",
-                    "broadcaster_user_name": "Streamer", "chatter_user_id": str(user_id),
+                   ("broadcaster", user_id == uid)] if enabled]
+        login = "streamer" if uid == 101 else f"streamer{uid}"
+        self.notify("channel.chat.message", {"broadcaster_user_id": str(uid), "broadcaster_user_login": login,
+                    "broadcaster_user_name": login, "chatter_user_id": str(user_id),
                     "chatter_user_login": author, "chatter_user_name": author, "message_id": message_id,
                     "message": {"text": text, "fragments": [{"type": "text", "text": text}]},
                     "badges": badges, "message_type": "text", "color": "#1E90FF",
                     "channel_points_custom_reward_id": "reward" if points else None},
-                    number=number, message_id="transport-" + message_id)
+                    uid=uid, number=number, message_id="transport-" + message_id)
 
-    def state(self, kind, category=None, at=None):
-        event = {"broadcaster_user_id": "101", "broadcaster_user_login": "streamer",
-                 "broadcaster_user_name": "Streamer"}
+    def state(self, kind, category=None, at=None, uid=101, number=None):
+        login = "streamer" if uid == 101 else f"streamer{uid}"
+        event = {"broadcaster_user_id": str(uid), "broadcaster_user_login": login,
+                 "broadcaster_user_name": login}
         if kind == "channel.update":
             event.update(title="Synthetic stream", language="en", category_id=category,
                          category_name="osu!" if category == "21465" else "Other", content_classification_labels=[])
         if kind == "stream.online":
             event.update(id="synthetic-stream", type="live", started_at=timestamp())
-        self.notify(kind, event, at=at)
+        self.notify(kind, event, uid=uid, at=at, number=number)
 
     def revoke(self):
         subscription = self.subscription("channel.chat.message")
@@ -287,21 +328,25 @@ class EventSub:
         with self.providers.lock:
             self.providers.subscriptions.pop(subscription["id"], None)
 
-    def handoff(self):
+    def handoff(self, shard_id=0, reconnect_url=None):
         self.delay_welcome.clear()
         self.handoff_opened.clear()
-        old = max(self.attached())
+        old = self.shard_number(shard_id)
+        check(old is not None, f"Shard {shard_id} is not attached")
         self.envelope(old, "session_reconnect", {"session": {"id": self.clients[old]["session"],
                       "status": "reconnecting", "keepalive_timeout_seconds": None,
-                      "reconnect_url": self.url + "?handoff=1", "connected_at": timestamp()}})
+                      "reconnect_url": reconnect_url or self.url + "?handoff=1", "connected_at": timestamp()}})
         return old
 
     def echoes(self):
         with self.providers.lock:
             return [row["message"] for row in self.providers.chat_posts if row.get("fixture_sent", True)]
 
-    def drop(self):
-        for client in list(self.clients.values()):
+    def drop(self, shard_id=None):
+        number = self.shard_number(shard_id) if shard_id is not None else None
+        clients = [self.clients[number]] if number is not None else (
+            [] if shard_id is not None else list(self.clients.values()))
+        for client in clients:
             client["alive"] = False
             with contextlib.suppress(OSError):
                 client["socket"].shutdown(socket.SHUT_RDWR)
@@ -349,6 +394,20 @@ class Providers:
         self.stream_entered = threading.Event()
         self.stream_release = threading.Event()
         self.stream_release.set()
+        self.stream_wait_timeout = 45
+        self.subscription_entered = threading.Event()
+        self.subscription_release = threading.Event()
+        self.subscription_release.set()
+        self.subscription_stall_method = None
+        self.topology_history = []
+        self.pm_targets = {201}
+        self.pm_entered = threading.Event()
+        self.pm_release = threading.Event()
+        self.pm_release.set()
+        self.pm_hold_targets = set()
+        self.pm_times = []
+        self.pm_failures = 0
+        self.pm_rejected = []
         self.conduits = {}
         self.subscriptions = {}
         self.subscription_creates = collections.Counter()
@@ -487,7 +546,7 @@ class Providers:
                              "game_id": owner.categories.get(uid, "21465"), "type": "live", "started_at": timestamp()}
                             for uid, login in list(owner.live.items()) if str(uid) in ids]
                     owner.stream_entered.set()
-                    check(owner.stream_release.wait(8), "Stalled stream snapshot was not released")
+                    check(owner.stream_release.wait(owner.stream_wait_timeout), "Stalled stream snapshot was not released")
                     return self.send_json(200, {"data": rows, "pagination": {}})
                 if path.startswith("/twitch/helix/eventsub/"):
                     check(auth.startswith("app-twitch:"), "Conduit/subscription request lacks app bearer")
@@ -500,17 +559,50 @@ class Providers:
                             row = {"id": f"conduit-{owner.serial}", "shard_count": body["shard_count"]}
                             owner.conduits[row["id"]] = row
                             return self.send_json(200, {"data": [row]})
+                        if method == "PATCH":
+                            check(body.get("id") in owner.conduits, "Unknown resized conduit")
+                            count = body.get("shard_count")
+                            check(isinstance(count, int) and count > 0, "Invalid shard count")
+                            owner.conduits[body["id"]]["shard_count"] = count
+                            owner.topology_history.append((body["id"], count, time.monotonic()))
+                            return self.send_json(200, {"data": [dict(owner.conduits[body["id"]])]})
                     if resource == "conduits/shards":
                         check(body.get("conduit_id") in owner.conduits, "Unknown conduit shard")
                         if method == "PATCH":
+                            check(len(body["shards"]) == 1, "Attach must identify exactly one shard")
                             shard = body["shards"][0]
+                            shard_id = int(shard["id"])
+                            check(0 <= shard_id < owner.conduits[body["conduit_id"]]["shard_count"],
+                                  "Shard ID outside observed conduit topology")
                             session = shard["transport"]["session_id"]
-                            check(any(c["session"] == session and c["welcomed"] for c in owner.eventsub.clients.values()),
-                                  "Shard attached before actual welcome")
+                            client = next((c for c in owner.eventsub.clients.values()
+                                           if c["session"] == session and c["welcomed"]), None)
+                            check(client is not None, "Shard attached before actual welcome")
+                            delay = owner.eventsub.attach_delay.pop(shard_id, 0)
+                            age = time.monotonic() - client["welcome_at"]
+                            owner.eventsub.attach_history.append((shard_id, session, age))
+                            if age >= 10:
+                                return self.send_json(400, {"error": "welcome attach deadline expired"})
                             owner.eventsub.attaches.append(session)
-                            return self.send_json(202, {"data": [{"id": "0", "status": "enabled", "transport": shard["transport"]}], "errors": []})
-                        return self.send_json(200, {"data": [{"id": "0", "status": "enabled"}], "pagination": {}})
+                            owner.eventsub.shards[shard_id] = session
+                            # Mutate on receipt, delay only the HTTP acknowledgement;
+                            # an older delayed response must not overwrite a newer attach.
+                            if delay:
+                                time.sleep(delay)
+                            response_id = str(shard_id)
+                            if owner.eventsub.wrong_shard_responses:
+                                owner.eventsub.wrong_shard_responses -= 1
+                                response_id = str(shard_id + 1)
+                            return self.send_json(202, {"data": [{"id": response_id, "status": "enabled",
+                                                                 "transport": shard["transport"]}], "errors": []})
+                        rows = [{"id": str(shard_id), "status": "enabled", "transport": {
+                            "method": "websocket", "session_id": session}}
+                                for shard_id, session in owner.eventsub.shards.items()]
+                        return self.send_json(200, {"data": rows, "pagination": {}})
                     if resource == "subscriptions":
+                        if method == owner.subscription_stall_method:
+                            owner.subscription_entered.set()
+                            check(owner.subscription_release.wait(45), "Subscription stall was not released")
                         if method == "GET":
                             return self.send_json(200, {"data": list(owner.subscriptions.values()), "pagination": {},
                                                        "total": len(owner.subscriptions), "total_cost": 0, "max_total_cost": 10000})
@@ -575,8 +667,19 @@ class Providers:
                 if path == "/osu/api/v2/beatmapsets/500":
                     return self.send_json(200, {**beatmap(1003)["beatmapset"], "beatmaps": [beatmap(1003), beatmap(1002)]})
                 if path == "/osu/api/v2/chat/new" and method == "POST":
-                    check(body.get("target_id") == 201 and body.get("is_action") is False, f"Wrong PM: {body}")
-                    owner.posts.append(body)
+                    check(body.get("target_id") in owner.pm_targets and body.get("is_action") is False,
+                          f"Wrong PM: {body}")
+                    if owner.pm_failures:
+                        owner.pm_failures -= 1
+                        owner.pm_rejected.append(body)
+                        return self.send_json(403, {"error": "fixture definite PM rejection"})
+                    with owner.lock:
+                        owner.posts.append(body)
+                        message_number = len(owner.posts)
+                        owner.pm_times.append((body["target_id"], time.monotonic(), body["message"]))
+                    if body["target_id"] in owner.pm_hold_targets:
+                        owner.pm_entered.set()
+                        check(owner.pm_release.wait(45), "Held PM was not released")
                     if owner.ambiguous:
                         owner.ambiguous = False
                         self.close_connection = True
@@ -584,7 +687,7 @@ class Providers:
                             self.connection.shutdown(socket.SHUT_RDWR)
                         self.connection.close()
                         return
-                    return self.send_json(200, {"channel_id": 123, "message_id": len(owner.posts)})
+                    return self.send_json(200, {"channel_id": 123, "message_id": message_number})
                 owner.errors.append(f"Unexpected request: {method} {path}")
                 return self.send_json(404, {"error": "unexpected fixture endpoint"})
 
@@ -597,6 +700,8 @@ class Providers:
 
     def close(self):
         self.stream_release.set()
+        self.subscription_release.set()
+        self.pm_release.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(2)

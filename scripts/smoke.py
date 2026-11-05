@@ -365,6 +365,7 @@ class Service:
                          "OSU_API_BASE": providers.origin + "/osu/api/v2",
                          "OSU_OAUTH_BASE": providers.origin + "/osu/oauth",
                          "RECONCILE_INTERVAL_SECS": "600", "HTTP_TIMEOUT_SECS": "2", "DRY_RUN": "false",
+                         "EVENTSUB_CHANNELS_PER_SHARD": "100", "EVENTSUB_MAX_SHARDS": "1",
                          "MIGRATION_GRANT_GRACE_SECS": "0", "MIGRATION_ACTIVE": "false"})
 
     def command(self, *args):
@@ -441,7 +442,7 @@ class Service:
             return probe.request("/health")[0] == 200 and probe.request("/ready")[0] == 200
         eventually(ready, "service HTTP readiness")
 
-    def stop(self):
+    def stop(self, close_fixture=True):
         if self.process is None:
             return
         process, self.process = self.process, None
@@ -455,7 +456,9 @@ class Service:
                     os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=3)
         self.log_file.close()
-        self.eventsub.drop()
+        if close_fixture:
+            self.eventsub.drop()
+        return process.returncode
 
     def print_logs(self):
         for path in self.logs:
@@ -661,6 +664,34 @@ def exercise_api(service):
     return browser
 
 
+def wait_owned_subscriptions(service, description, uid=101, timeout=25):
+    """Wait for the complete asynchronous owned subscription set and a socket."""
+    def complete():
+        conduit = service.scalar("SELECT conduit_id FROM twitch_conduit WHERE singleton=1")
+        rows = [service.providers.subscription(kind, uid) for kind in
+                ("channel.chat.message", "channel.update", "stream.offline", "stream.online")]
+        return (conduit is not None and service.eventsub.attached()
+                and all(row is not None and row["status"] == "enabled"
+                        and row["transport"].get("method") == "conduit"
+                        and row["transport"].get("conduit_id") == conduit for row in rows))
+    eventually(complete, description, timeout=timeout)
+
+
+def wait_offline_startup(service, before_streams, before_revision, description):
+    """Require provider traffic and its durable offline correction, not a log."""
+    eventually(
+        lambda: service.providers.count_path("/twitch/helix/streams") > before_streams
+        and service.scalar(
+            "SELECT count(*) FROM channel_stream_state "
+            "WHERE twitch_id=101 AND revision>? AND online=0 AND category_id=''",
+            (before_revision,),
+        ) == 1
+        and service.eventsub.attached(),
+        description,
+        timeout=25,
+    )
+
+
 def exercise_grant_grace(service, browser):
     """An already-enabled account refreshes state at activation, not the 600s audit."""
     providers = service.providers
@@ -670,9 +701,11 @@ def exercise_grant_grace(service, browser):
     with sqlite3.connect(service.database) as conn:
         conn.execute("DELETE FROM twitch_channel_grants WHERE twitch_id=101")
     providers.live = {}
+    startup_streams = providers.count_path("/twitch/helix/streams")
+    startup_revision = service.scalar("SELECT revision FROM channel_stream_state WHERE twitch_id=101") or 0
     service.start()
-    eventually(lambda: "EventSub conduit connected" in service.logs[-1].read_text(errors="replace"),
-               "grace regression startup snapshot completed", timeout=25)
+    wait_offline_startup(service, startup_streams, startup_revision,
+                         "grace regression provider startup snapshot applied")
     check(browser.ok("/live/users?limit=100") == [], "Offline startup snapshot was not applied")
     before_streams = providers.count_path("/twitch/helix/streams")
     providers.live = {101: "streamer"}
@@ -697,19 +730,17 @@ def exercise_grant_grace(service, browser):
     service.stop()
     service.env["MIGRATION_GRANT_GRACE_SECS"] = "0"
     service.start()
-    eventually(service.eventsub.joined, "chat subscription after grace regression", timeout=25)
+    wait_owned_subscriptions(service, "complete owned subscription set after grace regression", timeout=25)
 
 
 def exercise_bot(service, browser):
     eventsub, providers = service.eventsub, service.providers
-    eventually(eventsub.joined, "EventSub chat subscription for granted live channel", timeout=45)
+    wait_owned_subscriptions(service, "complete owned subscriptions for granted live channel", timeout=45)
     owned = set(providers.conduits) - {"foreign-conduit"}
     check(len(owned) == 1 and "foreign-conduit" in providers.conduits,
           f"Bot did not create exactly one owned conduit beside the unrelated one: {providers.conduits}")
     check("foreign-sub" in providers.subscriptions, "Bot deleted an unrelated remote subscription")
     check(eventsub.text_frames == 0, f"Client sent unexpected WebSocket text frames: {eventsub.text_frames}")
-    check(providers.subscription("stream.online") and providers.subscription("stream.offline")
-          and providers.subscription("channel.update"), "Hybrid state subscriptions missing")
     check(providers.tokens["twitch:public"] >= 2, "Helix 401 did not refresh app token")
     eventually(lambda: browser.ok("/live/users?limit=100") == ["streamer"], "Hybrid live snapshot exposed via API")
     check(providers.refreshes >= 1, "Short-lived bot token was not refreshed before use")
@@ -916,8 +947,7 @@ def exercise_hybrid(service, browser):
     check(browser.ok("/live/users?limit=100") == [], "Disabled account remained live")
     browser.ok("/user/settings", "POST", settings())
     eventually(active, "enable immediately restores eligibility")
-    eventually(lambda: providers.subscription("stream.offline") is not None,
-               "state subscriptions restored after re-enable", timeout=15)
+    wait_owned_subscriptions(service, "complete owned subscriptions restored after re-enable", timeout=15)
 
     # A slow HTTP snapshot captured before a newer offline event must not win.
     providers.stream_release.clear()
@@ -1020,7 +1050,7 @@ def exercise_transport(service, browser):
 def exercise_dry_run(service, browser):
     service.stop()
     service.start(dry_run=True)
-    eventually(service.eventsub.joined, "dry-run EventSub chat subscription", timeout=25)
+    wait_owned_subscriptions(service, "complete dry-run owned subscriptions", timeout=25)
     before_posts = len(service.providers.posts)
     before_echoes = len(service.eventsub.echoes())
     before_stats = service.scalar("SELECT count(*) FROM statistics")
@@ -1064,7 +1094,7 @@ def exercise_uncertain(service, browser):
     conduits = len(providers.conduits)
     service.stop()
     service.start()
-    eventually(eventsub.joined, "chat subscription after restart", timeout=30)
+    wait_owned_subscriptions(service, "complete owned subscriptions after restart", timeout=30)
     check(len(providers.conduits) == conduits, "Restart created a second owned conduit")
     check("foreign-conduit" in providers.conduits, "Restart deleted the unrelated conduit")
     check(providers.subscription_creates[("channel.chat.message", "101")] == created,
@@ -1087,7 +1117,7 @@ def exercise_short_reconcile(service, browser):
     service.env["RECONCILE_INTERVAL_SECS"] = "3"
     try:
         service.start()
-        eventually(eventsub.joined, "short-reconcile chat subscription", timeout=25)
+        wait_owned_subscriptions(service, "complete short-reconcile owned subscriptions", timeout=25)
         providers.live = {}
         eventually(lambda: eventsub.joined() and browser.ok("/live/users?limit=100") == [],
                    "periodic reconciliation marks missed offline state while preserving chat", timeout=15)
@@ -1271,6 +1301,8 @@ def main():
         service.stop()
         providers.bot_401 = True
         providers.live = {}
+        startup_streams = providers.count_path("/twitch/helix/streams")
+        startup_revision = service.scalar("SELECT revision FROM channel_stream_state WHERE twitch_id=101") or 0
         service.start()
         eventually(lambda: providers.refreshes >= 1, "Validate 401 did not trigger a token refresh")
         eventually(lambda: providers.bot_401_hits >= 1, "Bot never validated its stored credential")
@@ -1288,8 +1320,8 @@ def main():
         eventsub.start()
         # Finish startup with the enabled imported account offline and ungranted.
         # Going live now must be discovered by consent, not startup or a state event.
-        eventually(lambda: "EventSub conduit connected" in service.logs[-1].read_text(errors="replace"),
-                   "ungranted imported account startup snapshot completed", timeout=25)
+        wait_offline_startup(service, startup_streams, startup_revision,
+                             "ungranted imported account provider startup snapshot applied")
         check(initial.ok("/live/users?limit=100") == [], "Ungranted startup account became eligible")
         providers.live = {101: "streamer"}
 
