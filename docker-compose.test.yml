@@ -1,6 +1,0 @@
-sut:
-  build: .
-  working_dir: /
-  environment:
-    PYTHONPATH: "$PYTHONPATH:/ronnia"
-  entrypoint: python3 -m unittest discover -s /tests

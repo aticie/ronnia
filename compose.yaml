@@ -1,0 +1,29 @@
+services:
+  ronnia:
+    build:
+      context: .
+      dockerfile: Dockerfile.docker
+    command: ["serve"]
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      BIND_IP: 0.0.0.0
+      BIND_PORT: ${BIND_PORT:-8080}
+      BOT_ENABLED: "true"
+      DATABASE_PATH: /data/ronnia.sqlite3
+    ports:
+      - "127.0.0.1:${BIND_PORT:-8080}:${BIND_PORT:-8080}"
+    volumes:
+      - ronnia-data:/data
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  ronnia-data:
+networks:
+  default:
+    name: ${RONNIA_NETWORK:-ronnia}
