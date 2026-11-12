@@ -146,6 +146,22 @@ the delivery is reported as failed and is not retried. Once per Twitch live
 session, each eligible legacy user is sent one Twitch chat message and one osu!
 PM containing `RONNIA_MIGRATION_URL`.
 
+Migration notices are de-duplicated durably in the `MigrationAnnouncements`
+collection, paced, and capped so a restart cannot re-announce every live
+channel. Tune or disable them:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RONNIA_ANNOUNCE_ENABLED` | `true` | `false` disables chat/PM notices entirely (the dashboard banner still informs users) |
+| `RONNIA_ANNOUNCE_GRACE_SECS` | `120` | no notice is sent until the process has been up this long, so a crash loop sends nothing |
+| `RONNIA_ANNOUNCE_BATCH` | `3` | maximum notices per 60-second cycle |
+| `RONNIA_ANNOUNCE_INTERVAL_SECS` | `5` | pause between consecutive notices |
+| `RONNIA_ANNOUNCE_DEDUPE_SECS` | `86400` | a channel is not announced again inside this window, even across restarts |
+
+A notice is recorded only after Twitch accepted it, and a channel that is not
+joined yet is deferred instead of force-joined, because joining during
+announcement used to burst the IRC connection.
+
 If the bridge is not configured, the bot keeps the original Mongo behaviour.
 Setting `RONNIA_LEGACY_MODE=true` without both API settings is a startup error;
 setting it to `false` forces the old behaviour even if the API settings exist.
