@@ -615,67 +615,72 @@ class TwitchBot(Client):
 
         return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
 
-    async def announce_migration(self, users: list[DBUser], migration_url: str):
-        """Send the one-per-session migration notice to Twitch chat and osu! PM.
+    MIGRATION_TEXT = (
+        "Ronnia migration: please log in at "
+        "{url} and re-authorize the Twitch bot to keep beatmap requests working."
+    )
 
-        Failures are logged and never escape, so one bad channel/user does not
-        prevent the remaining announcements or crash the bot.
+    async def announce_migration_one(self, user: DBUser, migration_url: str) -> bool:
+        """Send the migration notice to one channel; return Twitch delivery success.
+
+        The caller paces and de-duplicates deliveries. This method never joins
+        channels: a burst of joins while announcing is what knocked the IRC
+        connection over, and the bot already joins every live channel from the
+        manager feed. A channel that is not joined yet is reported as
+        un-delivered so the next cycle retries it.
         """
         if self.environment == "testing" or getattr(self, "dry_run", False):
             logger.info("Migration announcements are suppressed in testing/dry-run mode")
-            return
+            return False
 
-        twitch_text = (
-            "Ronnia migration: please log in at "
-            f"{migration_url} and re-authorize the Twitch bot to keep beatmap requests working."
-        )
-        osu_text = (
-            "Ronnia migration: please log in at "
-            f"{migration_url} and re-authorize the Twitch bot to keep beatmap requests working."
-        )
+        text = self.MIGRATION_TEXT.format(url=migration_url)
+        channel = self.get_channel(user.twitchUsername)
+        if channel is None:
+            logger.info(
+                "Deferring migration announcement to %s until the channel is joined",
+                user.twitchUsername,
+            )
+            return False
+        try:
+            await channel.send(text)
+            logger.info(
+                "Sent migration announcement to Twitch channel %s",
+                user.twitchUsername,
+            )
+        except IRCCooldownError as e:
+            logger.warning(
+                "Twitch IRC cooldown while announcing migration to %s",
+                user.twitchUsername,
+                exc_info=e,
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "Failed to send migration announcement to Twitch channel %s",
+                user.twitchUsername,
+            )
+            return False
 
+        try:
+            await self.osu_chat_api.send_message(target_id=user.osuId, message=text)
+            logger.info("Sent migration announcement to osu! user %s", user.osuId)
+        except Exception:
+            logger.exception(
+                "Failed to send migration announcement to osu! user %s", user.osuId
+            )
+        return True
+
+    async def announce_migration(self, users: list[DBUser], migration_url: str) -> list[int]:
+        """Send notices for ``users`` and return the Twitch ids actually delivered.
+
+        Delivery is sequential and unpaced here; callers that send at volume
+        must go through :meth:`announce_migration_one` with their own pacing.
+        """
+        delivered: list[int] = []
         for user in users:
-            try:
-                channel = self.get_channel(user.twitchUsername)
-                if channel is None:
-                    await self.join_channels([user.twitchUsername])
-                    await asyncio.sleep(1)
-                    channel = self.get_channel(user.twitchUsername)
-                if channel is None:
-                    raise RuntimeError(
-                        f"Could not join Twitch channel {user.twitchUsername}"
-                    )
-                await channel.send(twitch_text)
-                logger.info(
-                    "Sent migration announcement to Twitch channel %s",
-                    user.twitchUsername,
-                )
-            except IRCCooldownError as e:
-                logger.warning(
-                    "Twitch IRC cooldown while announcing migration to %s",
-                    user.twitchUsername,
-                    exc_info=e,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to send migration announcement to Twitch channel %s",
-                    user.twitchUsername,
-                )
-
-            try:
-                await self.osu_chat_api.send_message(
-                    target_id=user.osuId,
-                    message=osu_text,
-                )
-                logger.info(
-                    "Sent migration announcement to osu! user %s",
-                    user.osuId,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to send migration announcement to osu! user %s",
-                    user.osuId,
-                )
+            if await self.announce_migration_one(user, migration_url):
+                delivered.append(user.twitchId)
+        return delivered
 
     async def event_ready(self):
         logger.info(f"Connected channels: {self.connected_channels}")

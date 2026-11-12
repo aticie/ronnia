@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current Twitch logins, and one-per-live-session migration announcements over
   Twitch chat and osu! PM.
 
+### Fixed
+- Migration announcements are now recorded durably, paced, batched, and delayed
+  by a startup grace period. A restart (or a crash loop caused by the announce
+  burst itself) no longer re-sends the notice to every live channel, and a
+  channel that is not joined yet is deferred instead of force-joined.
+  `RONNIA_ANNOUNCE_ENABLED=false` turns the notices off entirely.
+
 ### Changed
 - In bridge mode, Mongo `Users`/`Settings` are no longer read, `remove_user` is a
   no-op, and old Mongo request statistics are not written.

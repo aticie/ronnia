@@ -27,6 +27,7 @@ class RonniaDatabase(AsyncMongoClient):
         self.settings_col = self.db.get_collection("Settings")
         self.statistics_col = self.db.get_collection("Statistics")
         self.beatmaps_col = self.db.get_collection("Beatmaps")
+        self.announcements_col = self.db.get_collection("MigrationAnnouncements")
 
     async def initialize(self):
         """Initialize the Database, define hardcoded settings."""
@@ -238,6 +239,28 @@ class RonniaDatabase(AsyncMongoClient):
                 "mods": mods,
                 "timestamp": datetime.datetime.now(datetime.timezone.utc),
             }
+        )
+
+    async def get_announcement_state(self) -> dict[int, float]:
+        """Return the last migration-notice epoch per Twitch id.
+
+        The notice is user-visible and cannot be recalled, so delivery is
+        recorded durably: an in-memory-only record re-announced every live
+        channel whenever the bot restarted.
+        """
+        state: dict[int, float] = {}
+        async for document in self.announcements_col.find({}, {"announced_at": 1}):
+            announced_at = document.get("announced_at")
+            if isinstance(announced_at, (int, float)):
+                state[int(document["_id"])] = float(announced_at)
+        return state
+
+    async def record_announcement(self, twitch_id: int, announced_at: float) -> None:
+        """Persist that a migration notice was delivered to a channel."""
+        await self.announcements_col.update_one(
+            {"_id": int(twitch_id)},
+            {"$set": {"announced_at": float(announced_at)}},
+            upsert=True,
         )
 
     async def add_beatmap(self, beatmap_info: dict):

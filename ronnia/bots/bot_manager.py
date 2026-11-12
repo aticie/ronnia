@@ -2,19 +2,51 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from collections.abc import AsyncIterator
 
 from pymongo import UpdateOne
 
-from ronnia.bots.announcements import LiveAnnouncementTracker
+from ronnia.bots.announcements import LiveAnnouncementTracker, select_announcements
 from ronnia.bots.twitch_bot import TwitchBot
 from ronnia.clients.legacy_api import LegacyAPI, env_flag
 from ronnia.clients.mongo import RonniaDatabase
 from ronnia.clients.twitch import TwitchAPI
+from ronnia.models.database import DBUser
 
 STREAMING_USERS_UPDATE_SLEEP = 60
 
+# Migration notices are user-visible and cannot be recalled, so delivery is
+# paced and de-duplicated across restarts.
+ANNOUNCEMENT_GRACE_SECONDS = 120
+ANNOUNCEMENT_INTERVAL_SECONDS = 5.0
+ANNOUNCEMENT_BATCH = 3
+ANNOUNCEMENT_DEDUPE_SECONDS = 24 * 60 * 60
+
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %.1f", name, raw, default)
+        return default
+    return value if value >= 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %d", name, raw, default)
+        return default
 
 
 class BotManager:
@@ -44,6 +76,7 @@ class BotManager:
             and self.migration_url
             and environment != "testing"
             and not env_flag("DRY_RUN")
+            and env_flag("RONNIA_ANNOUNCE_ENABLED", True)
         )
         if self.legacy_api and not self.migration_url:
             logger.warning(
@@ -53,6 +86,21 @@ class BotManager:
         self.announcement_tracker = LiveAnnouncementTracker(
             enabled=announcements_enabled
         )
+        self.announcement_grace_seconds = _env_float(
+            "RONNIA_ANNOUNCE_GRACE_SECS", ANNOUNCEMENT_GRACE_SECONDS
+        )
+        self.announcement_interval_seconds = _env_float(
+            "RONNIA_ANNOUNCE_INTERVAL_SECS", ANNOUNCEMENT_INTERVAL_SECONDS
+        )
+        self.announcement_batch = max(
+            1, _env_int("RONNIA_ANNOUNCE_BATCH", ANNOUNCEMENT_BATCH)
+        )
+        self.announcement_dedupe_seconds = _env_float(
+            "RONNIA_ANNOUNCE_DEDUPE_SECS", ANNOUNCEMENT_DEDUPE_SECONDS
+        )
+        self.announced_at: dict[int, float] = {}
+        self._announcement_state_loaded = False
+        self._started_at = time.monotonic()
 
         if self.legacy_api is not None:
             logger.info(
@@ -120,6 +168,23 @@ class BotManager:
                 # Wait for STREAMING_USERS_UPDATE_SLEEP seconds before sending connected users
                 await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)
 
+    async def _load_announcement_state(self) -> None:
+        """Load the durable delivery record once, so restarts cannot repeat notices."""
+        if self._announcement_state_loaded:
+            return
+        try:
+            self.announced_at = await self.db_client.get_announcement_state()
+        except Exception:
+            logger.exception(
+                "Could not load the migration announcement record; "
+                "announcements are deferred until the store is readable"
+            )
+            return
+        self._announcement_state_loaded = True
+        logger.info(
+            "Loaded %d recorded migration announcement(s)", len(self.announced_at)
+        )
+
     async def announce_pending(self):
         """Flush queued one-per-session migration announcements."""
         if (
@@ -129,18 +194,60 @@ class BotManager:
         ):
             return
 
+        # A crash at startup used to re-announce every live channel, which the
+        # flood then made worse. Nothing is sent until the process has been up
+        # long enough to be plausibly stable.
+        if time.monotonic() - self._started_at < self.announcement_grace_seconds:
+            return
+
         pending = self.announcement_tracker.take_pending()
         if not pending:
             return
 
-        logger.info(
-            "Sending migration announcement to %d newly live legacy user(s)",
-            len(pending),
+        await self._load_announcement_state()
+
+        now = time.time()
+        batch = select_announcements(
+            pending,
+            self.announced_at,
+            now,
+            self.announcement_dedupe_seconds,
+            self.announcement_batch,
         )
-        try:
-            await self.twitch_bot.announce_migration(pending, self.migration_url)
-        except Exception:
-            logger.exception("Failed to flush migration announcements")
+        deferred = [user for user in pending if user not in batch]
+        self.announcement_tracker.requeue(deferred)
+        if not batch:
+            return
+
+        logger.info(
+            "Sending migration announcement to %d legacy user(s) (%d deferred)",
+            len(batch),
+            len(deferred),
+        )
+        undelivered: list[DBUser] = []
+        for index, user in enumerate(batch):
+            if index:
+                await asyncio.sleep(self.announcement_interval_seconds)
+            try:
+                delivered = await self.twitch_bot.announce_migration_one(
+                    user, self.migration_url
+                )
+            except Exception:
+                logger.exception("Failed to flush migration announcement")
+                delivered = False
+            if not delivered:
+                undelivered.append(user)
+                continue
+            announced_at = time.time()
+            self.announced_at[user.twitchId] = announced_at
+            try:
+                await self.db_client.record_announcement(user.twitchId, announced_at)
+            except Exception:
+                logger.exception(
+                    "Announcement delivered but not recorded for %s; it may be repeated",
+                    user.twitchUsername,
+                )
+        self.announcement_tracker.requeue(undelivered)
 
     async def get_streaming_users(self) -> set:
         """Gets the currently streaming users from TwitchAPI."""

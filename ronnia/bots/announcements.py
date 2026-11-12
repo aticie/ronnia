@@ -2,9 +2,37 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from ronnia.models.database import DBUser
+
+
+def select_announcements(
+        pending: Iterable[DBUser],
+        announced_at: Mapping[int, float],
+        now: float,
+        dedupe_seconds: float,
+        batch: int,
+) -> list[DBUser]:
+    """Pick the notices allowed to be sent right now.
+
+    ``announced_at`` is the durable record of previously delivered notices; a
+    user inside the de-duplication window is skipped even though the in-memory
+    session state forgot them, which is what stops a restart (or a crash loop)
+    from re-announcing every live channel. At most ``batch`` users are returned
+    so a single cycle cannot flood Twitch or the osu! PM API.
+    """
+    if batch <= 0:
+        return []
+    selected: list[DBUser] = []
+    for user in pending:
+        if len(selected) >= batch:
+            break
+        last = announced_at.get(user.twitchId)
+        if last is not None and now - last < dedupe_seconds:
+            continue
+        selected.append(user)
+    return selected
 
 
 class LiveAnnouncementTracker:
@@ -75,3 +103,19 @@ class LiveAnnouncementTracker:
         pending = self._pending
         self._pending = []
         return pending
+
+    def requeue(self, users: Iterable[DBUser]) -> None:
+        """Put un-delivered notices back so a later cycle retries them.
+
+        ``observe`` marks a session announced *before* delivery to avoid a
+        message storm, so a failed send re-arms the user here: the marker is
+        cleared and the notice is queued again while the channel is still live.
+        """
+        queued = {user.twitchId for user in self._pending}
+        for user in users:
+            if user.twitchId not in self._live:
+                continue
+            self._announced.discard(user.twitchId)
+            if user.twitchId not in queued:
+                self._pending.append(user)
+                queued.add(user.twitchId)
