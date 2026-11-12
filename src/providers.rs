@@ -73,6 +73,90 @@ async fn body_json(mut response: Response) -> Result<Value> {
     serde_json::from_slice(&body).context("invalid provider JSON")
 }
 
+fn provider_operation(endpoint: &str) -> &'static str {
+    match endpoint.split('/').next() {
+        Some("beatmaps") => "beatmaps",
+        Some("beatmapsets") => "beatmapsets",
+        Some("chat") => "chat",
+        Some("eventsub") => "eventsub",
+        Some("streams") => "streams",
+        Some("users") => "users",
+        _ => "other",
+    }
+}
+
+fn status_outcome(status: StatusCode) -> &'static str {
+    match status.as_u16() / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        _ => "5xx",
+    }
+}
+
+fn record_provider_attempt(
+    provider: &'static str,
+    operation: &'static str,
+    method: &str,
+    outcome: &'static str,
+    elapsed: Duration,
+) {
+    sentry::Hub::with_active(|hub| {
+        let method = match method {
+            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "CONNECT" | "PATCH"
+            | "TRACE" => method,
+            _ => "OTHER",
+        };
+        hub.capture_metric(
+            sentry::metrics::counter("ronnia.provider.attempts", 1)
+                .attribute("provider", provider)
+                .attribute("operation", operation)
+                .attribute("http.method", method)
+                .attribute("outcome", outcome),
+        );
+        hub.capture_metric(
+            sentry::metrics::distribution(
+                "ronnia.provider.headers_latency",
+                elapsed.as_secs_f64() * 1000.0,
+            )
+            .unit(sentry::protocol::Unit::Millisecond)
+            .attribute("provider", provider)
+            .attribute("operation", operation)
+            .attribute("http.method", method)
+            .attribute("outcome", outcome),
+        );
+    });
+}
+
+fn record_provider_retry(
+    provider: &'static str,
+    operation: &'static str,
+    reason: &'static str,
+    delay: Option<Duration>,
+) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(
+            sentry::metrics::counter("ronnia.provider.retries", 1)
+                .attribute("provider", provider)
+                .attribute("operation", operation)
+                .attribute("reason", reason),
+        );
+        if let Some(delay) = delay {
+            hub.capture_metric(
+                sentry::metrics::distribution(
+                    "ronnia.provider.retry_delay",
+                    delay.as_secs_f64() * 1000.0,
+                )
+                .unit(sentry::protocol::Unit::Millisecond)
+                .attribute("provider", provider)
+                .attribute("operation", operation)
+                .attribute("reason", reason),
+            );
+        }
+    });
+}
+
 impl Providers {
     pub fn new(config: Arc<Config>, shutdown: CancellationToken) -> Result<Self> {
         let client = Client::builder()
@@ -141,26 +225,59 @@ impl Providers {
         if let Some(scope) = scope {
             data["scope"] = json!(scope);
         }
+        let provider = match state.scope {
+            Scope::Twitch => "twitch",
+            _ => "osu",
+        };
         for attempt in 0..3 {
             let builder = self.client.post(&url);
             let builder = match state.scope {
                 Scope::Twitch => builder.form(&data),
                 _ => builder.json(&data),
             };
-            let result = tokio::select! { _ = self.shutdown.cancelled() => bail!("token refresh cancelled"), result = builder.send() => result };
+            let started = Instant::now();
+            let result = tokio::select! {
+                _ = self.shutdown.cancelled() => {
+                    record_provider_attempt(provider, "token", "POST", "transport_error", started.elapsed());
+                    bail!("token refresh cancelled");
+                },
+                result = builder.send() => result,
+            };
+            let elapsed = started.elapsed();
             let response = match result {
-                Ok(response) => response,
+                Ok(response) => {
+                    record_provider_attempt(
+                        provider,
+                        "token",
+                        "POST",
+                        status_outcome(response.status()),
+                        elapsed,
+                    );
+                    response
+                }
                 Err(error) if attempt < 2 => {
+                    record_provider_attempt(provider, "token", "POST", "transport_error", elapsed);
                     tracing::warn!(attempt, error = %error, "token endpoint unavailable");
-                    self.pause(Duration::from_secs(1 << attempt)).await?;
+                    let delay = Duration::from_secs(1 << attempt);
+                    record_provider_retry(provider, "token", "transport", Some(delay));
+                    self.pause(delay).await?;
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    record_provider_attempt(provider, "token", "POST", "transport_error", elapsed);
+                    return Err(error.into());
+                }
             };
             let status = response.status();
             if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && attempt < 2
             {
                 let delay = retry_after(&response, attempt);
+                let reason = if status == StatusCode::TOO_MANY_REQUESTS {
+                    "rate_limited"
+                } else {
+                    "server_error"
+                };
+                record_provider_retry(provider, "token", reason, Some(delay));
                 drop(response);
                 self.pause(delay).await?;
                 continue;
@@ -205,6 +322,18 @@ impl Providers {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "provider.http",
+        level = "info",
+        skip_all,
+        fields(
+            sentry.op = "http.client",
+            provider = match scope { Scope::Twitch => "twitch", _ => "osu" },
+            operation = provider_operation(endpoint),
+            http.method = %method,
+            http.status_code = tracing::field::Empty,
+        )
+    )]
     async fn request(
         &self,
         scope: Scope,
@@ -223,8 +352,14 @@ impl Providers {
             Scope::Twitch => &self.config.twitch_api_base,
             _ => &self.config.osu_api_base,
         };
+        let provider = match scope {
+            Scope::Twitch => "twitch",
+            _ => "osu",
+        };
+        let operation = provider_operation(endpoint);
         let mut refreshed = false;
         let mut retries = 0;
+        let mut attempt = 0u32;
         loop {
             let access = self.token(state).await.map_err(known_error)?;
             if !matches!(scope, Scope::Twitch) {
@@ -244,19 +379,51 @@ impl Providers {
             if let Some(data) = &data {
                 builder = builder.json(data);
             }
+            attempt += 1;
+            let started = Instant::now();
             let result = tokio::select! {
-                _ = self.shutdown.cancelled() => return Err(ChatError { uncertain: chat, status: None, message: "request cancelled during provider send".into() }),
+                _ = self.shutdown.cancelled() => {
+                    record_provider_attempt(provider, operation, method.as_str(), "transport_error", started.elapsed());
+                    return Err(ChatError { uncertain: chat, status: None, message: "request cancelled during provider send".into() });
+                },
                 result = builder.send() => result,
             };
+            let elapsed = started.elapsed();
             let response = match result {
                 Ok(response) => response,
                 Err(error) => {
+                    record_provider_attempt(
+                        provider,
+                        operation,
+                        method.as_str(),
+                        "transport_error",
+                        elapsed,
+                    );
+                    tracing::debug!(
+                        provider,
+                        operation = endpoint,
+                        method = %method,
+                        attempt,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        timeout = error.is_timeout(),
+                        connect = error.is_connect(),
+                        "provider HTTP attempt failed"
+                    );
                     let uncertain = chat && !error.is_connect() && !error.is_builder();
                     if !chat && retries < 2 {
                         retries += 1;
-                        self.pause(Duration::from_secs(1 << retries))
-                            .await
-                            .map_err(known_error)?;
+                        let delay = Duration::from_secs(1 << retries);
+                        record_provider_retry(provider, operation, "transport", Some(delay));
+                        tracing::warn!(
+                            provider,
+                            operation = endpoint,
+                            method = %method,
+                            attempt,
+                            reason = "transport",
+                            retry_delay_ms = delay.as_millis() as u64,
+                            "provider HTTP retry scheduled"
+                        );
+                        self.pause(delay).await.map_err(known_error)?;
                         continue;
                     }
                     return Err(ChatError {
@@ -267,7 +434,34 @@ impl Providers {
                 }
             };
             let status = response.status();
+            record_provider_attempt(
+                provider,
+                operation,
+                method.as_str(),
+                status_outcome(status),
+                elapsed,
+            );
+            tracing::Span::current().record("http.status_code", status.as_u16());
+            tracing::debug!(
+                provider,
+                operation = endpoint,
+                method = %method,
+                attempt,
+                elapsed_ms = elapsed.as_millis() as u64,
+                http_status = status.as_u16(),
+                "provider HTTP response headers received"
+            );
             if status == StatusCode::UNAUTHORIZED && !refreshed {
+                record_provider_retry(provider, operation, "token_refresh", None);
+                tracing::debug!(
+                    provider,
+                    operation = endpoint,
+                    method = %method,
+                    attempt,
+                    http_status = status.as_u16(),
+                    reason = "token_refresh",
+                    "provider HTTP retry scheduled"
+                );
                 drop(response);
                 self.invalidate(state, &access).await;
                 refreshed = true;
@@ -275,6 +469,17 @@ impl Providers {
             }
             if status == StatusCode::TOO_MANY_REQUESTS && retries < 2 {
                 let delay = retry_after(&response, retries);
+                record_provider_retry(provider, operation, "rate_limited", Some(delay));
+                tracing::warn!(
+                    provider,
+                    operation = endpoint,
+                    method = %method,
+                    attempt,
+                    http_status = status.as_u16(),
+                    reason = "rate_limited",
+                    retry_delay_ms = delay.as_millis() as u64,
+                    "provider HTTP retry scheduled"
+                );
                 drop(response);
                 retries += 1;
                 self.pause(delay).await.map_err(known_error)?;
@@ -282,6 +487,17 @@ impl Providers {
             }
             if status.is_server_error() && !chat && retries < 2 {
                 let delay = retry_after(&response, retries);
+                record_provider_retry(provider, operation, "server_error", Some(delay));
+                tracing::warn!(
+                    provider,
+                    operation = endpoint,
+                    method = %method,
+                    attempt,
+                    http_status = status.as_u16(),
+                    reason = "server_error",
+                    retry_delay_ms = delay.as_millis() as u64,
+                    "provider HTTP retry scheduled"
+                );
                 drop(response);
                 retries += 1;
                 self.pause(delay).await.map_err(known_error)?;
@@ -433,6 +649,18 @@ impl Providers {
 
     /// Send chat as the managed bot account. This is the one Twitch call that
     /// needs the bot's user token; the response must acknowledge `is_sent`.
+    #[tracing::instrument(
+        name = "provider.http",
+        level = "info",
+        skip_all,
+        fields(
+            sentry.op = "http.client",
+            provider = "twitch",
+            operation = "chat",
+            http.method = "POST",
+            http.status_code = tracing::field::Empty,
+        )
+    )]
     pub async fn send_twitch_message(
         &self,
         auth: &TwitchAuth,
@@ -455,7 +683,10 @@ impl Providers {
             .map_err(known_error)?;
         let mut refreshed = false;
         let mut retries = 0u32;
+        let mut attempt = 0u32;
         loop {
+            attempt += 1;
+            let started = Instant::now();
             let result = self
                 .client
                 .post(&url)
@@ -464,12 +695,27 @@ impl Providers {
                 .json(&body)
                 .send();
             let result = tokio::select! {
-                _ = self.shutdown.cancelled() => return Err(ChatError { uncertain: false, status: None, message: "chat send cancelled".into() }),
+                _ = self.shutdown.cancelled() => {
+                    record_provider_attempt("twitch", "chat", "POST", "transport_error", started.elapsed());
+                    return Err(ChatError { uncertain: false, status: None, message: "chat send cancelled".into() });
+                },
                 result = result => result,
             };
+            let elapsed = started.elapsed();
             let response = match result {
                 Ok(response) => response,
                 Err(error) => {
+                    record_provider_attempt("twitch", "chat", "POST", "transport_error", elapsed);
+                    tracing::debug!(
+                        provider = "twitch",
+                        operation = "chat/messages",
+                        method = "POST",
+                        attempt,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        timeout = error.is_timeout(),
+                        connect = error.is_connect(),
+                        "provider HTTP attempt failed"
+                    );
                     // A transport failure after the request may have reached
                     // Twitch, so it is never replayed automatically.
                     let uncertain = !error.is_connect() && !error.is_builder();
@@ -481,7 +727,28 @@ impl Providers {
                 }
             };
             let status = response.status();
+            record_provider_attempt("twitch", "chat", "POST", status_outcome(status), elapsed);
+            tracing::Span::current().record("http.status_code", status.as_u16());
+            tracing::debug!(
+                provider = "twitch",
+                operation = "chat/messages",
+                method = "POST",
+                attempt,
+                elapsed_ms = elapsed.as_millis() as u64,
+                http_status = status.as_u16(),
+                "provider HTTP response headers received"
+            );
             if status == StatusCode::UNAUTHORIZED && !refreshed {
+                record_provider_retry("twitch", "chat", "token_refresh", None);
+                tracing::debug!(
+                    provider = "twitch",
+                    operation = "chat/messages",
+                    method = "POST",
+                    attempt,
+                    http_status = status.as_u16(),
+                    reason = "token_refresh",
+                    "provider HTTP retry scheduled"
+                );
                 drop(response);
                 token = auth
                     .bot_access_token_after_rejection(&token, &self.shutdown)
@@ -492,6 +759,17 @@ impl Providers {
             }
             if status == StatusCode::TOO_MANY_REQUESTS && retries < 2 {
                 let delay = retry_after(&response, retries);
+                record_provider_retry("twitch", "chat", "rate_limited", Some(delay));
+                tracing::warn!(
+                    provider = "twitch",
+                    operation = "chat/messages",
+                    method = "POST",
+                    attempt,
+                    http_status = status.as_u16(),
+                    reason = "rate_limited",
+                    retry_delay_ms = delay.as_millis() as u64,
+                    "provider HTTP retry scheduled"
+                );
                 drop(response);
                 retries += 1;
                 self.pause(delay).await.map_err(known_error)?;
@@ -514,12 +792,15 @@ impl Providers {
                 Some(true) => Ok(()),
                 Some(false) => Err(ChatError {
                     uncertain: false,
-                    status: None,
+                    status: Some(status.as_u16()),
                     message: format!(
-                        "Twitch dropped the chat message: {}",
+                        "Twitch dropped the chat message: {}: {}",
                         result
                             .and_then(|row| row["drop_reason"]["code"].as_str())
-                            .unwrap_or("unspecified")
+                            .unwrap_or("unspecified"),
+                        result
+                            .and_then(|row| row["drop_reason"]["message"].as_str())
+                            .unwrap_or("no rejection message provided")
                     ),
                 }),
                 None => Err(ChatError {
