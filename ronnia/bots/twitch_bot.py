@@ -616,8 +616,9 @@ class TwitchBot(Client):
         return f"{extra_prefix}{message.author.name} -> [{beatmap_status}] {beatmap_info} {extra_postfix}"
 
     MIGRATION_TEXT = (
-        "Ronnia migration: please log in at "
-        "{url} and re-authorize the Twitch bot to keep beatmap requests working."
+        "Ronnia is now using Twitch EventSub instead of IRC. But to use that, "
+        "it needs your permissions to join your channel as a bot. Please sign "
+        "in at {url} and re-authorize to keep beatmap requests working."
     )
 
     async def announce_migration_one(self, user: DBUser, migration_url: str) -> bool:
