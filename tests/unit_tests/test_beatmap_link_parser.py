@@ -1,6 +1,6 @@
 import unittest
 
-from models.beatmap import Beatmap, BeatmapType
+from ronnia.models.beatmap import Beatmap, BeatmapType
 from ronnia.utils.beatmap import BeatmapParser
 
 
