@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 class TwitchBot(Client):
     MAX_CHANNEL_JOIN_TRIES = 5
+    # Idle reads before the internal manager socket is considered dead:
+    # three missed polling intervals, not one.
+    MAX_IPC_IDLE_MISSES = 3
 
     def __init__(
             self,
@@ -50,6 +53,8 @@ class TwitchBot(Client):
 
         self.join_fail_channels = Counter()
         self.listener_update_sleep = listener_update_sleep
+        # One polling interval plus a buffer; overridable in tests.
+        self.ipc_read_timeout = listener_update_sleep + 5
         self.server_socket = None
         self.receiver_task: asyncio.Task | None = None
         self.user_last_request = {}
@@ -87,27 +92,48 @@ class TwitchBot(Client):
         addr = writer.get_extra_info('peername')
         logger.info(f"TwitchBot received a new connection from {addr}")
         try:
+            idle_misses = 0
             while True:
                 try:
-                    # listener_update_sleep + 5 seconds buffer
-                    data = await asyncio.wait_for(reader.readline(),
-                                                  timeout=self.listener_update_sleep + 5)
-                    raw_message = data.decode()
-                    streaming_users = raw_message.strip("\n").split(",")
-                    logger.info(f"Twitch Bot received streaming users: {streaming_users}")
+                    data = await asyncio.wait_for(
+                        reader.readline(), timeout=self.ipc_read_timeout
+                    )
+                except asyncio.TimeoutError:
+                    # The manager only sends an update once per polling cycle,
+                    # so a quiet socket is normal. Closing here used to race the
+                    # sender and produce a reset on every cycle.
+                    idle_misses += 1
+                    if idle_misses < self.MAX_IPC_IDLE_MISSES:
+                        logger.debug(
+                            "No streaming update from %s yet (idle %d/%d)",
+                            addr,
+                            idle_misses,
+                            self.MAX_IPC_IDLE_MISSES,
+                        )
+                        continue
+                    logger.warning(
+                        "Bot manager silent for %d intervals on %s; closing the connection",
+                        idle_misses,
+                        addr,
+                    )
+                    break
+                except asyncio.IncompleteReadError:
+                    logger.info("Bot manager disconnected from %s", addr)
+                    break
+                except Exception:
+                    logger.exception("Error handling client %s", addr)
+                    break
+
+                idle_misses = 0
+                if not data:
+                    logger.info("Bot manager closed the connection to %s", addr)
+                    break
+                streaming_users = data.decode().strip("\n").split(",")
+                logger.info(f"Twitch Bot received streaming users: {streaming_users}")
+                try:
                     await self.join_streaming_channels(streaming_users)
-
-                except asyncio.TimeoutError as e:
-                    logger.exception(f"Timeout waiting for message from {addr}", exc_info=e)
-                    break
-
-                except asyncio.IncompleteReadError as e:
-                    logger.exception(f"Client {addr} disconnected", exc_info=e)
-                    break
-
-                except Exception as e:
-                    logger.exception(f"Error handling client {addr}", exc_info=e)
-                    raise e
+                except Exception:
+                    logger.exception("Failed to apply the streaming channel update")
 
         finally:
             logger.warning(f"Closing connection from {addr}")

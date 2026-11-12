@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Twitch chat and osu! PM.
 
 ### Fixed
+- The internal BotManager/TwitchBot socket no longer resets every polling
+  cycle. The receiver treated one quiet interval as a dead peer and closed the
+  connection just as the manager sent its next update, which produced a reset
+  traceback on both sides each minute; it now tolerates missed intervals and
+  only drops a peer after three. The manager reconnects immediately instead of
+  writing into the closed pipe, and neither side logs an expected timeout as an
+  exception with a traceback.
 - Migration announcements are now recorded durably, paced, batched, and delayed
   by a startup grace period. A restart (or a crash loop caused by the announce
   burst itself) no longer re-sends the notice to every live channel, and a

@@ -143,30 +143,41 @@ class BotManager:
         """
         address = server_sock.getsockname()
         logger.info(f"Starting Bot Manager Listener on {address=}")
-        _, writer = await asyncio.open_connection(*address[:2])
         while True:
             try:
-                streaming_users = await self.get_streaming_users()
-                logger.info(f'Sending streaming users to the Twitch Bot: {streaming_users}')
-                message = ",".join(streaming_users) + "\n"
-                writer.write(message.encode())
-                await writer.drain()
-                await self.announce_pending()
-            except Exception as e:
-                logger.exception("An exception occurred in listener", exc_info=e)
-                if writer is not None and not writer.is_closing():
-                    writer.close()
+                # The reader side is unused; the socket is one-way.
+                _reader, writer = await asyncio.open_connection(*address[:2])
+            except OSError as e:
+                logger.warning("TwitchBot IPC is not accepting connections yet: %s", e)
+                await asyncio.sleep(1)
+                continue
+
+            try:
+                while True:
                     try:
-                        await writer.wait_closed()
+                        streaming_users = await self.get_streaming_users()
+                        logger.info(f'Sending streaming users to the Twitch Bot: {streaming_users}')
+                        message = ",".join(streaming_users) + "\n"
+                        writer.write(message.encode())
+                        await writer.drain()
+                        await self.announce_pending()
+                    except (ConnectionError, asyncio.IncompleteReadError) as e:
+                        # The receiver closed the socket. Reconnect on the next
+                        # iteration instead of sleeping a whole polling cycle and
+                        # then writing into a dead pipe.
+                        logger.warning("TwitchBot IPC connection lost: %s", e)
+                        break
                     except Exception:
-                        logger.exception("Another exception occurred in listener while trying to close writer",
-                                         exc_info=e)
-                        pass  # Suppress exceptions during cleanup
-                logger.info("Initializing connection to TwitchBot...")
-                _, writer = await asyncio.open_connection(*address[:2])
+                        logger.exception("Bot manager cycle failed; keeping the IPC connection")
+
+                    await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)
             finally:
-                # Wait for STREAMING_USERS_UPDATE_SLEEP seconds before sending connected users
-                await asyncio.sleep(STREAMING_USERS_UPDATE_SLEEP)
+                if not writer.is_closing():
+                    writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass  # The peer is already gone; nothing to salvage.
 
     async def _load_announcement_state(self) -> None:
         """Load the durable delivery record once, so restarts cannot repeat notices."""
