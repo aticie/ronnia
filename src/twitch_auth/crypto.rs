@@ -1,3 +1,9 @@
+//! AES-256-GCM envelopes for stored Twitch credentials.
+//!
+//! Tokens are serialized, encrypted with the configuration key, and stored as a
+//! nonce-prefixed ciphertext bound to the user id as associated data. Nothing in this
+//! module formats token material: `Credentials` derives neither `Debug` nor `Clone`.
+
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::AeadInPlace};
 use anyhow::{Result, anyhow, ensure};
 use rand::RngCore;
