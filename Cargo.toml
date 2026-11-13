@@ -29,6 +29,7 @@ hex = "0.4"
 bson = "2.15"
 sentry = { version = "0.49.5", default-features = false, features = ["reqwest", "rustls-no-provider", "contexts", "panic", "backtrace", "metrics"] }
 sentry-tracing = { version = "0.49.5", default-features = false }
+sentry-tower = { version = "0.49.5", default-features = false, features = ["http"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 aes-gcm = "0.10"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
