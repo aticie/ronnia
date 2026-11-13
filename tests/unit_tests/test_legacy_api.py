@@ -2,6 +2,7 @@ import time
 import unittest
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 
 from ronnia.clients.legacy_api import (
@@ -381,3 +382,61 @@ class LegacyAPIConfigTestCase(unittest.TestCase):
         self.assertIsNotNone(api)
         self.assertEqual(api.base_url, "http://127.0.0.1:4343")
         self.assertNotIn(TEST_TOKEN, repr(api))
+
+
+class ConnectRetryTestCase(unittest.IsolatedAsyncioTestCase):
+    """A container swap leaves a stale pooled address behind; one retry heals it."""
+
+    def make_api(self) -> LegacyAPI:
+        return LegacyAPI(
+            base_url="http://127.0.0.1:1",
+            token=TEST_TOKEN,
+        )
+
+    async def test_connection_refusal_is_retried_once_on_a_fresh_connection(self) -> None:
+        api = self.make_api()
+        calls: list[int] = []
+
+        async def flaky(session, method, url, path, payload, params, headers):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ConnectionRefusedError(111, "Connection refused")
+            return 200, {"ok": True}
+
+        api._send = flaky
+        status, body = await api._request("POST", "/internal/legacy/claim", {"a": 1})
+        await api.close()
+
+        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertEqual(len(calls), 2, "one retry after a refused connect")
+
+    async def test_persistent_refusal_surfaces_after_the_attempt_budget(self) -> None:
+        api = self.make_api()
+        calls: list[int] = []
+
+        async def dead(session, method, url, path, payload, params, headers):
+            calls.append(1)
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        api._send = dead
+        with self.assertRaises(LegacyAPIError):
+            await api._request("GET", "/internal/legacy/channels")
+        await api.close()
+
+        self.assertEqual(len(calls), 2, "the budget is two attempts, not an endless loop")
+
+    async def test_errors_after_connect_are_not_retried(self) -> None:
+        api = self.make_api()
+        calls: list[int] = []
+
+        async def dropped(session, method, url, path, payload, params, headers):
+            calls.append(1)
+            raise aiohttp.ServerDisconnectedError()
+
+        api._send = dropped
+        with self.assertRaises(LegacyAPIError):
+            await api._request("POST", "/internal/legacy/claim", {"a": 1})
+        await api.close()
+
+        self.assertEqual(len(calls), 1, "a sent request must never be replayed")
+

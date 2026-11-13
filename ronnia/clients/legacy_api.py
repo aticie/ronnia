@@ -25,6 +25,14 @@ from ronnia.models.database import DBUser
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+# A deploy replaces the container, so a pooled connection can point at an address
+# that no longer answers. A refused connect means the request never left, so one
+# retry on a fresh connection is safe even for a claim.
+CONNECT_ATTEMPTS = 2
+CONNECT_RETRY_DELAY_SECONDS = 0.25
+# Only errors raised while establishing the connection: the request never left,
+# so a retry cannot double-claim. Anything later may have been delivered.
+RETRYABLE_CONNECT_ERRORS = (aiohttp.ClientConnectorError, ConnectionRefusedError)
 DEFAULT_CACHE_TTL_SECONDS = 2.0
 DEFAULT_PAGE_LIMIT = 100
 MAX_PAGE_LIMIT = 100
@@ -169,32 +177,70 @@ class LegacyAPI:
         payload: dict[str, Any] | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> tuple[int, Any]:
-        session = await self._get_session()
         url = f"{self.base_url}{path}"
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self._token}",
         }
-        try:
-            async with session.request(
-                method,
-                url,
-                json=payload,
-                params=params,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=self._timeout),
-            ) as response:
-                raw_body = await response.text()
-                try:
-                    body = json.loads(raw_body) if raw_body else None
-                except json.JSONDecodeError:
-                    body = None
-                logger.debug("Legacy API %s %s -> %s", method, path, response.status)
-                return response.status, body
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise LegacyAPIError(
-                f"Legacy API request {method} {path} failed: {exc}"
-            ) from exc
+        for attempt in range(1, CONNECT_ATTEMPTS + 1):
+            try:
+                if attempt == 1:
+                    session = await self._get_session()
+                    return await self._send(
+                        session, method, url, path, payload, params, headers
+                    )
+                # A refused connect is not proof the service is gone: it may be
+                # mid-deploy. Retry on a throwaway session so the name is
+                # resolved again instead of reusing the dead pooled socket.
+                async with aiohttp.ClientSession() as retry_session:
+                    return await self._send(
+                        retry_session, method, url, path, payload, params, headers
+                    )
+            except RETRYABLE_CONNECT_ERRORS as exc:
+                # Raised while establishing the connection, before any bytes are
+                # sent, so retrying cannot duplicate a claim.
+                if attempt == CONNECT_ATTEMPTS:
+                    raise LegacyAPIError(
+                        f"Legacy API request {method} {path} failed: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Legacy API %s %s could not connect (%s); retrying on a fresh connection",
+                    method,
+                    path,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(CONNECT_RETRY_DELAY_SECONDS)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise LegacyAPIError(
+                    f"Legacy API request {method} {path} failed: {exc}"
+                ) from exc
+        raise LegacyAPIError(f"Legacy API request {method} {path} failed")
+
+    async def _send(
+        self,
+        session: aiohttp.ClientSession,
+        method: str,
+        url: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        params: Mapping[str, Any] | None,
+        headers: Mapping[str, str],
+    ) -> tuple[int, Any]:
+        async with session.request(
+            method,
+            url,
+            json=payload,
+            params=params,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=self._timeout),
+        ) as response:
+            raw_body = await response.text()
+            try:
+                body = json.loads(raw_body) if raw_body else None
+            except json.JSONDecodeError:
+                body = None
+            logger.debug("Legacy API %s %s -> %s", method, path, response.status)
+            return response.status, body
 
     @staticmethod
     def _error(
