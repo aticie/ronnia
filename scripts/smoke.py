@@ -622,6 +622,10 @@ def exercise_api(service):
     eventually(lambda: browser.ok("/live/users?limit=100&offset=0") == ["streamer"],
                "Existing imported account becomes eligible immediately on grant activation", timeout=15)
     check(browser.ok("/user/me")["isLive"] is True, "Verified grant+osu live state not reflected")
+    # The grant-driven lookup is coalesced behind a debounce, so it lands after the
+    # eligibility check above returns; wait for it before demanding an exact count.
+    eventually(lambda: service.providers.count_path("/twitch/helix/streams") > before_streams,
+               "Grant activation triggers a stream lookup", timeout=10)
     observed_streams = service.providers.count_path("/twitch/helix/streams")
     check(observed_streams == before_streams + 1,
           f"Existing enabled imported account got {observed_streams - before_streams} grant-driven stream "
