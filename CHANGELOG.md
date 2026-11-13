@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Twitch chat and osu! PM.
 
 ### Fixed
+- Twitch stream discovery now queries both the `osu!` (21465) and `Osu!Lazer`
+  (295941293) categories, so channels streaming the Lazer client count as live
+  osu! streams for live status, requests, and announcements.
 - The internal BotManager/TwitchBot socket no longer resets every polling
   cycle. The receiver treated one quiet interval as a dead peer and closed the
   connection just as the manager sent its next update, which produced a reset

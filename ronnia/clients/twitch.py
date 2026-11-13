@@ -7,6 +7,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from ronnia.utils.singleton import SingletonMeta
 from ronnia.utils.utils import async_batcher
 
+# Twitch category IDs treated as osu!: osu! and Osu!Lazer.
+OSU_GAME_IDS = (21465, 295941293)
+
 
 class TwitchAPI(metaclass=SingletonMeta):
     def __init__(self, client_id: str, client_secret: str, max_concurrent: int = 4):
@@ -80,8 +83,10 @@ class TwitchAPI(metaclass=SingletonMeta):
         }
 
         user_id_params = "&".join(f"user_id={uid}" for uid in user_ids)
-        # game_id=21465 is osu!
-        url = f"{self.base_url}/streams?first=100&game_id=21465&{user_id_params}"
+        # game_id=21465 is osu! and game_id=295941293 is Osu!Lazer; Helix accepts
+        # repeated game_id params to match a stream in either category.
+        game_id_params = "&".join(f"game_id={game_id}" for game_id in OSU_GAME_IDS)
+        url = f"{self.base_url}/streams?first=100&{game_id_params}&{user_id_params}"
 
         return await self._make_request("GET", url, headers=headers)
 
