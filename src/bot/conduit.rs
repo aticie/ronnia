@@ -1,10 +1,10 @@
-//! Owned EventSub conduit, shard attachment and subscription reconciliation.
+//! Owned EventSub conduit: shard attachment and subscription reconciliation.
 //!
-//! Every call uses the application access token. Relates only to the conduit
-//! this process persisted: unrelated conduits and subscriptions are never
-//! listed for deletion, and no account is ever touched here.
+//! Every call uses the application token and only ever touches the conduit this
+//! process persisted; no account is modified here.
 
-use crate::{config::Config, providers::Providers};
+use super::backoff::Backoff;
+use crate::{config::Config, providers::Providers, storage::Store};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Method;
 use rusqlite::{OptionalExtension, params};
@@ -16,8 +16,6 @@ use std::{
 use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 
-use crate::storage::Store;
-
 /// The only subscription types this bot owns, with their current versions.
 pub const STATE_TYPES: [(&str, &str); 3] = [
     ("stream.online", "1"),
@@ -28,11 +26,13 @@ pub const CHAT_TYPE: (&str, &str) = ("channel.chat.message", "1");
 const MAX_LIST_PAGES: usize = 100;
 const CREATE_PACE: Duration = Duration::from_millis(200);
 const MAX_CREATIONS_PER_PASS: usize = 200;
-const MAX_EVENTS_SUBSCRIPTIONS: usize = 10_000;
+pub(super) const MAX_EVENTS_SUBSCRIPTIONS: usize = 10_000;
 /// Four owned subscriptions per active grant must fit in one complete audit.
-pub const MAX_ACTIVE_GRANTS: usize = MAX_EVENTS_SUBSCRIPTIONS / (STATE_TYPES.len() + 1);
+pub(super) const MAX_ACTIVE_GRANTS: usize = MAX_EVENTS_SUBSCRIPTIONS / (STATE_TYPES.len() + 1);
+const BLOCK_BASE: Duration = Duration::from_secs(60);
+const BLOCK_CAP: Duration = Duration::from_secs(600);
 
-pub fn owned_version(kind: &str) -> Option<&'static str> {
+pub(super) fn owned_version(kind: &str) -> Option<&'static str> {
     STATE_TYPES
         .iter()
         .find(|(name, _)| *name == kind)
@@ -40,18 +40,71 @@ pub fn owned_version(kind: &str) -> Option<&'static str> {
         .or_else(|| (kind == CHAT_TYPE.0).then_some(CHAT_TYPE.1))
 }
 
+/// Identity of a subscription row owned by `conduit_id`. When `bot_id` is
+/// given, chat subscriptions bound to another bot are rejected. This is the one
+/// place subscription identity is parsed, shared with dispatch and revocation.
+pub(super) struct Owned<'a> {
+    pub(super) kind: &'a str,
+    pub(super) broadcaster: i64,
+    pub(super) user: Option<&'a str>,
+}
+
+pub(super) fn owned<'a>(
+    subscription: &'a Value,
+    conduit_id: &str,
+    bot_id: Option<&str>,
+) -> Option<Owned<'a>> {
+    let kind = subscription["type"].as_str()?;
+    let version = subscription["version"].as_str()?;
+    let expected = owned_version(kind)?;
+    if version != expected {
+        tracing::warn!(
+            kind,
+            version,
+            expected,
+            "ignoring an EventSub subscription with an unexpected version"
+        );
+        return None;
+    }
+    if subscription["transport"]["method"].as_str() != Some("conduit")
+        || subscription["transport"]["conduit_id"].as_str() != Some(conduit_id)
+    {
+        tracing::warn!(
+            kind,
+            "ignoring an EventSub subscription from a foreign transport"
+        );
+        return None;
+    }
+    let broadcaster = subscription["condition"]["broadcaster_user_id"]
+        .as_str()
+        .and_then(|id| id.parse::<i64>().ok())?;
+    let user = subscription["condition"]["user_id"].as_str();
+    if kind == CHAT_TYPE.0 && bot_id.is_some_and(|bot| user != Some(bot)) {
+        tracing::warn!(
+            broadcaster,
+            "ignoring a chat subscription that is not bound to the managed bot"
+        );
+        return None;
+    }
+    Some(Owned {
+        kind,
+        broadcaster,
+        user,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Desired {
-    pub kind: &'static str,
-    pub version: &'static str,
-    pub broadcaster: i64,
+pub(super) struct Desired {
+    pub(super) kind: &'static str,
+    pub(super) version: &'static str,
+    pub(super) broadcaster: i64,
     /// Bot user ID; present only for chat subscriptions.
-    pub user: Option<String>,
+    pub(super) user: Option<String>,
 }
 
 /// Subscription set for one runtime identity. Both state and chat subscriptions
 /// cover every enabled+granted channel; stream state only gates request handling.
-pub fn desired(grants: &[i64], bot_id: &str) -> Result<Vec<Desired>> {
+pub(super) fn desired(grants: &[i64], bot_id: &str) -> Result<Vec<Desired>> {
     ensure!(
         grants.len() <= MAX_ACTIVE_GRANTS,
         "EventSub degraded capacity: {} active grants exceed the {MAX_ACTIVE_GRANTS}-grant / {MAX_EVENTS_SUBSCRIPTIONS}-subscription audit safety bound; retaining existing subscriptions without partial reconciliation",
@@ -84,48 +137,27 @@ struct Remote {
     user: Option<String>,
 }
 
-#[derive(Default)]
-struct Blocked {
-    until: Option<Instant>,
-    delay: Duration,
-}
-
-impl Blocked {
-    fn ready(&mut self, now: Instant) -> bool {
-        self.until.is_none_or(|until| now >= until)
-    }
-
-    fn fail(&mut self, now: Instant) {
-        self.delay = if self.delay.is_zero() {
-            Duration::from_secs(60)
-        } else {
-            (self.delay * 2).min(Duration::from_secs(600))
-        };
-        self.until = Some(now + self.delay);
-    }
-}
-
 /// Locally cached view of the subscriptions owned by this conduit. The remote
 /// list is refreshed at startup and by the ten minute audit; ordinary chat
 /// traffic never triggers a full HTTP list.
-pub struct Subscriptions {
+pub(super) struct Subscriptions {
     conduit: String,
     bot_id: String,
     remote: BTreeMap<String, Remote>,
     warm: bool,
-    blocked: BTreeMap<String, Blocked>,
+    blocked: BTreeMap<String, Backoff>,
 }
 
 #[derive(Debug, Default)]
-pub struct Summary {
-    pub created: usize,
-    pub removed: usize,
-    pub kept: usize,
-    pub deferred: usize,
+pub(super) struct Summary {
+    pub(super) created: usize,
+    pub(super) removed: usize,
+    pub(super) kept: usize,
+    pub(super) deferred: usize,
 }
 
 impl Subscriptions {
-    pub fn new(conduit: String, bot_id: String) -> Self {
+    pub(super) fn new(conduit: String, bot_id: String) -> Self {
         Self {
             conduit,
             bot_id,
@@ -136,13 +168,13 @@ impl Subscriptions {
     }
 
     #[cfg(test)]
-    pub fn is_warm(&self) -> bool {
+    pub(super) fn is_warm(&self) -> bool {
         self.warm
     }
 
     /// Replace the cache with the complete (paginated) remote list for our
     /// conduit. Failures leave the previous cache intact.
-    pub async fn refresh_remote(
+    pub(super) async fn refresh_remote(
         &mut self,
         providers: &Providers,
         shutdown: &CancellationToken,
@@ -166,28 +198,15 @@ impl Subscriptions {
                     .as_str()
                     .filter(|id| !id.is_empty())
                     .context("subscription omitted id")?;
-                let kind = row["type"].as_str().unwrap_or_default();
-                if owned_version(kind).is_none() {
-                    continue;
-                }
-                if row["transport"]["method"].as_str() != Some("conduit")
-                    || row["transport"]["conduit_id"].as_str() != Some(self.conduit.as_str())
-                {
-                    continue;
-                }
-                let Some(broadcaster) = row["condition"]["broadcaster_user_id"]
-                    .as_str()
-                    .and_then(|id| id.parse::<i64>().ok())
-                else {
+                let Some(row) = owned(row, &self.conduit, None) else {
                     continue;
                 };
-                let user = row["condition"]["user_id"].as_str().map(|id| id.to_owned());
                 rows.insert(
                     id.to_owned(),
                     Remote {
-                        kind: kind.to_owned(),
-                        broadcaster,
-                        user,
+                        kind: row.kind.to_owned(),
+                        broadcaster: row.broadcaster,
+                        user: row.user.map(str::to_owned),
                     },
                 );
                 ensure!(
@@ -199,7 +218,7 @@ impl Subscriptions {
             let next = value["pagination"]["cursor"]
                 .as_str()
                 .filter(|cursor| !cursor.is_empty())
-                .map(|cursor| cursor.to_owned());
+                .map(str::to_owned);
             match next {
                 Some(cursor) if pages < MAX_LIST_PAGES => {
                     ensure!(
@@ -220,9 +239,9 @@ impl Subscriptions {
 
     /// Bring the remote subscription set to `desired`, deleting only entries
     /// owned by this conduit that are obsolete or bound to another bot user.
-    /// Incomplete topology gates only missing creations; cache refresh and
-    /// obsolete owned deletion must continue while shard recovery is pending.
-    pub async fn reconcile(
+    /// Incomplete topology gates only missing creations; refresh and obsolete
+    /// deletion continue while shard recovery is pending.
+    pub(super) async fn reconcile(
         &mut self,
         providers: &Providers,
         desired: &[Desired],
@@ -259,7 +278,6 @@ impl Subscriptions {
             .iter()
             .map(|row| ((row.kind, row.broadcaster), row))
             .collect();
-
         let obsolete: Vec<String> = self
             .remote
             .iter()
@@ -286,9 +304,11 @@ impl Subscriptions {
                     self.remote.remove(&id);
                     summary.removed += 1;
                 }
-                Err(error) => {
-                    tracing::warn!(subscription = %id, error = %error, "could not delete obsolete owned EventSub subscription; will retry on the audit");
-                }
+                Err(error) => tracing::warn!(
+                    subscription = %id,
+                    error = %error,
+                    "could not delete obsolete owned EventSub subscription; will retry on the audit"
+                ),
             }
         }
 
@@ -322,7 +342,10 @@ impl Subscriptions {
                 continue;
             }
             let block_key = format!("{kind}:{broadcaster}");
-            let blocked = self.blocked.entry(block_key.clone()).or_default();
+            let blocked = self
+                .blocked
+                .entry(block_key.clone())
+                .or_insert_with(|| Backoff::new(BLOCK_BASE, BLOCK_CAP));
             if !blocked.ready(now) {
                 summary.deferred += 1;
                 continue;
@@ -380,7 +403,10 @@ impl Subscriptions {
                 }
                 Err(error) => {
                     summary.deferred += 1;
-                    self.blocked.entry(block_key).or_default().fail(now);
+                    self.blocked
+                        .entry(block_key)
+                        .or_insert_with(|| Backoff::new(BLOCK_BASE, BLOCK_CAP))
+                        .fail(now);
                     tracing::warn!(
                         kind = %kind,
                         broadcaster = *broadcaster,
@@ -395,14 +421,18 @@ impl Subscriptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Conduit {
-    pub id: String,
-    pub shard_count: u32,
+pub(super) struct Conduit {
+    pub(super) id: String,
+    pub(super) shard_count: u32,
 }
 
 /// Reuse the persisted conduit and its observed topology when the client
 /// identity still matches; otherwise create the one-shard conduit we own.
-pub async fn ensure(config: &Config, store: &Store, providers: &Providers) -> Result<Conduit> {
+pub(super) async fn ensure(
+    config: &Config,
+    store: &Store,
+    providers: &Providers,
+) -> Result<Conduit> {
     let persisted: Option<(String, String)> = store
         .call(|db| {
             Ok(db
@@ -456,7 +486,7 @@ pub async fn ensure(config: &Config, store: &Store, providers: &Providers) -> Re
     Ok(created)
 }
 
-fn parse_conduit(row: &Value) -> Result<Conduit> {
+pub(super) fn parse_conduit(row: &Value) -> Result<Conduit> {
     let id = row["id"]
         .as_str()
         .filter(|id| !id.is_empty())
@@ -504,7 +534,7 @@ async fn list_conduits(providers: &Providers) -> Result<BTreeMap<String, u32>> {
         let next = value["pagination"]["cursor"]
             .as_str()
             .filter(|cursor| !cursor.is_empty())
-            .map(|cursor| cursor.to_owned());
+            .map(str::to_owned);
         let Some(next) = next else { break };
         ensure!(
             pages < MAX_LIST_PAGES,
@@ -522,7 +552,7 @@ async fn list_conduits(providers: &Providers) -> Result<BTreeMap<String, u32>> {
 
 /// Re-observe the known owned conduit after a possibly committed resize.
 /// A missing ID is an error: recovery never creates or adopts another conduit.
-pub async fn observe(providers: &Providers, conduit: &str) -> Result<Conduit> {
+pub(super) async fn observe(providers: &Providers, conduit: &str) -> Result<Conduit> {
     let shard_count = list_conduits(providers)
         .await?
         .remove(conduit)
@@ -535,7 +565,7 @@ pub async fn observe(providers: &Providers, conduit: &str) -> Result<Conduit> {
 
 /// Resize only the supplied owned conduit. Callers commit local topology only
 /// after success, and re-observe after errors because PATCH may have committed.
-pub async fn resize(providers: &Providers, conduit: &str, shard_count: u32) -> Result<()> {
+pub(super) async fn resize(providers: &Providers, conduit: &str, shard_count: u32) -> Result<()> {
     ensure!(!conduit.is_empty(), "cannot resize an empty conduit id");
     ensure!(shard_count > 0, "conduit shard_count must be positive");
     let value = providers
@@ -550,7 +580,7 @@ pub async fn resize(providers: &Providers, conduit: &str, shard_count: u32) -> R
     validate_resize(&value, conduit, shard_count)
 }
 
-fn validate_resize(value: &Value, conduit: &str, shard_count: u32) -> Result<()> {
+pub(super) fn validate_resize(value: &Value, conduit: &str, shard_count: u32) -> Result<()> {
     let updated = single_conduit(value)?;
     ensure!(
         updated.id == conduit && updated.shard_count == shard_count,
@@ -561,7 +591,7 @@ fn validate_resize(value: &Value, conduit: &str, shard_count: u32) -> Result<()>
 
 /// Bind a freshly welcomed WebSocket session to the requested shard. Must
 /// happen within ten seconds of welcome; the caller enforces the deadline.
-pub async fn attach(
+pub(super) async fn attach(
     providers: &Providers,
     conduit: &str,
     shard_id: u32,
@@ -583,7 +613,7 @@ pub async fn attach(
     validate_attachment(&value, shard_id, session_id)
 }
 
-fn validate_attachment(value: &Value, shard_id: u32, session_id: &str) -> Result<()> {
+pub(super) fn validate_attachment(value: &Value, shard_id: u32, session_id: &str) -> Result<()> {
     if let Some(errors) = value["errors"].as_array() {
         ensure!(
             errors.is_empty(),
@@ -618,162 +648,4 @@ fn validate_attachment(value: &Value, shard_id: u32, session_id: &str) -> Result
         "shard {shard_id} update response did not match the requested WebSocket session"
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn desired_contains_state_and_chat_for_every_granted_channel() {
-        let rows = desired(&[1, 2], "bot").unwrap();
-        assert_eq!(
-            rows.iter()
-                .filter(|row| row.kind == "stream.online")
-                .count(),
-            2
-        );
-        assert_eq!(
-            rows.iter()
-                .filter(|row| row.kind == "channel.update")
-                .count(),
-            2
-        );
-        assert_eq!(rows.iter().filter(|row| row.kind == CHAT_TYPE.0).count(), 2);
-        assert!(rows.iter().any(|row| row.kind == CHAT_TYPE.0
-            && row.broadcaster == 2
-            && row.user.as_deref() == Some("bot")));
-        assert!(rows.iter().any(|row| row.kind == CHAT_TYPE.0
-            && row.broadcaster == 1
-            && row.user.as_deref() == Some("bot")));
-        assert!(
-            rows.iter()
-                .filter(|row| row.kind == CHAT_TYPE.0)
-                .all(|row| row.user.is_some())
-        );
-    }
-
-    #[test]
-    fn desired_rejects_over_capacity_without_a_partial_set() {
-        let grants: Vec<i64> = (1..=MAX_ACTIVE_GRANTS as i64).collect();
-        assert_eq!(
-            desired(&grants, "bot").unwrap().len(),
-            MAX_EVENTS_SUBSCRIPTIONS
-        );
-        let mut oversized = grants;
-        oversized.push(MAX_ACTIVE_GRANTS as i64 + 1);
-        let error = desired(&oversized, "bot").unwrap_err().to_string();
-        assert!(error.contains("2500-grant"));
-        assert!(error.contains("without partial reconciliation"));
-    }
-
-    #[test]
-    fn remote_conduit_requires_positive_valid_topology_without_truncation() {
-        let conduit = parse_conduit(&json!({"id":"owned","shard_count":65})).unwrap();
-        assert_eq!(
-            conduit.shard_count, 65,
-            "pool must observe over-bound topology"
-        );
-        for row in [
-            json!({"id":"owned"}),
-            json!({"id":"owned","shard_count":0}),
-            json!({"id":"owned","shard_count":-1}),
-            json!({"id":"owned","shard_count":"3"}),
-            json!({"id":"owned","shard_count":u64::from(u32::MAX) + 1}),
-            json!({"id":"","shard_count":1}),
-            json!({"shard_count":1}),
-        ] {
-            assert!(parse_conduit(&row).is_err(), "accepted invalid row: {row}");
-        }
-    }
-
-    #[test]
-    fn resize_response_must_match_the_owned_id_and_requested_count() {
-        assert!(
-            validate_resize(
-                &json!({"data":[{"id":"owned","shard_count":3}]}),
-                "owned",
-                3
-            )
-            .is_ok()
-        );
-        for value in [
-            json!({"data":[{"id":"foreign","shard_count":3}]}),
-            json!({"data":[{"id":"owned","shard_count":2}]}),
-            json!({"data":[{"id":"owned","shard_count":0}]}),
-            json!({"data":[{"id":"owned"}]}),
-            json!({"data":[]}),
-            json!({"data":[{"id":"owned","shard_count":3},{"id":"foreign","shard_count":1}]}),
-        ] {
-            assert!(validate_resize(&value, "owned", 3).is_err());
-        }
-    }
-
-    #[test]
-    fn attachment_response_requires_exact_numeric_shard_and_session() {
-        let attached = json!({
-            "data":[{"id":"12","status":"enabled","transport":{
-                "method":"websocket","session_id":"session-new"
-            }}]
-        });
-        assert!(validate_attachment(&attached, 12, "session-new").is_ok());
-        assert!(validate_attachment(&attached, 0, "session-new").is_err());
-        assert!(validate_attachment(&attached, 12, "session-old").is_err());
-
-        for (field, invalid) in [
-            ("id", json!("012")),
-            ("id", json!(12)),
-            ("status", json!("websocket_disconnected")),
-            (
-                "transport",
-                json!({"method":"websocket","session_id":"other"}),
-            ),
-            (
-                "transport",
-                json!({"method":"webhook","session_id":"session-new"}),
-            ),
-            ("transport", Value::Null),
-            ("errors", json!([{"code":"websocket_disconnected"}])),
-        ] {
-            let mut value = attached.clone();
-            value["data"][0][field] = invalid;
-            assert!(
-                validate_attachment(&value, 12, "session-new").is_err(),
-                "accepted invalid attachment: {value}"
-            );
-        }
-        let mut top_level_error = attached.clone();
-        top_level_error["errors"] = json!([{"id":"12","code":"websocket_disconnected"}]);
-        assert!(validate_attachment(&top_level_error, 12, "session-new").is_err());
-        let mut duplicate = attached;
-        let row = duplicate["data"][0].clone();
-        duplicate["data"].as_array_mut().unwrap().push(row);
-        assert!(validate_attachment(&duplicate, 12, "session-new").is_err());
-    }
-
-    #[test]
-    fn owned_types_ignore_unrelated_subscriptions() {
-        assert!(owned_version("channel.chat.message").is_some());
-        assert!(owned_version("channel.update").is_some());
-        assert!(owned_version("conduit.shard.disabled").is_none());
-        assert!(owned_version("channel.follow").is_none());
-    }
-
-    #[test]
-    fn blocked_backoff_grows_capped_and_recovers() {
-        let now = Instant::now();
-        let mut blocked = Blocked::default();
-        assert!(blocked.ready(now));
-        blocked.fail(now);
-        assert!(!blocked.ready(now));
-        assert_eq!(blocked.delay, Duration::from_secs(60));
-        blocked.fail(now);
-        assert_eq!(blocked.delay, Duration::from_secs(120));
-        for _ in 0..10 {
-            blocked.fail(now);
-        }
-        assert_eq!(blocked.delay, Duration::from_secs(600));
-        blocked.until = None;
-        assert!(blocked.ready(now));
-    }
 }
