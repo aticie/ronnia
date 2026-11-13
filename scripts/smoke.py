@@ -70,6 +70,27 @@ def settle_chat_feedback(providers, eventsub, timeout=12.0):
     raise AssertionError("Chat feedback queue did not settle")
 
 
+def settle_stream_lookups(providers, timeout=15.0):
+    """Wait for startup stream lookups to stop before taking an exact baseline.
+
+    The bot coalesces targeted category lookups behind a short debounce, so a
+    snapshot triggered during startup can land after the baseline is captured and
+    make the grant-driven count look like two. Require the counter to be stable
+    for longer than that debounce first.
+    """
+    deadline = time.monotonic() + timeout
+    previous = None
+    stable_at = time.monotonic()
+    while time.monotonic() < deadline:
+        current = providers.count_path("/twitch/helix/streams")
+        if current != previous:
+            previous, stable_at = current, time.monotonic()
+        elif time.monotonic() - stable_at >= 1.5:
+            return
+        time.sleep(0.1)
+    raise AssertionError("Stream lookups did not settle before the baseline")
+
+
 def run_captured(command, env=None, timeout=15):
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, start_new_session=True)
@@ -565,6 +586,7 @@ def exercise_api(service):
     check(browser.request("/openapi.json")[0] == 404, "Debug docs exposed without DEBUG_MODE")
     check(browser.ok("/user/me") is None, "Anonymous /user/me must be JSON null")
     check(browser.request("/user/settings")[0] == 401, "Missing session must return 401")
+    settle_stream_lookups(service.providers)
     before_streams = service.providers.count_path("/twitch/helix/streams")
     browser.oauth("twitch", 101)
     user = browser.ok("/user/me")
@@ -600,8 +622,14 @@ def exercise_api(service):
     eventually(lambda: browser.ok("/live/users?limit=100&offset=0") == ["streamer"],
                "Existing imported account becomes eligible immediately on grant activation", timeout=15)
     check(browser.ok("/user/me")["isLive"] is True, "Verified grant+osu live state not reflected")
-    check(service.providers.count_path("/twitch/helix/streams") == before_streams + 1,
-          "Existing enabled imported account did not get exactly one grant-driven stream lookup")
+    # The grant-driven lookup is coalesced behind a debounce, so it lands after the
+    # eligibility check above returns; wait for it before demanding an exact count.
+    eventually(lambda: service.providers.count_path("/twitch/helix/streams") > before_streams,
+               "Grant activation triggers a stream lookup", timeout=10)
+    observed_streams = service.providers.count_path("/twitch/helix/streams")
+    check(observed_streams == before_streams + 1,
+          f"Existing enabled imported account got {observed_streams - before_streams} grant-driven stream "
+          f"lookups, want exactly 1 (baseline {before_streams}, observed {observed_streams})")
 
     # Reauthorizing the same identity is allowed and rotates the browser session.
     old_token = next(cookie.value for cookie in browser.cookies if cookie.name == "token")
