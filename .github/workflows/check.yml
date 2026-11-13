@@ -1,5 +1,15 @@
 name: Rust verification
-on: [push, pull_request]
+on:
+  # Branch pushes are covered by the pull_request run when a PR is open;
+  # listening on every push doubled every run on in-repo branches.
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest

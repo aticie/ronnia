@@ -1221,7 +1221,7 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
         io::Write,
         sync::atomic::{AtomicUsize, Ordering},
     };
-    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     #[derive(Clone)]
     struct LogWriter(Arc<StdMutex<Vec<u8>>>);
@@ -1238,16 +1238,15 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
 
     let logs = Arc::new(StdMutex::new(Vec::new()));
     let writer = LogWriter(logs.clone());
-    let subscriber = tracing_subscriber::fmt()
+    // Keep one dispatcher registered for the test process: concurrent requests
+    // can otherwise cache this shared callsite while no scoped subscriber exists.
+    tracing_subscriber::fmt()
         .json()
         .with_max_level(tracing::Level::INFO)
         .with_writer(move || writer.clone())
-        .finish();
-    // With one registered dispatcher, tracing caches callsite interest using
-    // the current thread's subscriber. Other tests can first hit our completion
-    // callsite without one. Keep a second dispatcher alive so interest is
-    // computed across dispatchers instead of caching that thread's "never".
-    let _quiet_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        .finish()
+        .try_init()
+        .unwrap();
     let lookups = Arc::new(AtomicUsize::new(0));
     let observed_lookups = lookups.clone();
     let sends = Arc::new(AtomicUsize::new(0));
@@ -1307,35 +1306,40 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
         mods: "HDDT".into(),
     };
     let clock = Clock::new();
-    async {
-        let mut request = request_message();
-        process_one(
-            &config, &store, &providers, &echoes, &request, &beatmap, clock,
-        )
-        .await
-        .unwrap();
-        request.id = "second-set-request".into();
-        process_one(
-            &config, &store, &providers, &echoes, &request, &beatmap, clock,
-        )
-        .await
-        .unwrap();
-    }
-    .with_subscriber(subscriber)
-    .await;
+    let mut request = request_message();
+    request.id = "readable-logs-lookup".into();
+    process_one(
+        &config, &store, &providers, &echoes, &request, &beatmap, clock,
+    )
+    .await
+    .unwrap();
+    request.id = "readable-logs-cache".into();
+    process_one(
+        &config, &store, &providers, &echoes, &request, &beatmap, clock,
+    )
+    .await
+    .unwrap();
 
     let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
     let completions: Vec<Value> = output
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .filter(|event| event["fields"]["message"] == "osu request delivered and recorded")
+        .filter(|event| {
+            event["fields"]["message_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("readable-logs-"))
+        })
         .collect();
     assert_eq!(
         completions.len(),
         2,
         "lookup and cache-hit requests must both log completion; captured logs: {output}"
     );
-    for (event, message_id) in completions.iter().zip(["evt-1", "second-set-request"]) {
+    for (event, message_id) in completions
+        .iter()
+        .zip(["readable-logs-lookup", "readable-logs-cache"])
+    {
         let fields = &event["fields"];
         assert_eq!(fields["channel"], "streamer");
         assert_eq!(fields["channel_id"], 1);
