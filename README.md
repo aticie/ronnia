@@ -12,7 +12,7 @@ The Vue dashboard lives separately in [aticie/ronnia-web](https://github.com/ati
 - SQLite WAL, foreign keys, explicit migrations, and unique Twitch/osu! **IDs**. Cached login names are not identity keys: Twitch names can change ownership.
 - Bounded request/feedback queues, sequential request delivery, disk-backed metadata, indexed statistics, and coordinated token refresh.
 - One Rust process and one persistent **local** database volume. The separately deployed dashboard uses static Nginx; Node is used only to build it. Do not place SQLite on NFS/shared network storage or run replicas against independent copies.
-- No production MongoDB service or Python runtime. BSON support is for the offline importer only.
+- No production MongoDB service or Python runtime.
 
 The approved cutover requires fresh website login. Old JWT cookies are not accepted. Ambiguous osu! sends are retained for inspection, not automatically replayed.
 
@@ -37,7 +37,7 @@ DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve --api-only
 DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve
 ```
 
-`serve` is the default command. `authorize-bot` requests `user:read:chat user:write:chat user:bot` for the bot account, validates the result, and stores only encrypted credentials. Use `--replace` only to intentionally replace a different bot account. A missing authorization is a recoverable waiting state; the API stays available. Local runs read the process environment, **not** a `.env` file. Docker Compose loads `.env`; copy `.env.example` and fill in provider credentials there. Never commit credentials, exports, or the live database.
+`serve` is the default command. `authorize-bot` requests `user:read:chat user:write:chat user:bot` for the bot account, validates the result, and stores only encrypted credentials. Use `--replace` only to intentionally replace a different bot account. A missing authorization is a recoverable waiting state; the API stays available. Local runs read the process environment, **not** a `.env` file. Docker Compose loads `.env`; copy `.env.example` and fill in provider credentials there. Never commit credentials or the live database.
 
 ### Configuration
 
@@ -77,7 +77,7 @@ DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve
 
 Provider endpoint overrides exist for isolated integration runs: `TWITCH_API_BASE`, `TWITCH_OAUTH_BASE`, `OSU_API_BASE`, `OSU_OAUTH_BASE`, `TWITCH_EVENTSUB_URL`. Defaults use official providers. Never use unencrypted WebSocket or HTTP endpoints in production.
 
-Register the exact website callback URLs with Twitch and osu!. Streamer Twitch signup requests `channel:bot`; reauthorization is required at cutover because imported records did not grant current chat permission. The bot user authorization is separate and stored encrypted. App, osu! public, osu! delegated, and bot tokens refresh independently. Do not log configuration objects or credentials.
+Register the exact website callback URLs with Twitch and osu!. Streamer Twitch signup requests `channel:bot`; reauthorization is required at cutover because accounts created before the switch have no current chat permission. The bot user authorization is separate and stored encrypted. App, osu! public, osu! delegated, and bot tokens refresh independently. Do not log configuration objects or credentials.
 
 ### Container
 
@@ -139,12 +139,11 @@ See the [frontend README](https://github.com/aticie/ronnia-web#readme) for Node/
 
 ## Coexistence with the old bot
 
-During the migration month, users use **only the new dashboard/API**; the old Python bot remains an IRC request relay for channels that have not yet granted `channel:bot`. SQLite is the sole account/settings authority. Do not keep the old website/backend as a second writable account source.
+During the migration month, users use **only the new dashboard/API**; the old Python bot remains an IRC request relay for channels that have not yet granted `channel:bot`. SQLite is the sole account/settings authority; accounts and settings are created through the new dashboard because this branch does not import the old MongoDB data. Do not keep the old website/backend as a second writable account source.
 
-1. Import the Mongo collections once as described below.
-2. Set `MIGRATION_ACTIVE=true`, a `MIGRATION_CUTOFF_AT` date, and a strong `INTERNAL_API_TOKEN` in the new service environment.
-3. Start the new stack. New-bot subscriptions activate only for consented channels after the handoff grace.
-4. Prepare a **separate legacy checkout** of [PR #56 (`migration/coexistence-bridge`)](https://github.com/aticie/ronnia/pull/56), for example `../ronnia-legacy`. That PR is independently reviewed/deployed and is not included in this Rust branch. Create `legacy-bot.env` from `legacy-bot.env.example`, fill in existing Twitch/osu/Mongo values, and copy `INTERNAL_API_TOKEN` from the new `.env`. Run the patched Python bot from the legacy checkout with that environment, following that checkout's deployment instructions. Do not try to run it from this Rust root.
+1. Set `MIGRATION_ACTIVE=true`, a `MIGRATION_CUTOFF_AT` date, and a strong `INTERNAL_API_TOKEN` in the new service environment.
+2. Start the new stack. New-bot subscriptions activate only for consented channels after the handoff grace.
+3. Prepare a **separate legacy checkout** of [PR #56 (`migration/coexistence-bridge`)](https://github.com/aticie/ronnia/pull/56), for example `../ronnia-legacy`. That PR is independently reviewed/deployed and is not included in this Rust branch. Create `legacy-bot.env` from `legacy-bot.env.example`, fill in existing Twitch/osu/Mongo values, and copy `INTERNAL_API_TOKEN` from the new `.env`. Run the patched Python bot from the legacy checkout with that environment, following that checkout's deployment instructions. Do not try to run it from this Rust root.
 
 Deploy the PR #56 bridge from that retained legacy checkout/release **before** the Rust-only cutover removes Python from `master`. Keep that legacy release available throughout coexistence. PR #56 does not need to be merged into this Rust branch; the two branches have separate deployment roles.
 
@@ -162,22 +161,13 @@ The `/internal/legacy/*` routes are unavailable without `INTERNAL_API_TOKEN`; th
 
 ## MongoDB → SQLite cutover
 
-1. Stop the Python bot and backend writers for a consistent final export. Back up MongoDB first; the importer never connects to or modifies it.
-2. Export the `Ronnia` database's **Users, Settings, Statistics, Beatmaps** collections. Use either uncompressed `mongodump` BSON files or one `mongoexport` JSON file per collection. Empty collections still need empty files/arrays.
-3. Place exactly one supported file per collection in a directory, with exact case-sensitive names, e.g. `Users.json`, `Settings.json`, `Statistics.json`, `Beatmaps.json`. JSON arrays, NDJSON, `.jsonl`, `.ndjson`, and `.bson` are supported; decompress `.gz` first. `*.metadata.json` from mongodump is ignored.
-4. Validate against the intended destination, then import while the Rust service is stopped:
+This branch has no MongoDB importer. The service starts from a fresh SQLite database, creates the schema/default settings itself, and never reads or writes MongoDB. Pre-cutover accounts, settings, and request history are therefore not migrated by this repository.
 
-```sh
-target/release/ronnia --database /path/ronnia.sqlite3 import --directory /path/exports --check
-target/release/ronnia --database /path/ronnia.sqlite3 import --directory /path/exports
-target/release/ronnia --database /path/ronnia.sqlite3 check
-```
+1. Back up MongoDB and stop the Python bot/backend writers before switching. Keep the backup for rollback; nothing in the Rust service modifies it.
+2. Switch deployment to Rust. Users register again through the dashboard (either provider first, then the other), and streamers must authorize Twitch so the app has `channel:bot` permission; no account is assumed to have consented.
+3. Run `check` against the new database after the first successful start (see below). The website remains external to this repository; verify its configured API origin and callback URLs at deployment.
 
-The report lists per-collection counts, issues, normalization notes, and whether changes committed. Any validation issue aborts the **entire** import. Data is streamed through transactional SQLite staging; the whole database is not loaded into memory. At most 1000 detailed issues are retained, with total issue count/truncation reported. Resolve conflicts explicitly and revalidate; never silently choose a duplicate provider account.
-
-The importer recognizes Extended JSON integers/dates, canonicalizes old snake_case settings aliases, normalizes exclusions/logins, and retains original documents/unknown fields alongside typed data. Missing cooldown defaults to 30 seconds. Invalid/incomplete accounts, conflicting alias values, malformed ranges, duplicate IDs, malformed JSON/BSON, and ambiguous input files are errors. Timestamps use UTC epoch seconds; raw documents preserve source subsecond precision. Upper star bounds of 10 or more retain the old API's unlimited convention. Statistics without source `_id` retain every occurrence and receive synthetic export-SHA256-plus-ordinal identities: replaying the same ordered Statistics export rejects the entire import without adding rows, even if JSON whitespace or object-key order changes. Original raw documents are unchanged. Genuinely different or reordered IDless exports cannot be deduplicated against overlapping historical events without their original source identities.
-
-5. Switch deployment to Rust and retain the Mongo backup for rollback. Users must log in again, and streamers must re-authorize Twitch so the app has `channel:bot` permission; imported accounts are not assumed to have consented. Until then their accounts/settings/history remain intact but their channels are not subscribed. Do not run old and new services simultaneously against divergent databases. The website remains external to this repository; verify its configured API origin and callback URLs at deployment.
+Do not run old and new services simultaneously as writable account sources. Rollback means redeploying the old Python stack against its existing MongoDB data, because the new SQLite database contains only accounts registered after the switch. During coexistence, requests relayed through the internal bridge are recorded in SQLite as they happen; older history stays in MongoDB.
 
 ### Maintenance
 
@@ -262,16 +252,5 @@ python3 scripts/scale.py --binary target/release/ronnia --channels 100 --request
 Smoke runs the actual executable against isolated local Twitch EventSub WebSocket/Helix/OAuth/osu HTTP simulators and a fresh SQLite database. It exercises the real device-code bot authorization, streamer consent, conduit/subscription lifecycle, reconnect handoff, hybrid live tracking, token refresh, and ambiguous delivery handling. On Linux with `cc`, a process-local resolver shim injects two DNS failures and later successful resolution into the same running service. It does not change host DNS or `/etc/hosts`. This is not a live-provider certification.
 
 The scale scenario uses Python's standard library and temporary local fixtures/SQLite. It exercises growth and persisted topology, isolated shard recovery, slow maintenance HTTP, revision races, cross-channel request progress, bounded admission, drain/restart, and shutdown. Initial 400-subscription convergence allows 180 seconds at the unchanged 200 ms creation pace. Results include request accounting, API latency, and Linux peak RSS; they are synthetic evidence, not production channel or throughput guarantees. Private Rust tests assert worker/permit/channel cleanup and reader joining. The binary harness does not prove container bot-mode load.
-
-For the reproducible original-process memory comparison, prepare a sibling `../ronnia-legacy` checkout containing the original Python bot and its `.venv`, a sibling `../ronnia-backend` checkout with its Python dependency environment, a local Docker daemon, and the `mongo:7` image. These are read-only benchmark inputs, not this Rust root; use explicit flags for other checkout locations:
-
-```sh
-python3 scripts/memory.py --binary target/release/ronnia \
-  --bot-source ../ronnia-legacy --bot-python ../ronnia-legacy/.venv/bin/python \
-  --backend-source ../ronnia-backend --backend-python /tmp/ronnia-backend-baseline/bin/python \
-  --output /tmp/ronnia-memory-results.json
-```
-
-The benchmark runs original Python bot/backend code with only local-provider destination redirection and an isolated real MongoDB. It compares the same small synthetic workload against Rust+SQLite, reports per-process/service RSS and PSS where available, and excludes the common provider simulators. Summed RSS may double-count shared pages. Results are workload-specific, not production peak-memory or capacity guarantees.
 
 The Rust relay/API code retains the original Apache-2.0 license. Frontend source attribution and its unchanged upstream licensing status are documented in the [separate frontend README](https://github.com/aticie/ronnia-web#readme).
