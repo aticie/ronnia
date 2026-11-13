@@ -1,7 +1,11 @@
 //! Bounded, channel-serial request execution. Admission permits cover ingress,
 //! pending queues, running work, and completed jobs awaiting collection.
 
-use super::{Beatmap, Clock, Config, Echo, Message, Providers, Store, process_one};
+use super::{
+    Beatmap, Clock, Config, Echo, Message, Providers, Store, isolated_hub, process_one,
+    record_duration, record_outcome,
+};
+use sentry::SentryFutureExt;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
@@ -10,13 +14,23 @@ use std::{
 use tokio::{
     sync::{OwnedSemaphorePermit, mpsc},
     task::{Id, JoinError, JoinSet},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 pub(super) struct RequestEnvelope {
     pub(super) message: Message,
     pub(super) beatmap: Beatmap,
     pub(super) permit: OwnedSemaphorePermit,
+    pub(super) span: tracing::Span,
+    pub(super) queued_at: Instant,
+}
+
+struct RequestTask {
+    channel: i64,
+    span: tracing::Span,
+    hub: Arc<sentry::Hub>,
 }
 
 #[derive(Default)]
@@ -25,7 +39,7 @@ struct Scheduler {
     ready: VecDeque<i64>,
     active: BTreeSet<i64>,
     jobs: JoinSet<OwnedSemaphorePermit>,
-    channels_by_task: HashMap<Id, i64>,
+    channels_by_task: HashMap<Id, RequestTask>,
 }
 
 impl Scheduler {
@@ -60,19 +74,34 @@ impl Scheduler {
                 message,
                 beatmap,
                 permit,
+                span,
+                queued_at,
             }) = request
             else {
                 continue;
             };
             let work = process(message, beatmap);
-            let task = self.jobs.spawn(async move {
-                work.await;
-                // Keep the permit even after work finishes, until collection.
-                // A panic drops it during unwinding instead.
-                permit
-            });
+            let hub = isolated_hub();
+            let task = self.jobs.spawn(
+                async move {
+                    let queue_wait_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
+                    record_duration("ronnia.request.queue_wait", queue_wait_ms);
+                    tracing::debug!(queue_wait_ms, "request processing started");
+                    let started = Instant::now();
+                    work.await;
+                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    record_duration("ronnia.request.processing_time", elapsed_ms);
+                    tracing::debug!(elapsed_ms, "request processing finished");
+                    // Keep the permit even after work finishes, until collection.
+                    // A panic drops it during unwinding instead.
+                    permit
+                }
+                .instrument(span.clone())
+                .bind_hub(hub.clone()),
+            );
             self.active.insert(channel);
-            self.channels_by_task.insert(task.id(), channel);
+            self.channels_by_task
+                .insert(task.id(), RequestTask { channel, span, hub });
         }
     }
 
@@ -83,19 +112,33 @@ impl Scheduler {
                 id
             }
             Err(error) => {
-                tracing::error!(
-                    channel_id = self.channels_by_task.get(&error.id()),
-                    panic = error.is_panic(),
-                    error = %error,
-                    "request worker stopped unexpectedly"
-                );
+                if let Some(request) = self.channels_by_task.get(&error.id()) {
+                    sentry::Hub::run(request.hub.clone(), || {
+                        request.span.in_scope(|| {
+                            record_outcome(
+                                "ronnia.requests.processed",
+                                if error.is_panic() {
+                                    "panic"
+                                } else {
+                                    "cancelled"
+                                },
+                            );
+                            tracing::error!(
+                                channel_id = request.channel,
+                                panic = error.is_panic(),
+                                error = %error,
+                                "request worker stopped unexpectedly"
+                            );
+                        });
+                    });
+                }
                 error.id()
             }
         };
-        if let Some(channel) = self.channels_by_task.remove(&id) {
-            self.active.remove(&channel);
-            if self.pending.contains_key(&channel) {
-                self.ready.push_back(channel);
+        if let Some(request) = self.channels_by_task.remove(&id) {
+            self.active.remove(&request.channel);
+            if self.pending.contains_key(&request.channel) {
+                self.ready.push_back(request.channel);
             }
         }
     }
@@ -124,12 +167,22 @@ pub(super) async fn process_requests(
         async move {
             // Never select cancellation around process_one: its final delivery,
             // statistics, and cooldown bookkeeping must finish atomically.
-            if let Err(error) = process_one(
+            let result = process_one(
                 &config, &store, &providers, &echoes, &message, &beatmap, clock,
             )
-            .await
-            {
-                tracing::error!(channel = %message.channel, message_id = %message.id, error = %error, "request processing failed");
+            .await;
+            record_outcome(
+                "ronnia.requests.processed",
+                if result.is_ok() { "ok" } else { "error" },
+            );
+            if let Err(error) = result {
+                tracing::error!(
+                    channel = %message.channel,
+                    message_id = %message.id,
+                    error = error.as_ref() as &dyn std::error::Error,
+                    error_chain = %format_args!("{error:#}"),
+                    "request processing failed"
+                );
             }
         }
     })
@@ -255,6 +308,8 @@ mod tests {
                     mods: String::new(),
                 },
                 permit: self.budget.clone().try_acquire_owned().unwrap(),
+                span: tracing::Span::none(),
+                queued_at: Instant::now(),
             }
         }
 

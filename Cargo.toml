@@ -27,8 +27,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 sha2 = "0.10"
 hex = "0.4"
 bson = "2.15"
-sentry = { version = "0.42", default-features = false, features = ["reqwest", "rustls", "contexts", "panic", "backtrace"] }
-sentry-tracing = "0.42"
+sentry = { version = "0.49.5", default-features = false, features = ["reqwest", "rustls-no-provider", "contexts", "panic", "backtrace", "metrics"] }
+sentry-tracing = { version = "0.49.5", default-features = false }
 utoipa = { version = "5", features = ["axum_extras"] }
 aes-gcm = "0.10"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }

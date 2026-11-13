@@ -17,6 +17,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, params};
+use sentry::SentryFutureExt;
 use serde_json::Value;
 use std::{
     collections::{HashSet, VecDeque},
@@ -28,6 +29,7 @@ use tokio::{
     time::{Instant, sleep, sleep_until, timeout},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 mod conduit;
 mod eventsub;
@@ -75,6 +77,8 @@ struct RequestIngress {
 struct Echo {
     channel_id: i64,
     text: String,
+    span: tracing::Span,
+    queued_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -324,31 +328,70 @@ async fn send_feedback(
         if config.dry_run {
             continue;
         }
-        let Some(sender) = identities.borrow().clone() else {
-            continue;
-        };
-        let text = sanitize_chat(&echo.text, 450);
-        if text.is_empty() {
-            continue;
+        let span = echo.span.clone();
+        async {
+            let Some(sender) = identities.borrow().clone() else {
+                record_outcome("ronnia.twitch.feedback", "skipped");
+                tracing::warn!(
+                    channel_id = echo.channel_id,
+                    reason = "bot_unavailable",
+                    "Twitch chat feedback skipped"
+                );
+                return;
+            };
+            let text = sanitize_chat(&echo.text, 450);
+            if text.is_empty() {
+                record_outcome("ronnia.twitch.feedback", "skipped");
+                tracing::debug!(
+                    channel_id = echo.channel_id,
+                    reason = "empty_message",
+                    "Twitch chat feedback skipped"
+                );
+                return;
+            }
+            // Pacing belongs to queue wait, not provider send time.
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = sleep_until(next_send) => {}
+            }
+            next_send = Instant::now() + Duration::from_millis(1500);
+            let queue_wait_ms = echo.queued_at.elapsed().as_secs_f64() * 1000.0;
+            record_duration("ronnia.feedback.queue_wait", queue_wait_ms);
+            let started = Instant::now();
+            let result = providers
+                .send_twitch_message(&auth, echo.channel_id, &sender, &text)
+                .await;
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            record_duration("ronnia.feedback.send_time", elapsed_ms);
+            let outcome = match &result {
+                Ok(()) => "sent",
+                Err(error) if error.uncertain => "uncertain",
+                Err(_) => "failed",
+            };
+            record_outcome("ronnia.twitch.feedback", outcome);
+            match result {
+                Ok(()) => tracing::info!(
+                    channel_id = echo.channel_id,
+                    sender_id = %sender,
+                    queue_wait_ms,
+                    elapsed_ms,
+                    "Twitch chat feedback delivered"
+                ),
+                Err(error) => tracing::warn!(
+                    channel_id = echo.channel_id,
+                    sender_id = %sender,
+                    http_status = error.status,
+                    uncertain = error.uncertain,
+                    queue_wait_ms,
+                    elapsed_ms,
+                    error = %error,
+                    "Twitch chat feedback was not delivered"
+                ),
+            }
         }
-        // Twitch allows only a small number of chat messages per window;
-        // feedback is paced instead of being retried after a 429.
-        tokio::select! {
-            _ = shutdown.cancelled() => return,
-            _ = sleep_until(next_send) => {}
-        }
-        next_send = Instant::now() + Duration::from_millis(1500);
-        if let Err(error) = providers
-            .send_twitch_message(&auth, echo.channel_id, &sender, &text)
-            .await
-        {
-            tracing::warn!(
-                channel_id = echo.channel_id,
-                uncertain = error.uncertain,
-                error = %error,
-                "Twitch chat feedback was not delivered"
-            );
-        }
+        .instrument(span)
+        .bind_hub(isolated_hub())
+        .await;
     }
 }
 
@@ -623,16 +666,45 @@ impl Runtime {
                     );
                     return Ok(());
                 };
+                let span = tracing::info_span!(
+                    "request",
+                    sentry.op = "queue.process",
+                    message_id = %chat.message.id,
+                    channel_id = chat.message.channel_id,
+                    beatmap_id = beatmap.id,
+                    beatmap_kind = match beatmap.kind {
+                        BeatmapKind::Map => "map",
+                        BeatmapKind::Mapset => "mapset",
+                    },
+                );
                 let permit = match self.ingress.permits.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(tokio::sync::TryAcquireError::NoPermits) => {
-                        tracing::warn!(channel = %chat.message.channel,
-                            "request queue is full; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            span.in_scope(|| {
+                                record_queue_drop("request", "full");
+                                tracing::warn!(
+                                    channel = %chat.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request queue is full; incoming request rejected"
+                                );
+                            })
+                        });
                         return Ok(());
                     }
                     Err(tokio::sync::TryAcquireError::Closed) => {
-                        tracing::warn!(channel = %chat.message.channel,
-                            "request scheduler is closed; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            span.in_scope(|| {
+                                record_queue_drop("request", "closed");
+                                tracing::warn!(
+                                    channel = %chat.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request scheduler is closed; incoming request rejected"
+                                );
+                            })
+                        });
                         return Ok(());
                     }
                 };
@@ -640,15 +712,35 @@ impl Runtime {
                     message: chat.message,
                     beatmap,
                     permit,
+                    span,
+                    queued_at: Instant::now(),
                 }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(envelope)) => {
-                        tracing::warn!(channel = %envelope.message.channel,
-                            "request queue is full; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            envelope.span.in_scope(|| {
+                                record_queue_drop("request", "full");
+                                tracing::warn!(
+                                    channel = %envelope.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request queue is full; incoming request rejected"
+                                );
+                            })
+                        });
                     }
                     Err(mpsc::error::TrySendError::Closed(envelope)) => {
-                        tracing::warn!(channel = %envelope.message.channel,
-                            "request scheduler is closed; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            envelope.span.in_scope(|| {
+                                record_queue_drop("request", "closed");
+                                tracing::warn!(
+                                    channel = %envelope.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request scheduler is closed; incoming request rejected"
+                                );
+                            })
+                        });
                     }
                 }
             }
@@ -883,12 +975,62 @@ fn policy(user: &User, message: &Message, stars: f64) -> std::result::Result<(),
     Ok(())
 }
 
+fn isolated_hub() -> Arc<sentry::Hub> {
+    let hub = sentry::Hub::current();
+    if hub.client().is_some_and(|client| client.is_enabled()) {
+        Arc::new(sentry::Hub::new_from_top(&hub))
+    } else {
+        // No scope copy/allocation when Sentry is disabled.
+        hub
+    }
+}
+
+fn record_outcome(name: &'static str, outcome: &'static str) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(sentry::metrics::counter(name, 1).attribute("outcome", outcome));
+    });
+}
+
+fn record_duration(name: &'static str, milliseconds: f64) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(
+            sentry::metrics::distribution(name, milliseconds)
+                .unit(sentry::protocol::Unit::Millisecond),
+        );
+    });
+}
+
+fn record_queue_drop(queue: &'static str, reason: &'static str) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(
+            sentry::metrics::counter("ronnia.queue.dropped", 1)
+                .attribute("queue", queue)
+                .attribute("reason", reason),
+        );
+    });
+}
+
 fn queue_echo(echoes: &mpsc::Sender<Echo>, message: &Message, text: String) {
     if let Err(error) = echoes.try_send(Echo {
         channel_id: message.channel_id,
         text,
+        span: tracing::Span::current(),
+        queued_at: Instant::now(),
     }) {
-        tracing::warn!(channel = %message.channel, error = %error, "Twitch feedback not queued");
+        let reason = match &error {
+            mpsc::error::TrySendError::Full(_) => "full",
+            mpsc::error::TrySendError::Closed(_) => "closed",
+        };
+        record_queue_drop("feedback", reason);
+        tracing::warn!(
+            channel = %message.channel,
+            channel_id = message.channel_id,
+            message_id = %message.id,
+            queue_capacity = echoes.max_capacity(),
+            queue_depth = echoes.max_capacity() - echoes.capacity(),
+            error = %error,
+            "Twitch feedback not queued"
+        );
     }
 }
 
@@ -942,7 +1084,10 @@ async fn process_one(
             (map, set)
         }
         None => {
-            let (map, set) = providers.get_beatmap(beatmap).await?;
+            let (map, set) = providers
+                .get_beatmap(beatmap)
+                .await
+                .context("fetching osu! beatmap metadata")?;
             match beatmap.kind {
                 BeatmapKind::Map => store.cache_put(map.clone()).await?,
                 BeatmapKind::Mapset => store.cache_put_set(beatmap.id, map.clone()).await?,
@@ -992,6 +1137,7 @@ async fn process_one(
         } else {
             "failed"
         };
+        record_outcome("ronnia.osu.deliveries", status);
         let description = error.to_string();
         store
             .call(move |db| {
@@ -1002,8 +1148,9 @@ async fn process_one(
                 Ok(())
             })
             .await?;
-        return Err(error.into());
+        return Err(anyhow::Error::new(error).context("sending osu! private message"));
     }
+    record_outcome("ronnia.osu.deliveries", "sent");
     // One local transaction ties confirmed delivery, statistics and cooldown.
     // A crash before this commit leaves 'sending', hence uncertain on restart.
     let id = message.id.clone();

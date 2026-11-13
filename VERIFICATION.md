@@ -260,6 +260,17 @@ The debug documentation surface was opened in a real headless Chromium against `
 - The deployed local stack returned public migration status `active:true` with cutoff `2026-12-04T00:00:00Z`; an authenticated internal request returned legacy channels, no-auth returned 404, and a wrong bearer token returned 401. The dashboard proxy blocked `/api/internal/*` with 404.
 - Chromium rendered the real dashboard banner with `role=status`, the localized cutoff, and the settings action. A scroll-position check exposed the banner initially above the viewport; it was changed to sticky and reverified at maximum scroll (`y=0`, visible) before the final deployment.
 
+## Sentry and Railway observability
+
+- Sentry SDK 0.49.5 native ingestion was exercised against a local HTTP envelope collector with the real release executable and synthetic Twitch/osu! providers; no production Sentry data was emitted.
+- At trace sampling `1`, the collector received request transactions, provider child spans, trace-linked metrics, and an osu! failure issue correlated to its originating request. At sampling `0`, errors and all twelve native metric families still arrived, without transactions.
+- Actual WebSocket chat → osu! PM → Twitch feedback scenarios covered metadata 500/401 recovery, Twitch 401/429 retries, definite chat rejection, a missing acknowledgement, and a failed PM. Rejected/uncertain sends were not replayed.
+- Saturation reported the originating message and the shared admission budget; queued work drained and database readiness remained healthy.
+- Railway JSON and Sentry envelopes were checked for raw chat text, outgoing message bodies, and synthetic access/refresh/client-secret/device credentials. Metric dimensions excluded channel/requester/message/beatmap IDs and raw endpoints/URLs.
+- Formatting, Clippy with warnings denied, all 137 Rust tests, the release build, and the existing executable smoke harness passed with the native Sentry changes.
+- Configuration scenarios exercised absent/`0`/`0.1`/`1` trace sampling, an empty DSN, nonfinite/malformed/out-of-range sampling, and a malformed DSN. Invalid telemetry configuration failed with the relevant setting name before database initialization, without a panic.
+- Two channels were exercised concurrently with one PM deliberately held and Railway logging reduced to `WARN`. The other channel continued, both feedback operations retained distinct request traces, and native metrics/errors still arrived independently of log verbosity.
+
 ## Limits
 
 - No real Twitch or osu! account, chat message, OAuth consent, or EventSub production stream was used. The production EventSub endpoint was reached only for an unauthenticated TLS handshake/welcome.
