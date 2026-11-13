@@ -1,3 +1,6 @@
+//! Domain types shared by the API, bot and storage layers, with their validation
+//! rules in one place.
+
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,6 @@
+//! Runtime configuration parsed from the environment, validated once at startup
+//! with keyed diagnostics.
+
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, bail};

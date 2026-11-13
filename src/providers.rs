@@ -1,3 +1,6 @@
+//! Twitch and osu! HTTP providers: token single-flight, request pacing and the
+//! typed calls the bot and API make.
+
 use crate::{
     config::Config,
     parser::{Beatmap, BeatmapKind},

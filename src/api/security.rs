@@ -1,3 +1,6 @@
+//! Browser session authentication: cookie handling, origin checks and the
+//! one session lookup every authenticated route uses.
+
 use super::{ApiError, ApiResult, ApiState, unauthorized};
 use crate::{config::Config, domain::User};
 use axum::{

@@ -1,3 +1,6 @@
+//! Command-line entry point: one long-running service plus the operator commands
+//! that inspect or repair the database.
+
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};

@@ -1,3 +1,6 @@
+//! Provider authorization-code flows: one flow shape, with per-provider endpoints,
+//! scopes and claim mapping owned by `Provider`.
+
 use super::{
     ApiError, ApiResult, ApiState,
     security::{self, Identity},

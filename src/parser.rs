@@ -1,3 +1,5 @@
+//! Chat message parsing: beatmap and beatmapset URLs, mods and request shape.
+
 use regex::Regex;
 use std::sync::LazyLock;
 use url::Url;
