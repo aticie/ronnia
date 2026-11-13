@@ -1,13 +1,24 @@
-use super::conduit::Subscriptions;
-use super::eventsub::{Connection, Incoming};
+use super::backoff::Backoff;
+use super::conduit::{self, Subscriptions};
+use super::delivery::{Clock, policy, prepare_message, process_one, sanitize_chat};
+use super::dispatch::{Message, chat_message};
+use super::maintenance::{self, Action, Channels, Lookup, Maintenance, Pending, Signal};
+use super::requests::{RequestEnvelope, Scheduler};
+use super::transport::{self, Connection, Incoming, Link, Reader, Topology};
 use super::*;
+use crate::{
+    domain::{StreamEvent, User},
+    parser::{self, Beatmap, BeatmapKind},
+    providers::Providers,
+    storage::Store,
+};
 use axum::{
     Router,
     extract::{Form, Query, RawQuery, State},
     routing::{get, patch, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     future::Future,
@@ -85,31 +96,33 @@ fn chat_event_maps_badges_points_and_filters_the_bot_itself() {
 
 #[test]
 fn notification_subscription_identity_is_validated_before_use() {
-    let conduit = "conduit-1";
+    let conduit_id = "conduit-1";
     let subscription = json!({
         "type": "channel.chat.message",
         "version": "1",
         "condition": {"broadcaster_user_id": "1", "user_id": "bot"},
-        "transport": {"method": "conduit", "conduit_id": conduit},
+        "transport": {"method": "conduit", "conduit_id": conduit_id},
     });
-    let (kind, version, broadcaster) =
-        subscription_identity(conduit, &subscription).expect("owned subscription");
-    assert_eq!(
-        (kind, version, broadcaster),
-        ("channel.chat.message", "1", 1)
-    );
+    let owned = conduit::owned(&subscription, conduit_id, Some("bot")).expect("owned subscription");
+    assert_eq!(owned.kind, "channel.chat.message");
+    assert_eq!(owned.broadcaster, 1);
+    assert_eq!(owned.user, Some("bot"));
 
     let mut foreign = subscription.clone();
     foreign["transport"]["conduit_id"] = json!("somebody-else");
-    assert!(subscription_identity(conduit, &foreign).is_none());
+    assert!(conduit::owned(&foreign, conduit_id, Some("bot")).is_none());
 
     let mut old_version = subscription.clone();
     old_version["version"] = json!("2");
-    assert!(subscription_identity(conduit, &old_version).is_none());
+    assert!(conduit::owned(&old_version, conduit_id, Some("bot")).is_none());
+
+    let mut wrong_bot = subscription.clone();
+    wrong_bot["condition"]["user_id"] = json!("other");
+    assert!(conduit::owned(&wrong_bot, conduit_id, Some("bot")).is_none());
 
     let mut unrelated = subscription;
     unrelated["type"] = json!("channel.follow");
-    assert!(subscription_identity(conduit, &unrelated).is_none());
+    assert!(conduit::owned(&unrelated, conduit_id, Some("bot")).is_none());
 }
 
 #[test]
@@ -744,7 +757,13 @@ async fn hybrid_snapshots_see_offline_states_and_never_filter_by_category() {
 
     // Going offline via the API must be observable: no game_id filter.
     state.stream_mode.store(1, Ordering::SeqCst);
-    let skipped = super::streams::targeted(&store, &providers, &[1])
+    let expected = store
+        .snapshot_versions(vec![1])
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    let skipped = super::maintenance::snapshot(&store, &providers, Some(expected))
         .await
         .unwrap();
     assert!(skipped.is_empty());
@@ -761,7 +780,9 @@ async fn hybrid_snapshots_see_offline_states_and_never_filter_by_category() {
 
     // Back online on osu! restores eligibility.
     state.stream_mode.store(0, Ordering::SeqCst);
-    super::streams::full(&store, &providers).await.unwrap();
+    super::maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
     assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
     server.abort();
 }
@@ -778,7 +799,7 @@ fn maintenance_for_test(
     let (_, signals) = watch::channel(super::maintenance::Signal::default());
     let (action_tx, actions) = super::maintenance::actions();
     let (targets, target_rx) = watch::channel(1);
-    let (_, topology) = watch::channel(super::shards::Topology {
+    let (_, topology) = watch::channel(super::transport::Topology {
         remote_count: 1,
         attached_count: 1,
     });
@@ -816,7 +837,9 @@ async fn assert_existing_channel_grant_refresh(grace_secs: u64) {
     state.stream_mode.store(1, Ordering::SeqCst);
     maintenance.refresh_membership().await.unwrap();
     maintenance.run_pending().await.unwrap();
-    super::streams::full(&store, &providers).await.unwrap();
+    super::maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
     assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
     let initial_calls = state.stream_calls.load(Ordering::SeqCst);
     state.stream_mode.store(0, Ordering::SeqCst);
@@ -899,7 +922,9 @@ async fn failed_membership_reads_preserve_the_grant_activation_edge() {
         state.stream_mode.store(1, Ordering::SeqCst);
         maintenance.refresh_membership().await.unwrap();
         maintenance.run_pending().await.unwrap();
-        super::streams::full(&store, &providers).await.unwrap();
+        super::maintenance::snapshot(&store, &providers, None)
+            .await
+            .unwrap();
         let initial_calls = state.stream_calls.load(Ordering::SeqCst);
         state.stream_mode.store(0, Ordering::SeqCst);
         store.call(|db| {
@@ -1389,7 +1414,7 @@ fn start_test_pool(
     sockets: &PoolSockets,
     remote_count: u32,
     cap: u32,
-) -> (super::shards::Pool, watch::Sender<u32>) {
+) -> (super::transport::Pool, watch::Sender<u32>) {
     let mut config = mock_config(address);
     let settings = Arc::get_mut(&mut config).unwrap();
     settings.twitch_eventsub_url = sockets.url.clone();
@@ -1398,7 +1423,7 @@ fn start_test_pool(
     let shutdown = CancellationToken::new();
     let providers = Providers::new(config.clone(), shutdown.clone()).unwrap();
     let (target, targets) = watch::channel(remote_count);
-    let pool = super::shards::Pool::start(
+    let pool = super::transport::Pool::start(
         config,
         providers,
         conduit::Conduit {
@@ -1588,7 +1613,7 @@ async fn a_remote_conduit_above_the_hard_bound_is_left_untouched() {
     sleep(Duration::from_millis(100)).await;
     assert_eq!(
         *pool.topology.borrow(),
-        super::shards::Topology {
+        super::transport::Topology {
             remote_count: 65,
             attached_count: 0
         }
@@ -1642,9 +1667,9 @@ async fn stale_online_actions_do_not_reactivate_after_a_dropped_offline_cancel()
         0,
         "a stale event revision must be discarded before HTTP"
     );
-    let expected = [(1, revision)].into_iter().collect();
+    let expected: std::collections::BTreeMap<i64, i64> = [(1, revision)].into_iter().collect();
     assert!(
-        super::streams::targeted_at(&store, &providers, &expected)
+        super::maintenance::snapshot(&store, &providers, Some(expected))
             .await
             .unwrap()
             .is_empty()
@@ -1671,7 +1696,7 @@ async fn late_targeted_http_results_cannot_overwrite_a_newer_offline_event() {
     state.hold_streams.store(true, Ordering::SeqCst);
     let lookup_store = store.clone();
     let lookup = tokio::spawn(async move {
-        super::streams::targeted_at(&lookup_store, &providers, &expected).await
+        super::maintenance::snapshot(&lookup_store, &providers, Some(expected)).await
     });
     eventually(|| state.stream_calls.load(Ordering::SeqCst) == 1).await;
     store
@@ -2074,7 +2099,7 @@ async fn pool_grows_the_owned_topology_one_shard_at_a_time_and_never_shrinks() {
     target.send_replace(3);
     eventually(|| {
         *pool.topology.borrow()
-            == super::shards::Topology {
+            == super::transport::Topology {
                 remote_count: 3,
                 attached_count: 3,
             }
@@ -2102,4 +2127,1251 @@ async fn pool_grows_the_owned_topology_one_shard_at_a_time_and_never_shrinks() {
     pool.shutdown().await;
     sockets.finish().await;
     helix.abort();
+}
+
+// --- Relocated module unit tests -------------------------------------------
+//
+// These cover the private logic of the modules that own it; fixtures shared
+// with the behaviour tests above live here too.
+
+#[test]
+fn desired_contains_state_and_chat_for_every_granted_channel() {
+    let rows = conduit::desired(&[1, 2], "bot").unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == "stream.online")
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == "channel.update")
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == conduit::CHAT_TYPE.0)
+            .count(),
+        2
+    );
+    assert!(rows.iter().any(|row| row.kind == conduit::CHAT_TYPE.0
+        && row.broadcaster == 2
+        && row.user.as_deref() == Some("bot")));
+    assert!(
+        rows.iter()
+            .filter(|row| row.kind == conduit::CHAT_TYPE.0)
+            .all(|row| row.user.is_some())
+    );
+}
+
+#[test]
+fn desired_rejects_over_capacity_without_a_partial_set() {
+    let grants: Vec<i64> = (1..=conduit::MAX_ACTIVE_GRANTS as i64).collect();
+    assert_eq!(
+        conduit::desired(&grants, "bot").unwrap().len(),
+        conduit::MAX_EVENTS_SUBSCRIPTIONS
+    );
+    let mut oversized = grants;
+    oversized.push(conduit::MAX_ACTIVE_GRANTS as i64 + 1);
+    let error = conduit::desired(&oversized, "bot").unwrap_err().to_string();
+    assert!(error.contains("2500-grant"));
+    assert!(error.contains("without partial reconciliation"));
+}
+
+#[test]
+fn remote_conduit_requires_positive_valid_topology_without_truncation() {
+    let conduit = conduit::parse_conduit(&json!({"id":"owned","shard_count":65})).unwrap();
+    assert_eq!(
+        conduit.shard_count, 65,
+        "pool must observe over-bound topology"
+    );
+    for row in [
+        json!({"id":"owned"}),
+        json!({"id":"owned","shard_count":0}),
+        json!({"id":"owned","shard_count":-1}),
+        json!({"id":"owned","shard_count":"3"}),
+        json!({"id":"owned","shard_count":u64::from(u32::MAX) + 1}),
+        json!({"id":"","shard_count":1}),
+        json!({"shard_count":1}),
+    ] {
+        assert!(
+            conduit::parse_conduit(&row).is_err(),
+            "accepted invalid row: {row}"
+        );
+    }
+}
+
+#[test]
+fn resize_response_must_match_the_owned_id_and_requested_count() {
+    assert!(
+        conduit::validate_resize(
+            &json!({"data":[{"id":"owned","shard_count":3}]}),
+            "owned",
+            3
+        )
+        .is_ok()
+    );
+    for value in [
+        json!({"data":[{"id":"foreign","shard_count":3}]}),
+        json!({"data":[{"id":"owned","shard_count":2}]}),
+        json!({"data":[{"id":"owned","shard_count":0}]}),
+        json!({"data":[{"id":"owned"}]}),
+        json!({"data":[]}),
+        json!({"data":[{"id":"owned","shard_count":3},{"id":"foreign","shard_count":1}]}),
+    ] {
+        assert!(conduit::validate_resize(&value, "owned", 3).is_err());
+    }
+}
+
+#[test]
+fn attachment_response_requires_exact_numeric_shard_and_session() {
+    let attached = json!({
+        "data":[{"id":"12","status":"enabled","transport":{
+            "method":"websocket","session_id":"session-new"
+        }}]
+    });
+    assert!(conduit::validate_attachment(&attached, 12, "session-new").is_ok());
+    assert!(conduit::validate_attachment(&attached, 0, "session-new").is_err());
+    assert!(conduit::validate_attachment(&attached, 12, "session-old").is_err());
+
+    for (field, invalid) in [
+        ("id", json!("012")),
+        ("id", json!(12)),
+        ("status", json!("websocket_disconnected")),
+        (
+            "transport",
+            json!({"method":"websocket","session_id":"other"}),
+        ),
+        (
+            "transport",
+            json!({"method":"webhook","session_id":"session-new"}),
+        ),
+        ("transport", Value::Null),
+        ("errors", json!([{"code":"websocket_disconnected"}])),
+    ] {
+        let mut value = attached.clone();
+        value["data"][0][field] = invalid;
+        assert!(
+            conduit::validate_attachment(&value, 12, "session-new").is_err(),
+            "accepted invalid attachment: {value}"
+        );
+    }
+    let mut top_level_error = attached.clone();
+    top_level_error["errors"] = json!([{"id":"12","code":"websocket_disconnected"}]);
+    assert!(conduit::validate_attachment(&top_level_error, 12, "session-new").is_err());
+    let mut duplicate = attached;
+    let row = duplicate["data"][0].clone();
+    duplicate["data"].as_array_mut().unwrap().push(row);
+    assert!(conduit::validate_attachment(&duplicate, 12, "session-new").is_err());
+}
+
+#[test]
+fn owned_types_ignore_unrelated_subscriptions() {
+    assert!(conduit::owned_version("channel.chat.message").is_some());
+    assert!(conduit::owned_version("channel.update").is_some());
+    assert!(conduit::owned_version("conduit.shard.disabled").is_none());
+    assert!(conduit::owned_version("channel.follow").is_none());
+}
+
+#[test]
+fn subscription_backoff_grows_capped_and_recovers() {
+    let now = Instant::now();
+    let mut backoff = Backoff::new(Duration::from_secs(60), Duration::from_secs(600));
+    assert!(backoff.ready(now));
+    backoff.fail(now);
+    assert!(!backoff.ready(now));
+    let first = backoff.until().unwrap() - now;
+    assert!((Duration::from_secs(60)..=Duration::from_secs(75)).contains(&first));
+    backoff.fail(now);
+    assert!(backoff.until().unwrap() - now > first);
+    for _ in 0..10 {
+        backoff.fail(now);
+    }
+    assert!(
+        (Duration::from_secs(600)..=Duration::from_secs(750))
+            .contains(&(backoff.until().unwrap() - now))
+    );
+    let until = backoff.until().unwrap();
+    assert!(backoff.ready(until));
+    backoff.reset();
+    assert!(backoff.ready(now));
+}
+
+#[test]
+fn welcome_keepalive_and_notification_are_decoded() {
+    let welcome = transport::parse(r#"{"metadata":{"message_type":"session_welcome"},"payload":{"session":{"id":"s1","keepalive_timeout_seconds":12,"connected_at":"now"}}}"#).unwrap();
+    let Incoming::Welcome(welcome) = welcome else {
+        panic!("expected welcome");
+    };
+    assert_eq!(welcome.session_id, "s1");
+    assert_eq!(welcome.keepalive, Duration::from_secs(12));
+    let defaulted = transport::parse(r#"{"metadata":{"message_type":"session_welcome"},"payload":{"session":{"id":"s1","keepalive_timeout_seconds":null}}}"#).unwrap();
+    assert!(
+        matches!(defaulted, Incoming::Welcome(welcome) if welcome.keepalive == Duration::from_secs(30))
+    );
+    let notification = r#"{"metadata":{"message_id":"m1","message_type":"notification","message_timestamp":"2024-01-01T00:00:00.123456789Z"},"payload":{"subscription":{"type":"channel.chat.message"},"event":{"message_id":"x"}}}"#;
+    let Incoming::Notification {
+        message_id,
+        timestamp,
+        event,
+        ..
+    } = transport::parse(notification).unwrap()
+    else {
+        panic!("expected notification");
+    };
+    assert_eq!(message_id, "m1");
+    assert_eq!(
+        transport::timestamp_nanos(&timestamp).unwrap(),
+        1_704_067_200_123_456_789
+    );
+    assert_eq!(event["message_id"], "x");
+    assert!(transport::parse("{}").is_err());
+    assert!(
+        transport::parse(r#"{"metadata":{"message_type":"notification"},"payload":{}}"#).is_err()
+    );
+}
+
+#[test]
+fn rfc6761_localhost_names_are_loopback_but_other_domains_are_not() {
+    for accepted in [
+        "ws://localhost/ws",
+        "ws://recover.localhost/ws",
+        "ws://127.0.0.1:9000/ws",
+        "ws://[::1]:9000/ws",
+    ] {
+        let url = url::Url::parse(accepted).unwrap();
+        assert!(transport::is_loopback(&url), "{accepted} must be loopback");
+    }
+    for rejected in [
+        "ws://attacker.example/ws",
+        "ws://notlocalhost/ws",
+        "ws://localhost.attacker.example/ws",
+        "ws://evil.localhost.example/ws",
+    ] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(
+            !transport::is_loopback(&url),
+            "{rejected} must not be loopback"
+        );
+    }
+    assert!(
+        transport::validate_reconnect_url(
+            "ws://recover.localhost:9000/ws",
+            "ws://recover.localhost:9000/ws?handoff=1",
+        )
+        .is_ok()
+    );
+    assert!(
+        transport::validate_reconnect_url(
+            "ws://recover.localhost:9000/ws",
+            "ws://attacker.example:9000/ws",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn reconnect_must_stay_on_the_configured_origin() {
+    let configured = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30";
+    let candidate = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30&session=abc";
+    assert_eq!(
+        transport::validate_reconnect_url(configured, candidate).unwrap(),
+        candidate
+    );
+    for rejected in [
+        "wss://evil.example/ws",
+        "ws://eventsub.wss.twitch.tv/ws",
+        "wss://eventsub.wss.twitch.tv:8443/ws",
+        "https://eventsub.wss.twitch.tv/ws",
+    ] {
+        assert!(
+            transport::validate_reconnect_url(configured, rejected).is_err(),
+            "{rejected}"
+        );
+    }
+    assert!(
+        transport::validate_reconnect_url("ws://127.0.0.1:9/ws", "ws://127.0.0.1:9/ws?x=1").is_ok()
+    );
+    assert!(
+        transport::validate_reconnect_url("ws://127.0.0.1:9/ws", "ws://localhost:9/ws").is_err()
+    );
+}
+
+#[test]
+fn connection_backoff_is_capped_and_monotonic_before_jitter() {
+    let mut backoff = Backoff::new(Duration::from_millis(500), Duration::from_secs(30));
+    let mut previous = Duration::ZERO;
+    for _ in 0..12 {
+        let delay = backoff.next_delay();
+        assert!(delay >= previous.min(Duration::from_secs(30)));
+        assert!(delay <= Duration::from_millis(37_500));
+        previous = delay;
+    }
+    assert!(backoff.next_delay() <= Duration::from_millis(37_500));
+    backoff.reset();
+    assert!(backoff.next_delay() < Duration::from_secs(1));
+}
+
+#[test]
+fn growth_waits_for_every_observed_shard_and_never_shrinks() {
+    let mut state = transport::State {
+        remote_count: 3,
+        attached: std::collections::BTreeSet::from([0, 1]),
+        uncertain: false,
+    };
+    assert_eq!(state.candidate(5, 8), None);
+    state.set_attached(2, true);
+    assert_eq!(state.candidate(5, 8), Some(3));
+    assert_eq!(state.candidate(1, 8), None);
+    assert_eq!(
+        state.topology(),
+        Topology {
+            remote_count: 3,
+            attached_count: 3
+        }
+    );
+    state.observe(4);
+    assert_eq!(state.candidate(5, 8), None);
+    // A failed attachment retains the committed remote count and blocks the
+    // next growth step until the missing shard actually recovers.
+    state.set_attached(3, false);
+    assert_eq!(state.remote_count, 4);
+    state.set_attached(3, true);
+    assert_eq!(state.candidate(5, 8), Some(4));
+    state.uncertain = true;
+    assert_eq!(state.candidate(5, 8), None);
+    assert_eq!(state.topology().attached_count, 0);
+    assert_eq!(state.attached.len(), 4);
+}
+
+#[test]
+fn persisted_count_above_cap_is_attached_but_above_hard_bound_is_not() {
+    let mut state = transport::State {
+        remote_count: 4,
+        attached: std::collections::BTreeSet::new(),
+        uncertain: false,
+    };
+    for id in 0..4 {
+        state.set_attached(id, true);
+    }
+    assert_eq!(state.topology().attached_count, 4);
+    assert_eq!(state.candidate(8, 2), None);
+    state.observe(65);
+    state.set_attached(0, true);
+    assert_eq!(
+        state.topology(),
+        Topology {
+            remote_count: 65,
+            attached_count: 0
+        }
+    );
+    assert_eq!(state.candidate(100, 100), None);
+}
+
+#[tokio::test]
+async fn welcome_deadlines_are_independent_and_cover_the_whole_operation() {
+    let first_welcome = Instant::now() - transport::SHARD_ATTACH_DEADLINE;
+    let second_welcome = Instant::now();
+    let (expired, healthy) = tokio::join!(
+        transport::attach_before(first_welcome + transport::SHARD_ATTACH_DEADLINE, async {
+            std::future::pending::<anyhow::Result<()>>().await
+        }),
+        transport::attach_before(second_welcome + transport::SHARD_ATTACH_DEADLINE, async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(())
+        }),
+    );
+    assert!(expired.unwrap_err().to_string().contains("nine seconds"));
+    assert!(healthy.is_ok());
+    let deadline = Instant::now() + Duration::from_millis(10);
+    let result = transport::attach_before(deadline, async {
+        tokio::task::yield_now().await;
+        std::future::pending::<anyhow::Result<()>>().await
+    })
+    .await;
+    assert!(result.is_err());
+}
+
+struct Dropped(Arc<AtomicBool>);
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn reader_close_joins_cooperative_reader() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    let guard = Dropped(dropped.clone());
+    let handle = tokio::spawn(async move {
+        let _guard = guard;
+        token.cancelled().await;
+    });
+    Reader { handle, cancel }.close().await;
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reader_close_aborts_and_joins_uncooperative_reader() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guard = Dropped(dropped.clone());
+    let handle = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    Reader {
+        handle,
+        cancel: CancellationToken::new(),
+    }
+    .close()
+    .await;
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn link_shutdown_cancels_and_joins_all_readers() {
+    let mut link = Link::new();
+    let mut flags = Vec::new();
+    for id in 0..4 {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            token.cancelled().await;
+        });
+        link.readers.insert(id, Reader { handle, cancel });
+        flags.push(dropped);
+    }
+    link.shutdown().await;
+    assert!(link.readers.is_empty());
+    assert!(flags.iter().all(|flag| flag.load(Ordering::SeqCst)));
+}
+
+// --- Maintenance unit tests ------------------------------------------------
+
+#[tokio::test]
+async fn overflow_coalesces_snapshot_without_losing_later_revisions() {
+    let (actions, mut queue) = maintenance::actions();
+    let (signals, mut revisions) = watch::channel(Signal::default());
+    let captured = *revisions.borrow_and_update();
+    for id in 0..maintenance::TARGET_CAPACITY {
+        maintenance::enqueue(
+            &actions,
+            &signals,
+            Action::Schedule {
+                id: id as i64,
+                expected_revision: 7,
+            },
+        );
+    }
+    maintenance::enqueue(&actions, &signals, Action::Cancel { id: 0 });
+    let overflow = *revisions.borrow_and_update();
+    assert_eq!(overflow.snapshot_revision, captured.snapshot_revision + 1);
+    assert_eq!(overflow.audit_revision, captured.audit_revision);
+    assert_eq!(
+        queue.len(),
+        maintenance::TARGET_CAPACITY,
+        "overflow never expands the queue"
+    );
+    // Completing an operation at the captured revision cannot acknowledge the
+    // overflow obligation or a later independent revocation.
+    maintenance::request(&signals, true, false);
+    let later = *revisions.borrow_and_update();
+    assert!(later.snapshot_revision > captured.snapshot_revision);
+    assert!(later.revision > overflow.revision);
+    assert!(later.audit_revision > overflow.audit_revision);
+    for id in 0..maintenance::TARGET_CAPACITY {
+        assert!(matches!(queue.recv().await,
+            Some(Action::Schedule { id: queued, expected_revision: 7 }) if queued == id as i64));
+    }
+    assert!(queue.try_recv().is_err());
+}
+
+#[test]
+fn pending_debounces_bounds_and_preserves_retry_revision() {
+    let mut pending = Pending::default();
+    assert!(pending.schedule(1, 10));
+    assert!(pending.take_due().is_empty());
+    let original = pending.due.remove(&1).unwrap();
+    assert!(original.due > Instant::now());
+    assert!(pending.retry(1, original));
+    let retry = pending.due.get(&1).unwrap();
+    assert_eq!(retry.attempt, 1);
+    assert_eq!(
+        retry.expected,
+        Some(10),
+        "retry may not recapture an offline revision"
+    );
+    assert!(retry.due > Instant::now());
+    for id in 2..=conduit::MAX_ACTIVE_GRANTS as i64 {
+        assert!(pending.schedule(id, 1));
+    }
+    assert!(!pending.schedule(conduit::MAX_ACTIVE_GRANTS as i64 + 1, 1));
+    assert!(
+        pending.schedule(1, 11),
+        "a newer online revision supersedes existing work"
+    );
+    assert_eq!(pending.due[&1].expected, Some(11));
+    assert_eq!(pending.due.len(), conduit::MAX_ACTIVE_GRANTS);
+}
+
+#[tokio::test]
+async fn failed_online_lookup_retry_does_not_adopt_newer_offline_revision() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    store
+        .apply_stream_event(1, "streamer".into(), StreamEvent::Online, 100)
+        .await
+        .unwrap();
+    let online_revision = store.snapshot_versions(vec![1]).await.unwrap()[0].1;
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (_signals, signal_rx) = watch::channel(Signal::default());
+    let (action_tx, action_rx) = maintenance::actions();
+    let (targets, _target_rx) = watch::channel(1);
+    let (_topology_tx, topology) = watch::channel(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    let mut instance = Maintenance::new(
+        config,
+        store.clone(),
+        providers,
+        "conduit-1".into(),
+        "bot".into(),
+        Channels {
+            membership: store.channel_changes(),
+            signals: signal_rx,
+            actions: action_rx,
+            targets,
+            topology,
+        },
+    );
+    // This is the exact event-triggered retry retained after a failed HTTP
+    // lookup. Its deadline is due, but its baseline is still the online event.
+    instance.pending.insert(
+        1,
+        Lookup {
+            due: Instant::now(),
+            attempt: 1,
+            expected: Some(online_revision),
+        },
+    );
+    store
+        .apply_stream_event(1, "streamer".into(), StreamEvent::Offline, 200)
+        .await
+        .unwrap();
+    instance.run_pending().await.unwrap();
+    assert_eq!(
+        state.stream_calls.load(Ordering::SeqCst),
+        0,
+        "a stale retry is discarded before issuing HTTP, not rebound to offline"
+    );
+    assert!(instance.pending.due.is_empty());
+    assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    // Ordered cancellation also removes a scheduled online lookup outright.
+    action_tx
+        .try_send(Action::Schedule {
+            id: 1,
+            expected_revision: online_revision,
+        })
+        .unwrap();
+    action_tx.try_send(Action::Cancel { id: 1 }).unwrap();
+    instance.drain_actions();
+    assert!(instance.pending.due.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn completed_creation_pass_requires_snapshot_after_an_intermediate_correction() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    store
+        .call(|db| {
+            db.execute(
+            "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
+            [],
+        )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (_signals, signal_rx) = watch::channel(Signal::default());
+    let (_actions, action_rx) = maintenance::actions();
+    let (targets, _target_rx) = watch::channel(1);
+    let (_topology_tx, topology) = watch::channel(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    let mut instance = Maintenance::new(
+        config,
+        store.clone(),
+        providers.clone(),
+        "conduit-1".into(),
+        "bot".into(),
+        Channels {
+            membership: store.channel_changes(),
+            signals: signal_rx,
+            actions: action_rx,
+            targets,
+            topology,
+        },
+    );
+    instance.subscriptions_reconciled(&conduit::Summary {
+        created: 200,
+        deferred: 4,
+        ..Default::default()
+    });
+    // A useful correction can run between paced creation passes, but this
+    // broadcaster's subscriptions have not all been established yet.
+    state.stream_mode.store(1, Ordering::SeqCst);
+    maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
+    instance.snapshot_pending = false;
+    assert!(instance.snapshot_after_reconcile);
+    assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+
+    // Twitch changes state before the final subscriptions are created, so no
+    // notification can be relied on for that transition.
+    state.stream_mode.store(0, Ordering::SeqCst);
+    instance.subscriptions_reconciled(&conduit::Summary {
+        created: 4,
+        deferred: 0,
+        ..Default::default()
+    });
+    assert!(
+        instance.snapshot_pending,
+        "the intermediate snapshot must not consume the post-subscription correction"
+    );
+    assert!(!instance.snapshot_after_reconcile);
+    maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
+    instance.snapshot_pending = false;
+    assert!(
+        store.user_by_twitch(1).await.unwrap().unwrap().is_live,
+        "the final correction repairs the otherwise missed transition"
+    );
+    assert_eq!(state.stream_calls.load(Ordering::SeqCst), 2);
+    instance.subscriptions_reconciled(&conduit::Summary::default());
+    assert!(
+        !instance.snapshot_pending,
+        "ordinary no-change reconciliations must not continuously poll streams"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn single_pass_grant_activation_uses_only_its_targeted_correction() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (_signals, signals) = watch::channel(Signal::default());
+    let (_actions, actions) = maintenance::actions();
+    let (targets, _target_rx) = watch::channel(1);
+    let (_topology_tx, topology) = watch::channel(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    // The shared fixture already owns a chat row for user "bot". Use a
+    // different managed identity so this activation creates all four desired
+    // subscriptions rather than retaining that existing row.
+    let bot_id = "activation-bot";
+    let mut instance = Maintenance::new(
+        config,
+        store.clone(),
+        providers.clone(),
+        "conduit-1".into(),
+        bot_id.into(),
+        Channels {
+            membership: store.channel_changes(),
+            signals,
+            actions,
+            targets,
+            topology,
+        },
+    );
+    // An imported enabled account is already known at startup, without a
+    // grant. Complete its offline startup correction before activation.
+    state.stream_mode.store(1, Ordering::SeqCst);
+    instance.refresh_membership().await.unwrap();
+    instance.run_pending().await.unwrap();
+    instance.subscriptions_reconciled(&conduit::Summary::default());
+    maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
+    instance.snapshot_pending = false;
+    let baseline = state.stream_calls.load(Ordering::SeqCst);
+    store
+        .call(|db| {
+            db.execute(
+            "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
+            [],
+        )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    state.stream_mode.store(0, Ordering::SeqCst);
+    instance.refresh_membership().await.unwrap();
+    let desired = conduit::desired(instance.grants.as_ref().unwrap(), bot_id).unwrap();
+    let summary = instance
+        .subs
+        .reconcile(&providers, &desired, true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(summary.created, 4);
+    assert_eq!(summary.deferred, 0);
+    instance.subscriptions_reconciled(&summary);
+    assert!(
+        !instance.snapshot_pending,
+        "a normal creation pass must not duplicate the grant-activation lookup"
+    );
+    instance.run_pending().await.unwrap();
+    assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    assert_eq!(state.stream_calls.load(Ordering::SeqCst), baseline + 1);
+    instance.refresh_membership().await.unwrap();
+    instance.run_pending().await.unwrap();
+    instance.subscriptions_reconciled(&conduit::Summary::default());
+    assert!(!instance.snapshot_pending);
+    assert_eq!(
+        state.stream_calls.load(Ordering::SeqCst),
+        baseline + 1,
+        "unrelated membership refreshes must not repeat the correction"
+    );
+    server.abort();
+}
+
+/// Retry a cheap observation with a bounded timeout instead of sleeping for a
+/// guessed duration.
+async fn poll_until(mut condition: impl FnMut() -> bool, what: &str) {
+    for _ in 0..600 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("bounded wait for {what} expired");
+}
+
+#[tokio::test]
+async fn session_recovery_audits_and_snapshots_without_reprovisioning_subscriptions() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    store
+        .call(|db| {
+            db.execute(
+                "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // The channel was fully subscribed before its shard dropped. Only the live
+    // transition happened while disconnected, so the recovery re-list must find
+    // every desired subscription already established.
+    *state.seeded.lock().unwrap() = Some(vec![
+        json!({"id":"state-online","status":"enabled","type":"stream.online","version":"1","condition":{"broadcaster_user_id":"1"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
+        json!({"id":"state-offline","status":"enabled","type":"stream.offline","version":"1","condition":{"broadcaster_user_id":"1"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
+        json!({"id":"state-update","status":"enabled","type":"channel.update","version":"2","condition":{"broadcaster_user_id":"1"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
+        json!({"id":"chat-1","status":"enabled","type":"channel.chat.message","version":"1","condition":{"broadcaster_user_id":"1","user_id":"bot"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
+    ]);
+    state.stream_mode.store(1, Ordering::SeqCst);
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (signals, signal_rx) = watch::channel(Signal::default());
+    let (_actions, action_rx) = maintenance::actions();
+    let (targets, _target_rx) = watch::channel(1);
+    let (topology_tx, topology) = watch::channel(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    let instance = Maintenance::new(
+        config,
+        store.clone(),
+        providers,
+        "conduit-1".into(),
+        "bot".into(),
+        Channels {
+            membership: store.channel_changes(),
+            signals: signal_rx,
+            actions: action_rx,
+            targets,
+            topology,
+        },
+    );
+    let shutdown = CancellationToken::new();
+    let worker = tokio::spawn(instance.run(shutdown.clone()));
+    // Converged: startup membership/audit kept the seeded subscriptions, then
+    // the full snapshot and the activation lookup completed.
+    poll_until(
+        || {
+            state.list_calls.load(Ordering::SeqCst) >= 1
+                && state.stream_calls.load(Ordering::SeqCst) >= 2
+        },
+        "maintenance startup convergence",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let audited = state.list_calls.load(Ordering::SeqCst);
+    let snapshots = state.stream_calls.load(Ordering::SeqCst);
+    assert_eq!(
+        (audited, snapshots),
+        (1, 2),
+        "startup ran one audit, the full snapshot and the activation lookup"
+    );
+    assert_eq!(
+        (
+            state.creates.load(Ordering::SeqCst),
+            state.deletes.load(Ordering::SeqCst)
+        ),
+        (0, 0),
+        "startup must reuse the established subscriptions instead of provisioning them"
+    );
+    assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+
+    // The shard drops while the provider goes live, then reattaches. The
+    // foreground topology observer requests exactly this audit and snapshot.
+    topology_tx.send_replace(Topology {
+        remote_count: 1,
+        attached_count: 0,
+    });
+    state.stream_mode.store(0, Ordering::SeqCst);
+    topology_tx.send_replace(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    maintenance::request(&signals, true, true);
+
+    let mut corrected = false;
+    for _ in 0..600 {
+        if store.user_by_twitch(1).await.unwrap().unwrap().is_live {
+            corrected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        corrected,
+        "bounded wait for the recovery snapshot correction expired"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .expect("maintenance loop stops when cancelled")
+        .unwrap();
+
+    // The recovery re-listed the owned subscriptions, found them complete and
+    // provisioned nothing: a topology/session change never recreates or deletes
+    // subscriptions. Exactly one guarded full snapshot repaired the transition
+    // that was missed while disconnected.
+    assert_eq!(
+        state.list_calls.load(Ordering::SeqCst),
+        audited + 1,
+        "the recovery signal must run the remote audit"
+    );
+    assert_eq!(
+        state.creates.load(Ordering::SeqCst),
+        0,
+        "recovery must not recreate existing owned subscriptions"
+    );
+    assert_eq!(
+        state.deletes.load(Ordering::SeqCst),
+        0,
+        "recovery must not delete existing owned subscriptions"
+    );
+    assert_eq!(
+        state.stream_calls.load(Ordering::SeqCst),
+        snapshots + 1,
+        "exactly one revision-guarded full snapshot"
+    );
+    assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    server.abort();
+}
+
+// --- Request scheduler unit tests ------------------------------------------
+
+use std::pin::Pin;
+
+type Work = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+struct Controlled {
+    gates: std::collections::BTreeMap<String, tokio::sync::oneshot::Receiver<bool>>,
+    started: mpsc::UnboundedSender<String>,
+    finished: mpsc::UnboundedSender<String>,
+}
+
+impl Controlled {
+    fn work(&mut self, message: Message, _: Beatmap) -> Work {
+        let gate = self
+            .gates
+            .remove(&message.id)
+            .expect("one start per request");
+        let started = self.started.clone();
+        let finished = self.finished.clone();
+        Box::pin(async move {
+            started.send(message.id.clone()).unwrap();
+            let panic = gate.await.expect("test must release active work");
+            assert!(!panic, "controlled worker panic");
+            finished.send(message.id).unwrap();
+        })
+    }
+}
+
+struct Fixture {
+    budget: Arc<tokio::sync::Semaphore>,
+    control: Controlled,
+    gates: std::collections::BTreeMap<String, tokio::sync::oneshot::Sender<bool>>,
+    started: mpsc::UnboundedReceiver<String>,
+    finished: mpsc::UnboundedReceiver<String>,
+}
+
+impl Fixture {
+    fn new(capacity: usize) -> Self {
+        let (started_tx, started) = mpsc::unbounded_channel();
+        let (finished_tx, finished) = mpsc::unbounded_channel();
+        Self {
+            budget: Arc::new(tokio::sync::Semaphore::new(capacity)),
+            control: Controlled {
+                gates: std::collections::BTreeMap::new(),
+                started: started_tx,
+                finished: finished_tx,
+            },
+            gates: std::collections::BTreeMap::new(),
+            started,
+            finished,
+        }
+    }
+
+    fn request(&mut self, channel: i64, id: &str) -> RequestEnvelope {
+        let (release, gate) = tokio::sync::oneshot::channel();
+        self.gates.insert(id.to_owned(), release);
+        self.control.gates.insert(id.to_owned(), gate);
+        RequestEnvelope {
+            message: Message {
+                id: id.to_owned(),
+                channel: format!("channel{channel}"),
+                channel_id: channel,
+                author: "requester".into(),
+                author_id: "100".into(),
+                moderator: false,
+                subscriber: false,
+                vip: false,
+                points: false,
+            },
+            beatmap: Beatmap {
+                id: 1,
+                kind: BeatmapKind::Map,
+                mods: String::new(),
+            },
+            permit: self.budget.clone().try_acquire_owned().unwrap(),
+        }
+    }
+
+    fn release(&mut self, id: &str, panic: bool) {
+        self.gates.remove(id).unwrap().send(panic).unwrap();
+    }
+
+    async fn started(&mut self) -> String {
+        tokio::time::timeout(Duration::from_secs(5), self.started.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn finished(&mut self) -> String {
+        tokio::time::timeout(Duration::from_secs(5), self.finished.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+}
+
+fn fill(scheduler: &mut Scheduler, fixture: &mut Fixture, workers: usize) {
+    while scheduler.jobs.len() < workers {
+        let Some(RequestEnvelope {
+            message,
+            beatmap,
+            permit,
+        }) = scheduler.next()
+        else {
+            break;
+        };
+        let channel = message.channel_id;
+        let work = fixture.control.work(message, beatmap);
+        scheduler.spawn(channel, permit, work);
+    }
+}
+
+async fn collect(scheduler: &mut Scheduler) {
+    let result = tokio::time::timeout(Duration::from_secs(5), scheduler.jobs.join_next_with_id())
+        .await
+        .unwrap()
+        .unwrap();
+    scheduler.complete(result);
+}
+
+fn assert_empty(scheduler: &Scheduler) {
+    assert!(scheduler.pending.is_empty());
+    assert!(scheduler.ready.is_empty());
+    assert!(scheduler.active.is_empty());
+    assert!(scheduler.jobs.is_empty());
+    assert!(scheduler.channels_by_task.is_empty());
+}
+
+#[tokio::test]
+async fn one_budget_bounds_workers_pending_and_uncollected_results() {
+    let mut fixture = Fixture::new(32);
+    let mut scheduler = Scheduler::default();
+    for index in 0..32 {
+        scheduler.admit(fixture.request(index % 4, &format!("r{index}")));
+    }
+    assert!(fixture.budget.clone().try_acquire_owned().is_err());
+    fill(&mut scheduler, &mut fixture, 4);
+    let mut first = std::collections::BTreeSet::new();
+    for _ in 0..4 {
+        first.insert(fixture.started().await);
+    }
+    assert_eq!(
+        first,
+        std::collections::BTreeSet::from(["r0".into(), "r1".into(), "r2".into(), "r3".into()])
+    );
+    assert!(fixture.started.try_recv().is_err());
+    assert_eq!(scheduler.active.len(), 4);
+    assert_eq!(scheduler.jobs.len(), 4);
+    assert_eq!(
+        scheduler
+            .pending
+            .values()
+            .map(std::collections::VecDeque::len)
+            .sum::<usize>(),
+        28
+    );
+    fixture.release("r1", false);
+    assert_eq!(fixture.finished().await, "r1");
+    assert_eq!(
+        fixture.budget.available_permits(),
+        0,
+        "completed but uncollected jobs still own admission"
+    );
+    collect(&mut scheduler).await;
+    assert_eq!(fixture.budget.available_permits(), 1);
+    fill(&mut scheduler, &mut fixture, 4);
+    assert_eq!(
+        fixture.started().await,
+        "r5",
+        "another channel progresses while r0 is held"
+    );
+    assert!(
+        fixture.started.try_recv().is_err(),
+        "same-channel successors cannot overlap"
+    );
+    scheduler.discard_pending();
+    assert_eq!(fixture.budget.available_permits(), 28);
+    for id in ["r0", "r2", "r3", "r5"] {
+        fixture.release(id, false);
+    }
+    while !scheduler.jobs.is_empty() {
+        collect(&mut scheduler).await;
+    }
+    assert_empty(&scheduler);
+    assert_eq!(fixture.budget.available_permits(), 32);
+}
+
+#[tokio::test]
+async fn channel_fifo_is_serial_and_ready_channels_rotate_fairly() {
+    let mut fixture = Fixture::new(5);
+    let mut scheduler = Scheduler::default();
+    for (channel, id) in [(1, "a1"), (1, "a2"), (2, "b1"), (2, "b2"), (3, "c1")] {
+        scheduler.admit(fixture.request(channel, id));
+    }
+    // Defensive stale entries cannot resurrect empty channel state.
+    scheduler.ready.push_front(999);
+    for expected in ["a1", "b1", "c1", "a2", "b2"] {
+        fill(&mut scheduler, &mut fixture, 1);
+        assert_eq!(fixture.started().await, expected);
+        assert!(fixture.started.try_recv().is_err());
+        fixture.release(expected, false);
+        collect(&mut scheduler).await;
+    }
+    assert_empty(&scheduler);
+    assert_eq!(fixture.budget.available_permits(), 5);
+}
+
+#[tokio::test]
+async fn panicked_worker_releases_channel_and_admission_without_blocking_peers() {
+    let mut fixture = Fixture::new(3);
+    let mut scheduler = Scheduler::default();
+    for (channel, id) in [(1, "a1"), (1, "a2"), (2, "b1")] {
+        scheduler.admit(fixture.request(channel, id));
+    }
+    fill(&mut scheduler, &mut fixture, 2);
+    let mut starts = std::collections::BTreeSet::new();
+    starts.insert(fixture.started().await);
+    starts.insert(fixture.started().await);
+    assert_eq!(
+        starts,
+        std::collections::BTreeSet::from(["a1".into(), "b1".into()])
+    );
+    fixture.release("a1", true);
+    collect(&mut scheduler).await;
+    assert_eq!(fixture.budget.available_permits(), 1);
+    assert_eq!(scheduler.active, std::collections::BTreeSet::from([2]));
+    assert_eq!(scheduler.channels_by_task.len(), 1);
+    fill(&mut scheduler, &mut fixture, 2);
+    assert_eq!(fixture.started().await, "a2");
+    fixture.release("a2", false);
+    fixture.release("b1", false);
+    collect(&mut scheduler).await;
+    collect(&mut scheduler).await;
+    assert_empty(&scheduler);
+    assert_eq!(fixture.budget.available_permits(), 3);
+}
+
+#[tokio::test]
+async fn cancelled_task_clears_active_channel_and_skips_stale_ready_entries() {
+    let mut fixture = Fixture::new(2);
+    let mut scheduler = Scheduler::default();
+    scheduler.admit(fixture.request(1, "a1"));
+    scheduler.admit(fixture.request(1, "a2"));
+    fill(&mut scheduler, &mut fixture, 2);
+    assert_eq!(fixture.started().await, "a1");
+    scheduler.ready.push_front(1);
+    fill(&mut scheduler, &mut fixture, 2);
+    assert!(fixture.started.try_recv().is_err());
+    assert_eq!(scheduler.jobs.len(), 1);
+    assert!(scheduler.ready.is_empty());
+    scheduler.jobs.abort_all();
+    collect(&mut scheduler).await;
+    assert!(scheduler.active.is_empty());
+    assert!(scheduler.channels_by_task.is_empty());
+    assert_eq!(fixture.budget.available_permits(), 1);
+    fill(&mut scheduler, &mut fixture, 2);
+    assert_eq!(fixture.started().await, "a2");
+    fixture.release("a2", false);
+    collect(&mut scheduler).await;
+    assert_empty(&scheduler);
+    assert_eq!(fixture.budget.available_permits(), 2);
+}
+
+#[tokio::test]
+async fn shutdown_closes_ingress_discards_pending_and_joins_active_work() {
+    let mut fixture = Fixture::new(4);
+    let (tx, mut rx) = mpsc::channel(4);
+    for (channel, id) in [(1, "a1"), (1, "a2"), (2, "b1"), (2, "b2")] {
+        tx.try_send(fixture.request(channel, id))
+            .unwrap_or_else(|_| panic!("queue has capacity"));
+    }
+    let mut scheduler = Scheduler::default();
+    scheduler.admit(rx.try_recv().unwrap());
+    let Some(RequestEnvelope {
+        message,
+        beatmap,
+        permit,
+    }) = scheduler.next()
+    else {
+        panic!("the first request must be runnable");
+    };
+    let channel = message.channel_id;
+    let work = fixture.control.work(message, beatmap);
+    scheduler.spawn(channel, permit, work);
+    assert_eq!(fixture.started().await, "a1");
+    while let Ok(request) = rx.try_recv() {
+        scheduler.admit(request);
+    }
+    assert_eq!(fixture.budget.available_permits(), 0);
+    let drain =
+        tokio::spawn(async move { super::requests::drain_ingress(&mut rx, &mut scheduler).await });
+    tokio::time::timeout(Duration::from_secs(5), tx.closed())
+        .await
+        .unwrap();
+    assert!(tx.is_closed());
+    assert_eq!(fixture.budget.available_permits(), 3);
+    assert!(
+        !drain.is_finished(),
+        "shutdown must join rather than cancel active bookkeeping"
+    );
+    assert!(fixture.started.try_recv().is_err());
+    fixture.gates.remove("a1").unwrap().send(false).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixture.budget.available_permits(), 4);
+    assert!(fixture.started.try_recv().is_err());
+}
+
+// --- Stream snapshot revision guard ---------------------------------------
+
+#[tokio::test]
+async fn revision_guard_prevents_a_slow_snapshot_from_reactivating() {
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    store
+        .call(|db| {
+            db.execute(
+                "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store
+        .apply_stream_event(1, "streamer".into(), StreamEvent::Online, 1_000)
+        .await
+        .unwrap();
+    store
+        .apply_stream_event(
+            1,
+            "streamer".into(),
+            StreamEvent::Category("21465".into()),
+            2_000,
+        )
+        .await
+        .unwrap();
+    assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+
+    let expected = store
+        .snapshot_versions(vec![1])
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    // A newer offline event lands while the HTTP snapshot is in flight.
+    store
+        .apply_stream_event(1, "streamer".into(), StreamEvent::Offline, 3_000)
+        .await
+        .unwrap();
+    let skipped = maintenance::apply(
+        &store,
+        &[1],
+        &expected,
+        vec![crate::providers::LiveStream {
+            id: 1,
+            login: "streamer".into(),
+            category_id: "21465".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(skipped, vec![1], "the stale snapshot must report a retry");
+    assert!(
+        !store.user_by_twitch(1).await.unwrap().unwrap().is_live,
+        "a slow snapshot must not reactivate an offline channel"
+    );
 }

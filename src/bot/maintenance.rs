@@ -1,9 +1,12 @@
 //! One owner for membership, subscription reconciliation and stream snapshots.
+//! EventSub owns timely transitions; Helix snapshots fill in and repair the
+//! truth, revision guarded so a slow response never overwrites a newer event.
 //! HTTP work never runs on the foreground EventSub dispatcher.
 
-use super::{AUDIT_INTERVAL, MAX_RESYNC_ATTEMPTS, TARGET_DEBOUNCE, conduit, shards, streams};
-use crate::{config::Config, providers::Providers, storage::Store};
+use super::{backoff::Backoff, conduit, transport::Topology};
+use crate::{config::Config, domain::StreamSnapshot, providers::Providers, storage::Store};
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
@@ -15,13 +18,145 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-const TARGET_CAPACITY: usize = 1024;
+/// Remote subscription audit; heals subscriptions revoked behind our back.
+const AUDIT_INTERVAL: Duration = Duration::from_secs(600);
+/// Coalesce targeted category lookups triggered by `stream.online` bursts.
+const TARGET_DEBOUNCE: Duration = Duration::from_millis(300);
+const MAX_RESYNC_ATTEMPTS: u32 = 5;
+pub(super) const TARGET_CAPACITY: usize = 1024;
+const RETRY_BASE: Duration = Duration::from_secs(1);
+const RETRY_CAP: Duration = Duration::from_secs(60);
+
+// --- Stream snapshots ------------------------------------------------------
+
+/// Observe the live state of every enabled channel (`None`) or of the given
+/// revision-guarded `ids`. Returns channels whose snapshot lost the revision
+/// race and therefore need a targeted retry.
+pub(super) async fn snapshot(
+    store: &Store,
+    providers: &Providers,
+    expected: Option<BTreeMap<i64, i64>>,
+) -> Result<Vec<i64>> {
+    let expected: BTreeMap<i64, i64> = match expected {
+        Some(expected) => {
+            let ids: Vec<i64> = expected.keys().copied().collect();
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let current: BTreeMap<i64, i64> =
+                store.snapshot_versions(ids).await?.into_iter().collect();
+            expected
+                .into_iter()
+                .filter(|(id, revision)| current.get(id) == Some(revision))
+                .collect()
+        }
+        None => {
+            let ids = store.enabled_twitch_ids().await?;
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            store.snapshot_versions(ids).await?.into_iter().collect()
+        }
+    };
+    if expected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = expected.keys().copied().collect();
+    let live = providers.live_streams(&ids).await?;
+    apply(store, &ids, &expected, live).await
+}
+
+pub(super) async fn apply(
+    store: &Store,
+    ids: &[i64],
+    expected: &BTreeMap<i64, i64>,
+    live: Vec<crate::providers::LiveStream>,
+) -> Result<Vec<i64>> {
+    let mut observed: BTreeMap<i64, (String, String)> = BTreeMap::new();
+    for stream in live {
+        if !expected.contains_key(&stream.id) {
+            continue;
+        }
+        observed.insert(stream.id, (stream.login, stream.category_id));
+    }
+    let snapshots: Vec<StreamSnapshot> = ids
+        .iter()
+        .filter_map(|id| {
+            let expected_revision = *expected.get(id)?;
+            Some(match observed.get(id) {
+                Some((login, category_id)) => StreamSnapshot {
+                    twitch_id: *id,
+                    expected_revision,
+                    online: true,
+                    category_id: category_id.clone(),
+                    login: Some(login.clone()),
+                },
+                None => StreamSnapshot {
+                    twitch_id: *id,
+                    expected_revision,
+                    online: false,
+                    category_id: String::new(),
+                    login: None,
+                },
+            })
+        })
+        .collect();
+    if snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let desired: BTreeMap<i64, (bool, String)> = snapshots
+        .iter()
+        .map(|snapshot| {
+            (
+                snapshot.twitch_id,
+                (snapshot.online, snapshot.category_id.clone()),
+            )
+        })
+        .collect();
+    store.apply_stream_snapshot(snapshots).await?;
+    // A snapshot that lost the revision race leaves the newer state in place.
+    // Comparing the compact stored projection detects that without depending on
+    // how many events arrived meanwhile.
+    let actual = raw_states(store, ids).await?;
+    Ok(desired
+        .into_iter()
+        .filter(|(id, state)| actual.get(id) != Some(state))
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// Compact projection of the stored per-channel state, used only to detect a
+/// snapshot that was skipped by the revision guard.
+async fn raw_states(store: &Store, ids: &[i64]) -> Result<BTreeMap<i64, (bool, String)>> {
+    let ids = ids.to_vec();
+    store
+        .call(move |db| {
+            let mut statement = db.prepare(
+                "SELECT online,category_id FROM channel_stream_state WHERE twitch_id=?1",
+            )?;
+            let mut rows = BTreeMap::new();
+            for id in ids {
+                if let Some(state) = statement
+                    .query_row([id], |row| {
+                        Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .optional()?
+                {
+                    rows.insert(id, state);
+                }
+            }
+            Ok(rows)
+        })
+        .await
+}
+
+// --- Membership and subscription upkeep ------------------------------------
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Signal {
-    pub revision: u64,
-    pub audit_revision: u64,
-    pub snapshot_revision: u64,
+    pub(super) revision: u64,
+    pub(super) audit_revision: u64,
+    pub(super) snapshot_revision: u64,
 }
 
 impl Default for Signal {
@@ -68,21 +203,21 @@ pub(super) fn enqueue(
 }
 
 #[derive(Clone, Copy)]
-struct Lookup {
-    due: Instant,
-    attempt: u32,
+pub(super) struct Lookup {
+    pub(super) due: Instant,
+    pub(super) attempt: u32,
     // None is a membership/snapshot correction, which captures a fresh revision.
     // Some is event-triggered work and must never adopt a newer revision.
-    expected: Option<i64>,
+    pub(super) expected: Option<i64>,
 }
 
 #[derive(Default)]
-struct Pending {
-    due: BTreeMap<i64, Lookup>,
+pub(super) struct Pending {
+    pub(super) due: BTreeMap<i64, Lookup>,
 }
 
 impl Pending {
-    fn insert(&mut self, id: i64, lookup: Lookup) -> bool {
+    pub(super) fn insert(&mut self, id: i64, lookup: Lookup) -> bool {
         if self.due.len() >= conduit::MAX_ACTIVE_GRANTS && !self.due.contains_key(&id) {
             return false;
         }
@@ -90,7 +225,7 @@ impl Pending {
         true
     }
 
-    fn fresh(&mut self, id: i64) -> bool {
+    pub(super) fn fresh(&mut self, id: i64) -> bool {
         // An authoritative membership correction supersedes an older online retry.
         self.insert(
             id,
@@ -102,7 +237,7 @@ impl Pending {
         )
     }
 
-    fn schedule(&mut self, id: i64, expected: i64) -> bool {
+    pub(super) fn schedule(&mut self, id: i64, expected: i64) -> bool {
         self.insert(
             id,
             Lookup {
@@ -113,7 +248,7 @@ impl Pending {
         )
     }
 
-    fn retry(&mut self, id: i64, lookup: Lookup) -> bool {
+    pub(super) fn retry(&mut self, id: i64, lookup: Lookup) -> bool {
         let delay = Duration::from_secs((1u64 << lookup.attempt.min(6)).min(60));
         self.insert(
             id,
@@ -129,7 +264,7 @@ impl Pending {
         self.due.values().map(|lookup| lookup.due).min()
     }
 
-    fn take_due(&mut self) -> BTreeMap<i64, Lookup> {
+    pub(super) fn take_due(&mut self) -> BTreeMap<i64, Lookup> {
         let now = Instant::now();
         let ids: Vec<i64> = self
             .due
@@ -144,33 +279,13 @@ impl Pending {
     }
 }
 
-#[derive(Default)]
-struct Retry {
-    until: Option<Instant>,
-    attempt: u32,
-}
-
-impl Retry {
-    fn ready(&self, now: Instant) -> bool {
-        self.until.is_none_or(|until| until <= now)
-    }
-    fn success(&mut self) {
-        *self = Self::default();
-    }
-    fn fail(&mut self) {
-        self.until =
-            Some(Instant::now() + Duration::from_secs((1u64 << self.attempt.min(6)).min(60)));
-        self.attempt = self.attempt.saturating_add(1);
-    }
-}
-
 /// The worker's bounded work inboxes and topology-control endpoints.
 pub(super) struct Channels {
-    pub membership: watch::Receiver<u64>,
-    pub signals: watch::Receiver<Signal>,
-    pub actions: mpsc::Receiver<Action>,
-    pub targets: watch::Sender<u32>,
-    pub topology: watch::Receiver<shards::Topology>,
+    pub(super) membership: watch::Receiver<u64>,
+    pub(super) signals: watch::Receiver<Signal>,
+    pub(super) actions: mpsc::Receiver<Action>,
+    pub(super) targets: watch::Sender<u32>,
+    pub(super) topology: watch::Receiver<Topology>,
 }
 
 pub(super) struct Maintenance {
@@ -178,20 +293,20 @@ pub(super) struct Maintenance {
     store: Store,
     providers: Providers,
     bot_id: String,
-    subs: conduit::Subscriptions,
-    pending: Pending,
+    pub(super) subs: conduit::Subscriptions,
+    pub(super) pending: Pending,
     known: BTreeSet<i64>,
     known_granted: BTreeSet<i64>,
-    grants: Option<Vec<i64>>,
+    pub(super) grants: Option<Vec<i64>>,
     channels: watch::Receiver<u64>,
     signals: watch::Receiver<Signal>,
     actions: mpsc::Receiver<Action>,
     targets: watch::Sender<u32>,
-    topology: watch::Receiver<shards::Topology>,
+    topology: watch::Receiver<Topology>,
     capped: bool,
     over_capacity: bool,
-    snapshot_pending: bool,
-    snapshot_after_reconcile: bool,
+    pub(super) snapshot_pending: bool,
+    pub(super) snapshot_after_reconcile: bool,
 }
 
 impl Maintenance {
@@ -228,7 +343,7 @@ impl Maintenance {
     /// A snapshot taken between paced creation passes cannot observe channels
     /// that are not subscribed yet. Preserve a final correction independently
     /// of any snapshots needed while reconciliation is still incomplete.
-    fn subscriptions_reconciled(&mut self, summary: &conduit::Summary) {
+    pub(super) fn subscriptions_reconciled(&mut self, summary: &conduit::Summary) {
         if summary.deferred > 0 {
             self.snapshot_after_reconcile = true;
         }
@@ -291,7 +406,7 @@ impl Maintenance {
         Ok(())
     }
 
-    fn drain_actions(&mut self) {
+    pub(super) fn drain_actions(&mut self) {
         while let Ok(action) = self.actions.try_recv() {
             match action {
                 Action::Schedule {
@@ -341,7 +456,7 @@ impl Maintenance {
             .keys()
             .filter_map(|id| current.get(id).map(|revision| (*id, *revision)))
             .collect();
-        match streams::targeted_at(&self.store, &self.providers, &expected).await {
+        match snapshot(&self.store, &self.providers, Some(expected)).await {
             Ok(skipped) => {
                 let skipped: HashSet<i64> = skipped.into_iter().collect();
                 for (id, lookup) in due {
@@ -374,10 +489,10 @@ impl Maintenance {
         let mut membership_pending = true;
         let mut reconcile_pending = true;
         let mut audit_pending = true;
-        let mut member_retry = Retry::default();
-        let mut audit_retry = Retry::default();
-        let mut reconcile_retry = Retry::default();
-        let mut snapshot_retry = Retry::default();
+        let mut member_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
+        let mut audit_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
+        let mut reconcile_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
+        let mut snapshot_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
         let mut next_periodic =
             Instant::now() + Duration::from_secs(self.config.reconcile_interval_secs.max(1));
         let mut next_audit = Instant::now() + AUDIT_INTERVAL;
@@ -427,10 +542,10 @@ impl Maintenance {
                         member_signal_ack = signal.revision;
                         membership_pending = false;
                         reconcile_pending = true;
-                        member_retry.success();
+                        member_retry.reset();
                     }
                     Err(error) => {
-                        member_retry.fail();
+                        member_retry.fail(now);
                         tracing::warn!(error = %error, "could not refresh channel membership; retaining both activation baselines");
                     }
                 }
@@ -443,10 +558,10 @@ impl Maintenance {
                         audit_ack = signal.audit_revision;
                         audit_pending = false;
                         reconcile_pending = true;
-                        audit_retry.success();
+                        audit_retry.reset();
                     }
                     Err(error) => {
-                        audit_retry.fail();
+                        audit_retry.fail(now);
                         tracing::warn!(error = %error, "EventSub audit failed; retaining subscription cache");
                     }
                 }
@@ -458,7 +573,7 @@ impl Maintenance {
             if attached && !was_attached {
                 // A topology-gated creation pass must resume immediately when
                 // attachment finishes, not wait its no-progress retry interval.
-                reconcile_retry.success();
+                reconcile_retry.reset();
             }
             was_attached = attached;
             if reconcile_pending
@@ -480,12 +595,12 @@ impl Maintenance {
                     Ok(summary) => {
                         self.subscriptions_reconciled(&summary);
                         reconcile_ack = signal.revision;
-                        reconcile_retry.success();
+                        reconcile_retry.reset();
                         reconcile_pending = summary.deferred > 0;
                         if reconcile_pending {
                             // Progress passes continue promptly; provider/permission
                             // blocks retain their own 60..600-second backoff.
-                            reconcile_retry.until = Some(
+                            reconcile_retry.set_until(
                                 Instant::now()
                                     + if summary.created > 0 {
                                         Duration::from_secs(1)
@@ -503,18 +618,18 @@ impl Maintenance {
                         );
                     }
                     Err(error) => {
-                        reconcile_retry.fail();
+                        reconcile_retry.fail(now);
                         tracing::warn!(error = %error, "EventSub reconciliation failed; retaining subscription cache");
                     }
                 }
                 continue;
             }
             if self.snapshot_pending && snapshot_retry.ready(now) {
-                match streams::full(&self.store, &self.providers).await {
+                match snapshot(&self.store, &self.providers, None).await {
                     Ok(skipped) => {
                         self.snapshot_pending = false;
                         snapshot_ack = signal.snapshot_revision;
-                        snapshot_retry.success();
+                        snapshot_retry.reset();
                         for id in skipped {
                             if !self.pending.fresh(id) {
                                 self.snapshot_pending = true;
@@ -522,7 +637,7 @@ impl Maintenance {
                         }
                     }
                     Err(error) => {
-                        snapshot_retry.fail();
+                        snapshot_retry.fail(now);
                         tracing::warn!(error = %error, "stream snapshot failed; retaining previous state");
                     }
                 }
@@ -540,12 +655,12 @@ impl Maintenance {
             }
 
             let mut deadline = next_periodic.min(next_audit);
-            if membership_pending && let Some(until) = member_retry.until {
+            if membership_pending && let Some(until) = member_retry.until() {
                 deadline = deadline.min(until);
             }
             if audit_pending
                 && within_capacity
-                && let Some(until) = audit_retry.until
+                && let Some(until) = audit_retry.until()
             {
                 deadline = deadline.min(until);
             }
@@ -553,12 +668,12 @@ impl Maintenance {
                 && !membership_pending
                 && !audit_pending
                 && within_capacity
-                && let Some(until) = reconcile_retry.until
+                && let Some(until) = reconcile_retry.until()
             {
                 deadline = deadline.min(until);
             }
             if self.snapshot_pending
-                && let Some(until) = snapshot_retry.until
+                && let Some(until) = snapshot_retry.until()
             {
                 deadline = deadline.min(until);
             }
@@ -582,454 +697,5 @@ impl Maintenance {
                 },
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        bot::tests::{helix_server, mock_config, seed_user},
-        domain::StreamEvent,
-    };
-    use std::sync::atomic::Ordering;
-
-    #[tokio::test]
-    async fn overflow_coalesces_snapshot_without_losing_later_revisions() {
-        let (actions, mut queue) = actions();
-        let (signals, mut revisions) = watch::channel(Signal::default());
-        let captured = *revisions.borrow_and_update();
-        for id in 0..TARGET_CAPACITY {
-            enqueue(
-                &actions,
-                &signals,
-                Action::Schedule {
-                    id: id as i64,
-                    expected_revision: 7,
-                },
-            );
-        }
-        enqueue(&actions, &signals, Action::Cancel { id: 0 });
-        let overflow = *revisions.borrow_and_update();
-        assert_eq!(overflow.snapshot_revision, captured.snapshot_revision + 1);
-        assert_eq!(overflow.audit_revision, captured.audit_revision);
-        assert_eq!(
-            queue.len(),
-            TARGET_CAPACITY,
-            "overflow never expands the queue"
-        );
-        // Completing an operation at the captured revision cannot acknowledge
-        // the overflow obligation or a later independent revocation.
-        request(&signals, true, false);
-        let later = *revisions.borrow_and_update();
-        assert!(later.snapshot_revision > captured.snapshot_revision);
-        assert!(later.revision > overflow.revision);
-        assert!(later.audit_revision > overflow.audit_revision);
-        for id in 0..TARGET_CAPACITY {
-            assert!(matches!(queue.recv().await,
-                Some(Action::Schedule { id: queued, expected_revision: 7 }) if queued == id as i64));
-        }
-        assert!(queue.try_recv().is_err());
-    }
-
-    #[test]
-    fn pending_debounces_bounds_and_preserves_retry_revision() {
-        let mut pending = Pending::default();
-        assert!(pending.schedule(1, 10));
-        assert!(pending.take_due().is_empty());
-        let original = pending.due.remove(&1).unwrap();
-        assert!(original.due > Instant::now());
-        assert!(pending.retry(1, original));
-        let retry = pending.due.get(&1).unwrap();
-        assert_eq!(retry.attempt, 1);
-        assert_eq!(
-            retry.expected,
-            Some(10),
-            "retry may not recapture an offline revision"
-        );
-        assert!(retry.due > Instant::now());
-        for id in 2..=conduit::MAX_ACTIVE_GRANTS as i64 {
-            assert!(pending.schedule(id, 1));
-        }
-        assert!(!pending.schedule(conduit::MAX_ACTIVE_GRANTS as i64 + 1, 1));
-        assert!(
-            pending.schedule(1, 11),
-            "a newer online revision supersedes existing work"
-        );
-        assert_eq!(pending.due[&1].expected, Some(11));
-        assert_eq!(pending.due.len(), conduit::MAX_ACTIVE_GRANTS);
-    }
-
-    #[tokio::test]
-    async fn failed_online_lookup_retry_does_not_adopt_newer_offline_revision() {
-        let (state, address, server) = helix_server().await;
-        let config = mock_config(address);
-        let store = Store::open(":memory:").await.unwrap();
-        seed_user(&store, 1, "streamer").await;
-        store
-            .apply_stream_event(1, "streamer".into(), StreamEvent::Online, 100)
-            .await
-            .unwrap();
-        let online_revision = store.snapshot_versions(vec![1]).await.unwrap()[0].1;
-        let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
-        let (_signals, signal_rx) = watch::channel(Signal::default());
-        let (action_tx, action_rx) = actions();
-        let (targets, _target_rx) = watch::channel(1);
-        let (_topology_tx, topology) = watch::channel(shards::Topology {
-            remote_count: 1,
-            attached_count: 1,
-        });
-        let mut maintenance = Maintenance::new(
-            config,
-            store.clone(),
-            providers,
-            "conduit-1".into(),
-            "bot".into(),
-            Channels {
-                membership: store.channel_changes(),
-                signals: signal_rx,
-                actions: action_rx,
-                targets,
-                topology,
-            },
-        );
-        // This is the exact event-triggered retry retained after a failed HTTP
-        // lookup. Its deadline is due, but its baseline is still the online event.
-        maintenance.pending.insert(
-            1,
-            Lookup {
-                due: Instant::now(),
-                attempt: 1,
-                expected: Some(online_revision),
-            },
-        );
-        store
-            .apply_stream_event(1, "streamer".into(), StreamEvent::Offline, 200)
-            .await
-            .unwrap();
-        maintenance.run_pending().await.unwrap();
-        assert_eq!(
-            state.stream_calls.load(Ordering::SeqCst),
-            0,
-            "a stale retry is discarded before issuing HTTP, not rebound to offline"
-        );
-        assert!(maintenance.pending.due.is_empty());
-        assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
-        // Ordered cancellation also removes a scheduled online lookup outright.
-        action_tx
-            .try_send(Action::Schedule {
-                id: 1,
-                expected_revision: online_revision,
-            })
-            .unwrap();
-        action_tx.try_send(Action::Cancel { id: 1 }).unwrap();
-        maintenance.drain_actions();
-        assert!(maintenance.pending.due.is_empty());
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn completed_creation_pass_requires_snapshot_after_an_intermediate_correction() {
-        let (state, address, server) = helix_server().await;
-        let config = mock_config(address);
-        let store = Store::open(":memory:").await.unwrap();
-        seed_user(&store, 1, "streamer").await;
-        store.call(|db| {
-            db.execute(
-                "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
-                [],
-            )?;
-            Ok(())
-        }).await.unwrap();
-        let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
-        let (_signals, signal_rx) = watch::channel(Signal::default());
-        let (_actions, action_rx) = actions();
-        let (targets, _target_rx) = watch::channel(1);
-        let (_topology_tx, topology) = watch::channel(shards::Topology {
-            remote_count: 1,
-            attached_count: 1,
-        });
-        let mut maintenance = Maintenance::new(
-            config,
-            store.clone(),
-            providers.clone(),
-            "conduit-1".into(),
-            "bot".into(),
-            Channels {
-                membership: store.channel_changes(),
-                signals: signal_rx,
-                actions: action_rx,
-                targets,
-                topology,
-            },
-        );
-        maintenance.subscriptions_reconciled(&conduit::Summary {
-            created: 200,
-            deferred: 4,
-            ..Default::default()
-        });
-        // A useful correction can run between paced creation passes, but this
-        // broadcaster's subscriptions have not all been established yet.
-        state.stream_mode.store(1, Ordering::SeqCst);
-        streams::full(&store, &providers).await.unwrap();
-        maintenance.snapshot_pending = false;
-        assert!(maintenance.snapshot_after_reconcile);
-        assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
-
-        // Twitch changes state before the final subscriptions are created, so
-        // no notification can be relied on for that transition.
-        state.stream_mode.store(0, Ordering::SeqCst);
-        maintenance.subscriptions_reconciled(&conduit::Summary {
-            created: 4,
-            deferred: 0,
-            ..Default::default()
-        });
-        assert!(
-            maintenance.snapshot_pending,
-            "the intermediate snapshot must not consume the post-subscription correction"
-        );
-        assert!(!maintenance.snapshot_after_reconcile);
-        streams::full(&store, &providers).await.unwrap();
-        maintenance.snapshot_pending = false;
-        assert!(
-            store.user_by_twitch(1).await.unwrap().unwrap().is_live,
-            "the final correction repairs the otherwise missed transition"
-        );
-        assert_eq!(state.stream_calls.load(Ordering::SeqCst), 2);
-        maintenance.subscriptions_reconciled(&conduit::Summary::default());
-        assert!(
-            !maintenance.snapshot_pending,
-            "ordinary no-change reconciliations must not continuously poll streams"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn single_pass_grant_activation_uses_only_its_targeted_correction() {
-        let (state, address, server) = helix_server().await;
-        let config = mock_config(address);
-        let store = Store::open(":memory:").await.unwrap();
-        seed_user(&store, 1, "streamer").await;
-        let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
-        let (_signals, signals) = watch::channel(Signal::default());
-        let (_actions, actions) = actions();
-        let (targets, _target_rx) = watch::channel(1);
-        let (_topology_tx, topology) = watch::channel(shards::Topology {
-            remote_count: 1,
-            attached_count: 1,
-        });
-        // The shared fixture already owns a chat row for user "bot". Use a
-        // different managed identity so this activation really creates all
-        // four desired subscriptions rather than retaining that existing row.
-        let bot_id = "activation-bot";
-        let mut maintenance = Maintenance::new(
-            config,
-            store.clone(),
-            providers.clone(),
-            "conduit-1".into(),
-            bot_id.into(),
-            Channels {
-                membership: store.channel_changes(),
-                signals,
-                actions,
-                targets,
-                topology,
-            },
-        );
-        // An imported enabled account is already known at startup, without a
-        // grant. Complete its offline startup correction before activation.
-        state.stream_mode.store(1, Ordering::SeqCst);
-        maintenance.refresh_membership().await.unwrap();
-        maintenance.run_pending().await.unwrap();
-        maintenance.subscriptions_reconciled(&conduit::Summary::default());
-        streams::full(&store, &providers).await.unwrap();
-        maintenance.snapshot_pending = false;
-        let baseline = state.stream_calls.load(Ordering::SeqCst);
-        store.call(|db| {
-            db.execute(
-                "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
-                [],
-            )?;
-            Ok(())
-        }).await.unwrap();
-        state.stream_mode.store(0, Ordering::SeqCst);
-        maintenance.refresh_membership().await.unwrap();
-        let desired = conduit::desired(maintenance.grants.as_ref().unwrap(), bot_id).unwrap();
-        let summary = maintenance
-            .subs
-            .reconcile(&providers, &desired, true, &CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(summary.created, 4);
-        assert_eq!(summary.deferred, 0);
-        maintenance.subscriptions_reconciled(&summary);
-        assert!(
-            !maintenance.snapshot_pending,
-            "a normal creation pass must not duplicate the grant-activation lookup"
-        );
-        maintenance.run_pending().await.unwrap();
-        assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
-        assert_eq!(state.stream_calls.load(Ordering::SeqCst), baseline + 1);
-        maintenance.refresh_membership().await.unwrap();
-        maintenance.run_pending().await.unwrap();
-        maintenance.subscriptions_reconciled(&conduit::Summary::default());
-        assert!(!maintenance.snapshot_pending);
-        assert_eq!(
-            state.stream_calls.load(Ordering::SeqCst),
-            baseline + 1,
-            "unrelated membership refreshes must not repeat the correction"
-        );
-        server.abort();
-    }
-
-    /// Retry a cheap observation with a bounded timeout instead of sleeping
-    /// for a guessed duration.
-    async fn poll_until(mut condition: impl FnMut() -> bool, what: &str) {
-        for _ in 0..600 {
-            if condition() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("bounded wait for {what} expired");
-    }
-
-    #[tokio::test]
-    async fn session_recovery_audits_and_snapshots_without_reprovisioning_subscriptions() {
-        use serde_json::json;
-
-        let (state, address, server) = helix_server().await;
-        let config = mock_config(address);
-        let store = Store::open(":memory:").await.unwrap();
-        seed_user(&store, 1, "streamer").await;
-        store
-            .call(|db| {
-                db.execute(
-                    "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        // The channel was fully subscribed before its shard dropped. Only the
-        // live transition happened while disconnected, so the recovery re-list
-        // must find every desired subscription already established.
-        *state.seeded.lock().unwrap() = Some(vec![
-            json!({"id":"state-online","status":"enabled","type":"stream.online","version":"1","condition":{"broadcaster_user_id":"1"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
-            json!({"id":"state-offline","status":"enabled","type":"stream.offline","version":"1","condition":{"broadcaster_user_id":"1"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
-            json!({"id":"state-update","status":"enabled","type":"channel.update","version":"2","condition":{"broadcaster_user_id":"1"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
-            json!({"id":"chat-1","status":"enabled","type":"channel.chat.message","version":"1","condition":{"broadcaster_user_id":"1","user_id":"bot"},"transport":{"method":"conduit","conduit_id":"conduit-1"}}),
-        ]);
-        state.stream_mode.store(1, Ordering::SeqCst);
-        let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
-        let (signals, signal_rx) = watch::channel(Signal::default());
-        let (_actions, action_rx) = actions();
-        let (targets, _target_rx) = watch::channel(1);
-        let (topology_tx, topology) = watch::channel(shards::Topology {
-            remote_count: 1,
-            attached_count: 1,
-        });
-        let maintenance = Maintenance::new(
-            config,
-            store.clone(),
-            providers,
-            "conduit-1".into(),
-            "bot".into(),
-            Channels {
-                membership: store.channel_changes(),
-                signals: signal_rx,
-                actions: action_rx,
-                targets,
-                topology,
-            },
-        );
-        let shutdown = CancellationToken::new();
-        let worker = tokio::spawn(maintenance.run(shutdown.clone()));
-        // Converged: startup membership/audit kept the seeded subscriptions,
-        // then the full snapshot and the activation lookup completed.
-        poll_until(
-            || {
-                state.list_calls.load(Ordering::SeqCst) >= 1
-                    && state.stream_calls.load(Ordering::SeqCst) >= 2
-            },
-            "maintenance startup convergence",
-        )
-        .await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let audited = state.list_calls.load(Ordering::SeqCst);
-        let snapshots = state.stream_calls.load(Ordering::SeqCst);
-        assert_eq!(
-            (audited, snapshots),
-            (1, 2),
-            "startup ran one audit, the full snapshot and the activation lookup"
-        );
-        assert_eq!(
-            (
-                state.creates.load(Ordering::SeqCst),
-                state.deletes.load(Ordering::SeqCst)
-            ),
-            (0, 0),
-            "startup must reuse the established subscriptions instead of provisioning them"
-        );
-        assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
-
-        // The shard drops while the provider goes live, then reattaches. The
-        // foreground topology observer requests exactly this audit and snapshot.
-        topology_tx.send_replace(shards::Topology {
-            remote_count: 1,
-            attached_count: 0,
-        });
-        state.stream_mode.store(0, Ordering::SeqCst);
-        topology_tx.send_replace(shards::Topology {
-            remote_count: 1,
-            attached_count: 1,
-        });
-        request(&signals, true, true);
-
-        let mut corrected = false;
-        for _ in 0..600 {
-            if store.user_by_twitch(1).await.unwrap().unwrap().is_live {
-                corrected = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            corrected,
-            "bounded wait for the recovery snapshot correction expired"
-        );
-        shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(2), worker)
-            .await
-            .expect("maintenance loop stops when cancelled")
-            .unwrap();
-
-        // The recovery re-listed the owned subscriptions, found them complete
-        // and provisioned nothing: a topology/session change never recreates
-        // or deletes subscriptions. Exactly one guarded full snapshot repaired
-        // the transition that was missed while disconnected.
-        assert_eq!(
-            state.list_calls.load(Ordering::SeqCst),
-            audited + 1,
-            "the recovery signal must run the remote audit"
-        );
-        assert_eq!(
-            state.creates.load(Ordering::SeqCst),
-            0,
-            "recovery must not recreate existing owned subscriptions"
-        );
-        assert_eq!(
-            state.deletes.load(Ordering::SeqCst),
-            0,
-            "recovery must not delete existing owned subscriptions"
-        );
-        assert_eq!(
-            state.stream_calls.load(Ordering::SeqCst),
-            snapshots + 1,
-            "exactly one revision-guarded full snapshot"
-        );
-        assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
-        server.abort();
     }
 }
