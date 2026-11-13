@@ -11,7 +11,7 @@ This is a clean Rust cutover, not a Python wrapper. The reference behavior is th
 | Manager sends IRC channel snapshots over fragile localhost TCP; EOF loops and empty snapshots | Designed-in EventSub subscriptions with no internal TCP transport; chat and state subscriptions cover every enabled, authorized channel regardless of stream state |
 | User test mode cannot exercise the pipeline while offline or outside osu! because no chat was subscribed | Chat remains subscribed while offline; `test` mode bypasses the live/osu-category gate and request filters, while `enable=false` remains the master switch |
 | Static `TMI_TOKEN` expires and cannot renew | Bot account uses the device-code browser flow; AES-256-GCM encrypted access/refresh credentials with external key, `/validate` checks, single-flight rotation, and revocation handling |
-| Streamer Twitch signup requested an unused identity scope | Signup requests `channel:bot` with explicit verification; unsupported/mismatched consent is rejected, and imported accounts require reauthorization |
+| Streamer Twitch signup requested an unused identity scope | Signup requests `channel:bot` with explicit verification; unsupported/mismatched consent is rejected |
 | All enabled users are polled every minute for live/category, and chat eligibility can lag | `stream.online`/`stream.offline`/`channel.update` update eligibility immediately, with a 10-minute reconciliation snapshot/audit and revision guards against stale responses |
 | Helix 401 calls authentication that keeps the existing expired token, then recursively retries while holding permits (`clients/twitch.py:42–60`) | Single-flight token refresh; invalidate expired token, release resource permits, retry safely without recursive semaphore acquisition |
 | osu! API failures parsed as ordinary success JSON; HTTP pacing races across concurrent calls | Status-aware errors, request deadlines, coordinated pacing, separate app/public/delegated credentials, shared pools |
@@ -37,7 +37,7 @@ There is no static Twitch IRC token and no TwitchIO dependency. Temporary DNS/ne
 | Cooldown state disappears on restart | Successful cooldown receipts persist in SQLite; elapsed time within each process uses a monotonic clock |
 | Subscriber predicate compares a boolean with string `"0"`, letting non-subscribers through | Correct boolean eligibility, including founder/mod/VIP handling |
 | Star filter uses exclusive endpoints; either `-1` disables the whole check | Inclusive endpoints; upper `-1` disables only upper bound. Base-star metadata retained; no invented modded calculations |
-| Backend accepts nullable star ranges the bot cannot deserialize | Invalid/null ranges rejected with validation errors or import issues |
+| Backend accepts nullable star ranges the bot cannot deserialize | Invalid/null ranges rejected with validation errors |
 | Exclusion case behavior differs between writers/readers | Normalize lowercase, case-insensitive uniqueness and comparison |
 | Disabling a user may leave request acceptance until the next membership poll | Current enabled/settings state checked before delivery, in addition to membership eligibility |
 | Set lookup uses arbitrary first cached map, differing from API order | First map from the set API determines selection; a persisted 24-hour selected-map mapping avoids repeated set requests |
@@ -53,7 +53,7 @@ User `test` mode and process dry-run remain distinct. User test mode bypasses re
 | Leaderboard lookup can return nested BSON ObjectIds and duplicated raw `result` | JSON-safe top-level metadata/count/beatmap ID; no invalid nested BSON result; deterministic tie ordering |
 | Unbounded/negative pagination | Limit 1–100, offset nonnegative, deliberate validation response |
 | Linking builds a fresh user and overwrites settings/exclusions/live state | Transactional identity update preserving unrelated user state; reject conflicting provider ownership |
-| Registration serializes `sub_only`/`points_only` inconsistently with aliases | One canonical hyphenated wire representation; one-time importer accepts historical aliases and rejects conflicting aliases |
+| Registration serializes `sub_only`/`points_only` inconsistently with aliases | One canonical hyphenated wire representation |
 | Missing/deleted user or malformed JWT can cause internal exceptions | Explicit 401 authentication failures; unauthenticated `/user/me` remains null |
 | Full account JWTs expire after a year and cannot be revoked on logout | Hash-stored opaque sessions, 30-day configurable lifetime, revocation and rotation; old JWT cookies invalid at cutover |
 | OAuth `state` is a return URL rather than a CSRF nonce | Random, expiring, single-use, browser-bound state; provider/signup/session context checked |
@@ -69,11 +69,10 @@ Provider IDs are unique; cached login names deliberately are not. A recycled Twi
 - Listener configuration now uses separate `BIND_IP` (an IPv4/IPv6 literal) and `BIND_PORT` values rather than a combined `BIND` address. Compose uses `BIND_PORT` on both sides of its loopback-only published mapping and binds the container listener to `0.0.0.0`.
 
 - MongoDB is replaced by embedded SQLite. Schema/default initialization no longer depends on starting the bot first. Bot/API use the same typed settings and database actor.
-- Twitch chat permission is explicit, per-channel consent, not inferred from registration or old live state. Imported accounts keep all data but remain inactive until reauthorization. The public `twitchBotAuthorized` field exposes this.
+- Twitch chat permission is explicit, per-channel consent, not inferred from registration or old live state. An enabled account stays inactive until it grants `channel:bot`. The public `twitchBotAuthorized` field exposes this.
 - The bot's access/refresh credentials are stored only as AES-256-GCM ciphertext with an external key; AAD binds the format and bot user ID. Rotation uses compare-and-swap revisions, and temporary validation failures do not destroy usable credentials or accounts.
 - Live and category state use EventSub with per-family event timestamps and a revision guard against stale snapshot overwrites. Version-1 databases upgrade transactionally, reset unverified live flags, and normalize legacy exclusion logins.
-- Unique provider IDs, foreign keys, transactions, time-window/history indexes, and cache primary keys replace loose Mongo documents/nonunique indexes. Raw source records and unknown fields remain stored for migration provenance.
-- The importer streams all four export collections through SQLite staging, validates before commit, and never silently discards conflicting/invalid accounts. Malformed exports abort the entire cutover. BSON, JSON arrays, NDJSON, Extended JSON dates/numbers, and historical setting aliases are supported.
+- Unique provider IDs, foreign keys, transactions, time-window/history indexes, and cache primary keys replace loose Mongo documents/nonunique indexes.
 - The historical SQLite→Mongo script is replaced, not copied. Its destructive missing-avatar deletion, positional-column assumptions, malformed exclusion upserts, unbounded bulk lists, and per-avatar token creation are not retained.
 - Historical beatmap backfill is keyset-paginated instead of capped at 100,000; uses shared credentials/pools and stores freshness timestamps. It reports failures with a nonzero outcome.
 - Expired beatmap request-cache entries stay on disk for historical display but are not returned as fresh request metadata. This replaces Mongo TTL deletion while preserving useful leaderboard metadata. Request history remains durable with no silent retention cutoff.
@@ -83,16 +82,16 @@ Provider IDs are unique; cached login names deliberately are not. A recycled Twi
 - Independent EventSub shard supervisors recover without resetting healthy peers. One maintenance task owns subscription HTTP and revision-guarded snapshots, leaving foreground notifications responsive during provider stalls. Automatic shard growth never shrinks, respects the configured cap, and retains the 10,000-owned-subscription audit safety bound.
 - Consistent backup/integrity commands, a nonroot image, persistent volume, correct port/env-file configuration, and secret-excluding build context replace outdated deployment instructions.
 
-These are concrete structural resource improvements, not a claim that every workload is faster. See `VERIFICATION.md` for actual memory measurements, workload scope, checks, and provider/production limits.
+These are concrete structural resource improvements, not a claim that every workload is faster. See `VERIFICATION.md` for checks and provider/production limits.
 
 ## Coexistence migration period
 
 - All users use the new dashboard/API. The old Python bot remains only as an IRC relay for enabled channels that have never granted Twitch `channel:bot`.
-- The new SQLite database is the sole user/settings source. A one-time Mongo import precedes rollout; there is no bidirectional database sync.
+- The new SQLite database is the sole user/settings source; there is no bidirectional database sync and no import of the old Mongo data.
 - The old bot patch lives independently in [PR #56 (`migration/coexistence-bridge`)](https://github.com/aticie/ronnia/pull/56); run it from a separate checkout, never this Rust root. It fetches legacy channels and current settings from authenticated internal endpoints and claims/reports each request. Its Mongo Users/Settings are bypassed in bridge mode; Mongo remains only for its beatmap cache. The Rust `/internal/legacy/*` API is retained unchanged.
 - A claim creates a delivery tombstone understood by the new bot. The old bot cannot send after a channel migrates, and the new bot skips any legacy-claimed Twitch message.
 - New grants become active for the new bot after a configurable grace period (`MIGRATION_GRANT_GRACE_SECS`, default ten seconds), while removal from the old bot is immediate. This prevents overlapping delivery during handoff.
-- Grant activation wakes a targeted current-stream lookup even for an imported/legacy account that was already enabled at startup. This also happens when migration grace expires, so fresh live/osu! eligibility does not wait for the ten-minute repair snapshot. Unrelated settings/state notifications do not repeatedly poll already-known channels; targeted lookup failures and stale-snapshot races retain the existing retry/revision guards.
+- Grant activation wakes a targeted current-stream lookup even for an already-enabled legacy account at startup. This also happens when migration grace expires, so fresh live/osu! eligibility does not wait for the ten-minute repair snapshot. Unrelated settings/state notifications do not repeatedly poll already-known channels; targeted lookup failures and stale-snapshot races retain the existing retry/revision guards.
 - Legacy request statistics are written by the old bot through the bridge with the same Twitch-message source identity as the new bot; repeated reports are idempotent.
 - The old bot announces migration once per live session to both Twitch chat and the streamer's osu! PM, re-arming after offline. The new dashboard shows a banner driven by `/migration/status`.
 - Internal bridge routes require a shared bearer token, are hidden when unconfigured, and are blocked through the dashboard proxy.

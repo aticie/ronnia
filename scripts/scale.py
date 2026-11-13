@@ -11,6 +11,7 @@ import argparse
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -19,7 +20,7 @@ import urllib.request
 
 from modern import EventSub, Providers, beatmap, check, timestamp
 from smoke import (Browser, Service, authorize_bot, eventually, install_signal_handlers,
-                   make_exports, run_captured, settings)
+                   run_captured, settings)
 
 
 class Proof:
@@ -49,28 +50,23 @@ class Proof:
         return self.service.logs[-1].read_text(errors="replace")
 
     def seed(self, count, grant_count=5):
-        directory = self.service.root / "exports"
-        make_exports(directory)
-        template = json.loads((directory / "Users.json").read_text())[0]
-        users = []
-        for uid in range(101, 101 + count):
-            login = self.login(uid)
-            target = 10000 + uid
-            users.append({**template, "_id": {"$oid": f"{uid:024x}"}, "twitchId": uid,
-                          "twitchUsername": login, "osuId": target, "osuUsername": f"osu{target}",
-                          "isLive": False, "excludedUsers": [], "settings": settings(echo=False)})
-            self.providers.pm_targets.add(target)
-            self.providers.live[uid] = login
-            self.providers.categories[uid] = "21465"
-        (directory / "Users.json").write_text(json.dumps(users))
-        (directory / "Statistics.json").write_text("[]")
-        maps = json.loads((directory / "Beatmaps.json").read_text())
-        row = beatmap(1001)
-        row.update(_id={"$oid": f"{1001:024x}"}, ronnia_updated_at={"$date": timestamp()})
-        maps.append(row)
-        (directory / "Beatmaps.json").write_text(json.dumps(maps))
-        result = run_captured(self.service.command("import", "--directory", str(directory)), env=self.service.env)
-        check(result.returncode == 0, f"Scale import failed: {result.stdout}")
+        result = run_captured(self.service.command("check"), env=self.service.env)
+        check(result.returncode == 0, f"Fresh SQLite check failed: {result.stdout}")
+        with sqlite3.connect(self.service.database) as connection:
+            for uid in range(101, 101 + count):
+                login = self.login(uid)
+                target = 10000 + uid
+                connection.execute(
+                    "INSERT INTO users(osu_id,osu_username,osu_avatar_url,twitch_id,twitch_username,"
+                    "twitch_avatar_url,is_live,settings_json,raw_json) VALUES(?,?,?,?,?,?,0,?,NULL)",
+                    (target, f"osu{target}", "", uid, login, "",
+                     json.dumps(settings(echo=False))))
+                self.providers.pm_targets.add(target)
+                self.providers.live[uid] = login
+                self.providers.categories[uid] = "21465"
+            connection.execute(
+                "INSERT INTO beatmaps(id,beatmapset_id,fetched_at,raw_json) VALUES(1001,500,?,?)",
+                (int(time.time()), json.dumps(beatmap(1001))))
         authorize_bot(self.service)
         self.ws.start()
         self.service.start(api_only=True)

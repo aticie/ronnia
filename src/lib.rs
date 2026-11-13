@@ -1,8 +1,10 @@
+//! Ronnia: the Twitch-to-osu! request relay and account API share one SQLite
+//! database and one lifecycle.
+
 pub mod api;
 pub mod bot;
 pub mod config;
 pub mod domain;
-pub mod migration;
 pub mod parser;
 pub mod providers;
 pub mod storage;

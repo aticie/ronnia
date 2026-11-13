@@ -1,8 +1,11 @@
+//! Command-line entry point: one long-running service plus the operator commands
+//! that inspect or repair the database.
+
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use ronnia::{api, bot, config::Config, migration, storage::Store};
+use ronnia::{api, bot, config::Config, storage::Store};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
@@ -28,14 +31,6 @@ enum Command {
         /// Run only the account API, without Twitch chat or live polling.
         #[arg(long)]
         api_only: bool,
-    },
-    /// Validate and atomically import Users/Settings/Statistics/Beatmaps exports.
-    Import {
-        #[arg(long)]
-        directory: PathBuf,
-        /// Validate against the current database without committing changes.
-        #[arg(long)]
-        check: bool,
     },
     /// Fetch missing beatmap metadata for all historical request IDs.
     Backfill,
@@ -157,18 +152,6 @@ async fn async_main(cli: Cli) -> Result<()> {
     let store = Store::open(&config.database_path).await?;
     match command {
         Command::Serve { .. } => serve(Arc::new(config), store).await,
-        Command::Import { directory, check } => {
-            let report = if check {
-                migration::validate_exports(store, &directory).await?
-            } else {
-                migration::import_exports(store, &directory).await?
-            };
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            if report.issue_count != 0 || (!check && !report.committed) {
-                bail!("Import validation failed; no data was committed");
-            }
-            Ok(())
-        }
         Command::Backfill => bot::backfill(Arc::new(config), store).await,
         Command::AuthorizeBot { login, replace } => {
             if config.twitch_client_id.is_empty()

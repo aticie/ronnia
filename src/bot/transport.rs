@@ -1,15 +1,17 @@
-//! Independently supervised Conduit shards. Topology mutation has one owner;
-//! socket recovery never resets another shard or the subscription cache.
+//! EventSub transport: WebSocket framing plus independently supervised conduit
+//! shards. Topology mutation has one owner; socket recovery never resets
+//! another shard or the subscription cache.
 
-use super::{
-    conduit::{self, Conduit},
-    eventsub::{self, Backoff, Connection, Incoming, Welcome},
-};
+use super::backoff::Backoff;
+use super::conduit::{self, Conduit};
 use crate::{config::Config, providers::Providers};
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use futures_util::StreamExt;
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::{Future, pending},
+    pin::pin,
     sync::Arc,
     time::Duration,
 };
@@ -18,37 +20,273 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until, timeout, timeout_at},
 };
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{Message, protocol::WebSocketConfig},
+};
 use tokio_util::sync::CancellationToken;
+use url::{Host, Url};
+
+// --- WebSocket protocol ----------------------------------------------------
+
+/// A validated EventSub message is small; oversized frames are a protocol error.
+pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_FRAME_BYTES: usize = 512 * 1024;
+/// Time allowed for the TCP/TLS/HTTP upgrade, and separately for the welcome.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
+/// Used when a welcome omits `keepalive_timeout_seconds`.
+const KEEPALIVE_FALLBACK: Duration = Duration::from_secs(30);
 
 const MAX_SHARDS: u32 = 64;
 const CONNECT_ATTEMPTS: usize = 4;
 const EVENT_QUEUE: usize = 1024;
 const READER_QUEUE: usize = 64;
-const SHARD_ATTACH_DEADLINE: Duration = Duration::from_secs(9);
+pub(super) const SHARD_ATTACH_DEADLINE: Duration = Duration::from_secs(9);
 const GRACEFUL_CLOSE: Duration = Duration::from_secs(2);
+const RETRY_BASE: Duration = Duration::from_millis(500);
+const RETRY_CAP: Duration = Duration::from_secs(30);
+
+type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[derive(Clone, Debug)]
+pub(super) struct Welcome {
+    pub(super) session_id: String,
+    pub(super) keepalive: Duration,
+}
+
+/// One decoded server frame. `Ignored` covers control frames and unknown
+/// message types; ping and pong never extend the keepalive deadline.
+#[derive(Debug)]
+pub(super) enum Incoming {
+    Welcome(Welcome),
+    Keepalive,
+    Notification {
+        subscription: Value,
+        event: Value,
+        timestamp: String,
+        message_id: String,
+    },
+    Reconnect {
+        url: String,
+    },
+    Revocation {
+        subscription: Value,
+    },
+    Close {
+        code: u16,
+        reason: String,
+    },
+    Failed(String),
+    Ignored,
+}
+
+pub(super) struct Connection {
+    socket: Socket,
+}
+
+impl Connection {
+    pub(super) async fn open(url: &str) -> Result<Self> {
+        let parsed = Url::parse(url).context("invalid EventSub WebSocket URL")?;
+        match parsed.scheme() {
+            "wss" => {}
+            "ws" => ensure!(
+                is_loopback(&parsed),
+                "plain ws EventSub URLs are only accepted for loopback test hosts"
+            ),
+            scheme => bail!("EventSub WebSocket URL must use ws or wss, not {scheme}"),
+        }
+        ensure!(parsed.host().is_some(), "EventSub URL omitted a host");
+        let config = WebSocketConfig::default()
+            .read_buffer_size(16 * 1024)
+            .write_buffer_size(0)
+            .max_message_size(Some(MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_FRAME_BYTES))
+            .accept_unmasked_frames(false);
+        let (socket, _) = timeout(
+            HANDSHAKE_TIMEOUT,
+            connect_async_with_config(url, Some(config), true),
+        )
+        .await
+        .map_err(|_| anyhow!("EventSub WebSocket connect timed out"))?
+        .context("EventSub WebSocket connect failed")?;
+        Ok(Self { socket })
+    }
+
+    /// Send a close frame so the server sees a clean shutdown.
+    pub(super) async fn close(&mut self) {
+        let _ = self.socket.close(None).await;
+    }
+
+    /// Read the next message before the application keepalive deadline.
+    ///
+    /// The caller extends the deadline only for notifications and keepalives;
+    /// ping and pong frames are answered by tungstenite but never count as
+    /// liveness, exactly as the Twitch protocol requires. A timeout closes the
+    /// connection: a partial frame cannot be resumed, and the supervisor
+    /// reconnects instead.
+    pub(super) async fn read(&mut self, deadline: Instant) -> Result<Incoming> {
+        let mut next = pin!(self.socket.next());
+        let message = tokio::select! {
+            _ = sleep_until(deadline) => {
+                bail!("EventSub keepalive deadline elapsed with no notification or keepalive")
+            }
+            message = &mut next => message,
+        };
+        match message.transpose()? {
+            None => bail!("EventSub WebSocket closed without a close frame"),
+            Some(Message::Text(text)) => parse(&text),
+            Some(Message::Binary(bytes)) => {
+                bail!("unexpected binary EventSub frame ({} bytes)", bytes.len())
+            }
+            // tungstenite answers pings; neither ping nor pong resets the timer.
+            Some(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => Ok(Incoming::Ignored),
+            Some(Message::Close(frame)) => Ok(Incoming::Close {
+                code: frame.as_ref().map_or(1005, |frame| frame.code.into()),
+                reason: frame
+                    .map(|frame| frame.reason.to_string())
+                    .unwrap_or_default(),
+            }),
+        }
+    }
+}
+
+pub(super) fn parse(text: &str) -> Result<Incoming> {
+    ensure!(
+        text.len() <= MAX_MESSAGE_BYTES,
+        "oversized EventSub message"
+    );
+    let value: Value = serde_json::from_str(text).context("invalid EventSub JSON")?;
+    let metadata = &value["metadata"];
+    let payload = &value["payload"];
+    let message_type = metadata["message_type"]
+        .as_str()
+        .context("EventSub message omitted metadata.message_type")?;
+    Ok(match message_type {
+        "session_welcome" => {
+            let session = &payload["session"];
+            let session_id = session["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .context("welcome omitted the session id")?
+                .to_owned();
+            let keepalive = session["keepalive_timeout_seconds"]
+                .as_u64()
+                .filter(|seconds| (10..=600).contains(seconds))
+                .map(Duration::from_secs)
+                .unwrap_or(KEEPALIVE_FALLBACK);
+            Incoming::Welcome(Welcome {
+                session_id,
+                keepalive,
+            })
+        }
+        "session_keepalive" => Incoming::Keepalive,
+        "notification" => Incoming::Notification {
+            message_id: metadata["message_id"]
+                .as_str()
+                .context("notification omitted message_id")?
+                .to_owned(),
+            timestamp: metadata["message_timestamp"]
+                .as_str()
+                .context("notification omitted message_timestamp")?
+                .to_owned(),
+            subscription: payload["subscription"].clone(),
+            event: payload["event"].clone(),
+        },
+        "session_reconnect" => Incoming::Reconnect {
+            url: payload["session"]["reconnect_url"]
+                .as_str()
+                .filter(|url| !url.is_empty())
+                .context("reconnect message omitted the reconnect URL")?
+                .to_owned(),
+        },
+        "revocation" => Incoming::Revocation {
+            subscription: payload["subscription"].clone(),
+        },
+        other => {
+            tracing::debug!(
+                message_type = other,
+                "ignoring unknown EventSub message type"
+            );
+            Incoming::Ignored
+        }
+    })
+}
+
+/// RFC 3339 with nanoseconds, as used by every EventSub timestamp.
+pub(super) fn timestamp_nanos(value: &str) -> Result<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("invalid EventSub timestamp {value:?}"))?
+        .timestamp_nanos_opt()
+        .context("EventSub timestamp is outside the supported nanosecond range")
+}
+
+/// The reconnect URL is used verbatim, but only when it stays on the configured
+/// origin; Twitch never redirects EventSub to another host.
+pub(super) fn validate_reconnect_url(configured: &str, candidate: &str) -> Result<String> {
+    let base = Url::parse(configured).context("invalid configured EventSub URL")?;
+    let next = Url::parse(candidate).context("invalid EventSub reconnect URL")?;
+    ensure!(
+        matches!(next.scheme(), "ws" | "wss"),
+        "reconnect URL is not a WebSocket URL"
+    );
+    ensure!(
+        next.scheme() == base.scheme(),
+        "reconnect URL changed the transport scheme"
+    );
+    ensure!(next.host() == base.host(), "reconnect URL changed the host");
+    ensure!(
+        next.port_or_known_default() == base.port_or_known_default(),
+        "reconnect URL changed the port"
+    );
+    if next.scheme() == "ws" {
+        ensure!(
+            is_loopback(&next),
+            "plain ws reconnect URLs are only accepted for loopback test hosts"
+        );
+    }
+    Ok(candidate.to_owned())
+}
+
+pub(super) fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        // RFC 6761 reserves localhost and its subdomains for loopback use;
+        // integration fixtures use names such as recover.localhost to exercise
+        // real DNS failure/recovery without weakening plain-ws elsewhere.
+        Some(Host::Domain(host)) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost" || host.ends_with(".localhost")
+        }
+        None => false,
+    }
+}
+
+// --- Shard supervision -----------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Topology {
-    pub remote_count: u32,
+pub(super) struct Topology {
+    pub(super) remote_count: u32,
     /// Acknowledged attachments for the observed topology; zero while an
     /// ambiguous topology mutation awaits authoritative observation.
-    pub attached_count: u32,
+    pub(super) attached_count: u32,
 }
 
-pub struct Event {
-    pub shard_id: u32,
-    pub incoming: Incoming,
+pub(super) struct Event {
+    pub(super) shard_id: u32,
+    pub(super) incoming: Incoming,
 }
 
-pub struct Pool {
-    pub events: mpsc::Receiver<Event>,
-    pub topology: watch::Receiver<Topology>,
+pub(super) struct Pool {
+    pub(super) events: mpsc::Receiver<Event>,
+    pub(super) topology: watch::Receiver<Topology>,
     cancel: CancellationToken,
     handle: JoinHandle<()>,
 }
 
 impl Pool {
-    pub fn start(
+    pub(super) fn start(
         config: Arc<Config>,
         providers: Providers,
         conduit: Conduit,
@@ -78,7 +316,7 @@ impl Pool {
         }
     }
 
-    pub async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         self.cancel.cancel();
         // A receiver held by the caller must not prevent supervised shutdown.
         drop(self.events);
@@ -88,14 +326,14 @@ impl Pool {
     }
 }
 
-struct State {
-    remote_count: u32,
-    attached: BTreeSet<u32>,
-    uncertain: bool,
+pub(super) struct State {
+    pub(super) remote_count: u32,
+    pub(super) attached: BTreeSet<u32>,
+    pub(super) uncertain: bool,
 }
 
 impl State {
-    fn topology(&self) -> Topology {
+    pub(super) fn topology(&self) -> Topology {
         Topology {
             remote_count: self.remote_count,
             // A mutation with an unknown outcome cannot acknowledge a complete
@@ -109,7 +347,7 @@ impl State {
         }
     }
 
-    fn candidate(&self, target: u32, cap: u32) -> Option<u32> {
+    pub(super) fn candidate(&self, target: u32, cap: u32) -> Option<u32> {
         (!self.uncertain
             && self.remote_count > 0
             && self.remote_count < MAX_SHARDS
@@ -119,13 +357,13 @@ impl State {
             .then_some(self.remote_count)
     }
 
-    fn observe(&mut self, remote_count: u32) {
+    pub(super) fn observe(&mut self, remote_count: u32) {
         self.remote_count = remote_count;
         self.attached
             .retain(|id| *id < remote_count && remote_count <= MAX_SHARDS);
     }
 
-    fn set_attached(&mut self, id: u32, attached: bool) {
+    pub(super) fn set_attached(&mut self, id: u32, attached: bool) {
         if attached && id < self.remote_count && self.remote_count <= MAX_SHARDS {
             self.attached.insert(id);
         } else {
@@ -165,7 +403,7 @@ async fn manage(
     let mut jobs = JoinSet::new();
     let mut workers: BTreeMap<u32, CancellationToken> = BTreeMap::new();
     let mut task_ids = BTreeMap::new();
-    let mut observe_retry = Backoff::new();
+    let mut observe_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
     let mut observe_at = Instant::now();
     let mut targets_open = true;
     let cap = config.eventsub_max_shards.min(MAX_SHARDS);
@@ -362,7 +600,7 @@ impl Shard {
         // Retain the validated handoff destination across transient failures.
         // The old generation continues serving until a replacement attaches.
         let mut reconnect_url = None;
-        let mut retry = Backoff::new();
+        let mut retry = Backoff::new(RETRY_BASE, RETRY_CAP);
         let mut retry_at = Instant::now();
         loop {
             tokio::select! {
@@ -411,7 +649,7 @@ impl Shard {
                         }
                         Incoming::Reconnect { url } if Some(generation) == link.current
                             && attempt.is_none() && reconnect_url.is_none() => {
-                            match eventsub::validate_reconnect_url(&self.config.twitch_eventsub_url, &url) {
+                            match validate_reconnect_url(&self.config.twitch_eventsub_url, &url) {
                                 Ok(url) => {
                                     attempt = Some(self.connect(url.clone()));
                                     reconnect_url = Some(url);
@@ -502,7 +740,7 @@ async fn prepare(
         result = Connection::open(&url) => result?,
     };
     let welcome = async {
-        let welcome_deadline = Instant::now() + eventsub::WELCOME_TIMEOUT;
+        let welcome_deadline = Instant::now() + WELCOME_TIMEOUT;
         let welcome = loop {
             match connection.read(welcome_deadline).await? {
                 Incoming::Welcome(welcome) => break welcome,
@@ -562,7 +800,7 @@ async fn prepare(
     }
 }
 
-async fn attach_before<T>(
+pub(super) async fn attach_before<T>(
     deadline: Instant,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
@@ -573,17 +811,17 @@ async fn attach_before<T>(
 
 /// Readers only decode and enforce protocol liveness. Each shard owns its
 /// generation queue, so a failed socket never blocks a peer's supervision.
-struct Link {
-    rx: mpsc::Receiver<(u64, Incoming)>,
+pub(super) struct Link {
+    pub(super) rx: mpsc::Receiver<(u64, Incoming)>,
     tx: mpsc::Sender<(u64, Incoming)>,
-    readers: BTreeMap<u64, Reader>,
-    current: Option<u64>,
+    pub(super) readers: BTreeMap<u64, Reader>,
+    pub(super) current: Option<u64>,
     next_generation: u64,
     retired: VecDeque<u64>,
 }
 
 impl Link {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (tx, rx) = mpsc::channel(READER_QUEUE);
         Self {
             rx,
@@ -661,7 +899,7 @@ impl Link {
         }
     }
 
-    async fn shutdown(&mut self) {
+    pub(super) async fn shutdown(&mut self) {
         for reader in self.readers.values() {
             reader.cancel.cancel();
         }
@@ -681,182 +919,17 @@ impl Drop for Link {
     }
 }
 
-struct Reader {
-    handle: JoinHandle<()>,
-    cancel: CancellationToken,
+pub(super) struct Reader {
+    pub(super) handle: JoinHandle<()>,
+    pub(super) cancel: CancellationToken,
 }
 
 impl Reader {
-    async fn close(mut self) {
+    pub(super) async fn close(mut self) {
         self.cancel.cancel();
         if timeout(GRACEFUL_CLOSE, &mut self.handle).await.is_err() {
             self.handle.abort();
             let _ = (&mut self.handle).await;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn growth_waits_for_every_observed_shard_and_never_shrinks() {
-        let mut state = State {
-            remote_count: 3,
-            attached: BTreeSet::from([0, 1]),
-            uncertain: false,
-        };
-        assert_eq!(state.candidate(5, 8), None);
-        state.set_attached(2, true);
-        assert_eq!(state.candidate(5, 8), Some(3));
-        assert_eq!(state.candidate(1, 8), None);
-        assert_eq!(
-            state.topology(),
-            Topology {
-                remote_count: 3,
-                attached_count: 3
-            }
-        );
-        state.observe(4);
-        assert_eq!(state.candidate(5, 8), None);
-        // A failed attachment retains the committed remote count and blocks
-        // the next growth step until the missing shard actually recovers.
-        state.set_attached(3, false);
-        assert_eq!(state.remote_count, 4);
-        state.set_attached(3, true);
-        assert_eq!(state.candidate(5, 8), Some(4));
-        state.uncertain = true;
-        assert_eq!(state.candidate(5, 8), None);
-        assert_eq!(state.topology().attached_count, 0);
-        assert_eq!(state.attached.len(), 4);
-    }
-
-    #[test]
-    fn persisted_count_above_cap_is_attached_but_above_hard_bound_is_not() {
-        let mut state = State {
-            remote_count: 4,
-            attached: BTreeSet::new(),
-            uncertain: false,
-        };
-        for id in 0..4 {
-            state.set_attached(id, true);
-        }
-        assert_eq!(state.topology().attached_count, 4);
-        assert_eq!(state.candidate(8, 2), None);
-        state.observe(65);
-        state.set_attached(0, true);
-        assert_eq!(
-            state.topology(),
-            Topology {
-                remote_count: 65,
-                attached_count: 0
-            }
-        );
-        assert_eq!(state.candidate(100, 100), None);
-    }
-
-    #[tokio::test]
-    async fn welcome_deadlines_are_independent_and_cover_the_whole_operation() {
-        let first_welcome = Instant::now() - SHARD_ATTACH_DEADLINE;
-        let second_welcome = Instant::now();
-        let (expired, healthy) = tokio::join!(
-            attach_before(first_welcome + SHARD_ATTACH_DEADLINE, async {
-                pending::<Result<()>>().await
-            }),
-            attach_before(second_welcome + SHARD_ATTACH_DEADLINE, async {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                Ok(())
-            }),
-        );
-        assert!(expired.unwrap_err().to_string().contains("nine seconds"));
-        assert!(healthy.is_ok());
-        // Both resize and attach share one deadline: finishing the first
-        // operation cannot start a new nine-second budget for the second.
-        let deadline = Instant::now() + Duration::from_millis(10);
-        let result = attach_before(deadline, async {
-            tokio::task::yield_now().await;
-            pending::<Result<()>>().await
-        })
-        .await;
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn reconnect_handoffs_must_keep_the_configured_origin() {
-        let configured = "ws://localhost:9876/events";
-        assert_eq!(
-            eventsub::validate_reconnect_url(configured, "ws://localhost:9876/reconnect?token=one")
-                .unwrap(),
-            "ws://localhost:9876/reconnect?token=one",
-        );
-        for candidate in [
-            "ws://other.localhost:9876/reconnect",
-            "ws://localhost:9877/reconnect",
-            "wss://localhost:9876/reconnect",
-            "https://localhost:9876/reconnect",
-        ] {
-            assert!(eventsub::validate_reconnect_url(configured, candidate).is_err());
-        }
-    }
-
-    struct Dropped(Arc<AtomicBool>);
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[tokio::test]
-    async fn reader_close_joins_cooperative_reader() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let cancel = CancellationToken::new();
-        let token = cancel.clone();
-        let guard = Dropped(dropped.clone());
-        let handle = tokio::spawn(async move {
-            let _guard = guard;
-            token.cancelled().await;
-        });
-        Reader { handle, cancel }.close().await;
-        assert!(dropped.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn reader_close_aborts_and_joins_uncooperative_reader() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = Dropped(dropped.clone());
-        let handle = tokio::spawn(async move {
-            let _guard = guard;
-            pending::<()>().await;
-        });
-        Reader {
-            handle,
-            cancel: CancellationToken::new(),
-        }
-        .close()
-        .await;
-        assert!(dropped.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn link_shutdown_cancels_and_joins_all_readers() {
-        let mut link = Link::new();
-        let mut flags = Vec::new();
-        for id in 0..4 {
-            let dropped = Arc::new(AtomicBool::new(false));
-            let guard = Dropped(dropped.clone());
-            let cancel = CancellationToken::new();
-            let token = cancel.clone();
-            let handle = tokio::spawn(async move {
-                let _guard = guard;
-                token.cancelled().await;
-            });
-            link.readers.insert(id, Reader { handle, cancel });
-            flags.push(dropped);
-        }
-        link.shutdown().await;
-        assert!(link.readers.is_empty());
-        assert!(flags.iter().all(|flag| flag.load(Ordering::SeqCst)));
     }
 }

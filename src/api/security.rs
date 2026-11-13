@@ -1,3 +1,6 @@
+//! Browser session authentication: cookie handling, origin checks and the
+//! one session lookup every authenticated route uses.
+
 use super::{ApiError, ApiResult, ApiState, unauthorized};
 use crate::{config::Config, domain::User};
 use axum::{
@@ -43,10 +46,22 @@ pub(super) fn set_cookie(
         HeaderValue::from_str(&value).expect("generated cookie"),
     );
 }
-pub(super) fn clear_auth_cookies(response: &mut Response, config: &Config) {
-    for name in ["token", "signup", "signup_details"] {
-        set_cookie(response, config, name, "", 0);
+/// One response may expire several cookies; keep their shared attributes central.
+pub(super) fn set_cookies(response: &mut Response, config: &Config, cookies: &[(&str, &str, i64)]) {
+    for &(name, value, max_age) in cookies {
+        set_cookie(response, config, name, value, max_age);
     }
+}
+pub(super) fn clear_auth_cookies(response: &mut Response, config: &Config) {
+    set_cookies(
+        response,
+        config,
+        &[
+            ("token", "", 0),
+            ("signup", "", 0),
+            ("signup_details", "", 0),
+        ],
+    );
 }
 fn permitted_url(config: &Config, value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
@@ -95,6 +110,12 @@ pub(super) fn redirect(target: &str) -> Response {
         header::LOCATION,
         HeaderValue::from_str(target).expect("validated URL"),
     );
+    response
+}
+/// A browser mutation that revokes the current login and returns to a trusted URL.
+pub(super) fn redirect_cleared(config: &Config, headers: &HeaderMap) -> Response {
+    let mut response = redirect(&return_to(config, headers));
+    clear_auth_cookies(&mut response, config);
     response
 }
 /// Internal relay authentication. An unconfigured or absent token hides the
@@ -155,6 +176,18 @@ pub(super) async fn authenticate(state: &ApiState, headers: &HeaderMap) -> ApiRe
         .user_by_twitch(id)
         .await?
         .ok_or_else(unauthorized)
+}
+/// Whether the browser carries a currently valid session; expired or legacy
+/// credentials are simply absent, while a database failure still propagates.
+pub(super) async fn session_valid(state: &ApiState, headers: &HeaderMap) -> ApiResult<bool> {
+    if cookie(headers, "token").is_none() {
+        return Ok(false);
+    }
+    match authenticate(state, headers).await {
+        Ok(_) => Ok(true),
+        Err(ApiError(StatusCode::UNAUTHORIZED, _)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Identity {

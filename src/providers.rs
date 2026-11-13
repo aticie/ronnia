@@ -1,3 +1,6 @@
+//! Twitch and osu! HTTP providers: token single-flight, request pacing and the
+//! typed calls the bot and API make.
+
 use crate::{
     config::Config,
     parser::{Beatmap, BeatmapKind},
@@ -21,11 +24,22 @@ pub struct LiveStream {
     pub category_id: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Scope {
     Twitch,
     Public,
     Delegate,
+}
+impl Scope {
+    fn is_twitch(self) -> bool {
+        matches!(self, Self::Twitch)
+    }
+    fn base(self, config: &Config) -> &str {
+        match self {
+            Self::Twitch => &config.twitch_api_base,
+            Self::Public | Self::Delegate => &config.osu_api_base,
+        }
+    }
 }
 struct Token {
     access: String,
@@ -44,6 +58,15 @@ pub struct ChatError {
     pub status: Option<u16>,
     pub message: String,
 }
+impl ChatError {
+    fn new(uncertain: bool, status: Option<u16>, message: impl Into<String>) -> Self {
+        Self {
+            uncertain,
+            status,
+            message: message.into(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Providers {
@@ -54,6 +77,41 @@ pub struct Providers {
     public: Arc<Tokens>,
     delegate: Arc<Tokens>,
     osu_next: Arc<Mutex<Instant>>,
+}
+
+/// The credentials for one authenticated call: an app token scope or the
+/// managed bot's user token. Both drive the same retry/refresh loop.
+enum Auth<'a> {
+    App(&'a Tokens),
+    Bot { auth: &'a TwitchAuth, token: String },
+}
+impl Auth<'_> {
+    async fn token(&mut self, providers: &Providers) -> std::result::Result<String, ChatError> {
+        match self {
+            Self::App(tokens) => providers.token(tokens).await.map_err(known_error),
+            Self::Bot { token, .. } => Ok(token.clone()),
+        }
+    }
+    /// Rotate after a 401; app scopes drop their cache and refetch on retry.
+    async fn rejected(
+        &mut self,
+        providers: &Providers,
+        used: &str,
+    ) -> std::result::Result<(), ChatError> {
+        match self {
+            Self::App(tokens) => {
+                providers.invalidate(tokens, used).await;
+                Ok(())
+            }
+            Self::Bot { auth, token } => {
+                *token = auth
+                    .bot_access_token_after_rejection(used, &providers.shutdown)
+                    .await
+                    .map_err(known_error)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 async fn body_json(mut response: Response) -> Result<Value> {
@@ -165,22 +223,19 @@ impl Providers {
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("ronnia/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        let tokens = |scope| {
+            Arc::new(Tokens {
+                value: Mutex::new(None),
+                scope,
+            })
+        };
         Ok(Self {
             config,
             client,
             shutdown,
-            twitch: Arc::new(Tokens {
-                value: Mutex::new(None),
-                scope: Scope::Twitch,
-            }),
-            public: Arc::new(Tokens {
-                value: Mutex::new(None),
-                scope: Scope::Public,
-            }),
-            delegate: Arc::new(Tokens {
-                value: Mutex::new(None),
-                scope: Scope::Delegate,
-            }),
+            twitch: tokens(Scope::Twitch),
+            public: tokens(Scope::Public),
+            delegate: tokens(Scope::Delegate),
             osu_next: Arc::new(Mutex::new(Instant::now())),
         })
     }
@@ -322,47 +377,46 @@ impl Providers {
         Ok(())
     }
 
+    /// One retry/refresh loop for app-token and managed-bot requests. `chat`
+    /// marks a send whose failure may be ambiguous, so it is never replayed.
     #[tracing::instrument(
         name = "provider.http",
         level = "info",
         skip_all,
         fields(
             sentry.op = "http.client",
-            provider = match scope { Scope::Twitch => "twitch", _ => "osu" },
+            provider = tracing::field::Empty,
             operation = provider_operation(endpoint),
             http.method = %method,
             http.status_code = tracing::field::Empty,
         )
     )]
-    async fn request(
+    async fn execute(
         &self,
-        scope: Scope,
+        mut auth: Auth<'_>,
         method: Method,
         endpoint: &str,
         query: &[(String, String)],
         data: Option<Value>,
         chat: bool,
-    ) -> std::result::Result<Value, ChatError> {
-        let state = match scope {
-            Scope::Twitch => &self.twitch,
-            Scope::Public => &self.public,
-            Scope::Delegate => &self.delegate,
+    ) -> std::result::Result<(Value, StatusCode), ChatError> {
+        let scope = match &auth {
+            Auth::App(tokens) => Some(tokens.scope),
+            Auth::Bot { .. } => None,
         };
-        let base = match scope {
-            Scope::Twitch => &self.config.twitch_api_base,
-            _ => &self.config.osu_api_base,
-        };
-        let provider = match scope {
-            Scope::Twitch => "twitch",
-            _ => "osu",
-        };
+        let is_twitch = scope.is_none_or(Scope::is_twitch);
+        let base = scope.map_or(self.config.twitch_api_base.as_str(), |s| {
+            s.base(&self.config)
+        });
+        let provider = if is_twitch { "twitch" } else { "osu" };
         let operation = provider_operation(endpoint);
+        tracing::Span::current().record("provider", provider);
         let mut refreshed = false;
         let mut retries = 0;
         let mut attempt = 0u32;
         loop {
-            let access = self.token(state).await.map_err(known_error)?;
-            if !matches!(scope, Scope::Twitch) {
+            let access = auth.token(self).await?;
+            if !is_twitch {
                 self.pace_osu().await.map_err(known_error)?;
             }
             let mut builder = self
@@ -373,7 +427,7 @@ impl Providers {
                 )
                 .bearer_auth(&access)
                 .query(query);
-            if matches!(scope, Scope::Twitch) {
+            if is_twitch {
                 builder = builder.header("Client-Id", &self.config.twitch_client_id);
             }
             if let Some(data) = &data {
@@ -384,7 +438,7 @@ impl Providers {
             let result = tokio::select! {
                 _ = self.shutdown.cancelled() => {
                     record_provider_attempt(provider, operation, method.as_str(), "transport_error", started.elapsed());
-                    return Err(ChatError { uncertain: chat, status: None, message: "request cancelled during provider send".into() });
+                    return Err(ChatError::new(chat, None, "request cancelled during provider send"));
                 },
                 result = builder.send() => result,
             };
@@ -426,11 +480,11 @@ impl Providers {
                         self.pause(delay).await.map_err(known_error)?;
                         continue;
                     }
-                    return Err(ChatError {
+                    return Err(ChatError::new(
                         uncertain,
-                        status: None,
-                        message: format!("provider transport failure: {error}"),
-                    });
+                        None,
+                        format!("provider transport failure: {error}"),
+                    ));
                 }
             };
             let status = response.status();
@@ -463,7 +517,7 @@ impl Providers {
                     "provider HTTP retry scheduled"
                 );
                 drop(response);
-                self.invalidate(state, &access).await;
+                auth.rejected(self, &access).await?;
                 refreshed = true;
                 continue;
             }
@@ -504,26 +558,49 @@ impl Providers {
                 continue;
             }
             if !status.is_success() {
-                return Err(ChatError {
-                    uncertain: chat
-                        && (status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT),
-                    status: Some(status.as_u16()),
-                    message: format!("provider HTTP {status} at {endpoint}"),
-                });
+                return Err(ChatError::new(
+                    chat && (status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT),
+                    Some(status.as_u16()),
+                    format!("provider HTTP {status} at {endpoint}"),
+                ));
             }
             if status == StatusCode::NO_CONTENT {
-                return Ok(Value::Null);
+                return Ok((Value::Null, status));
             }
             let value = tokio::select! {
-                _ = self.shutdown.cancelled() => return Err(ChatError { uncertain: chat, status: None, message: "cancelled reading provider response".into() }),
+                _ = self.shutdown.cancelled() => return Err(ChatError::new(chat, None, "cancelled reading provider response")),
                 value = body_json(response) => value,
             };
-            return value.map_err(|error| ChatError {
-                uncertain: chat,
-                status: None,
-                message: format!("invalid provider response: {error:#}"),
+            return value.map(|value| (value, status)).map_err(|error| {
+                ChatError::new(chat, None, format!("invalid provider response: {error:#}"))
             });
         }
+    }
+
+    async fn request(
+        &self,
+        scope: Scope,
+        method: Method,
+        endpoint: &str,
+        query: &[(String, String)],
+        data: Option<Value>,
+        chat: bool,
+    ) -> std::result::Result<Value, ChatError> {
+        let tokens = match scope {
+            Scope::Twitch => &self.twitch,
+            Scope::Public => &self.public,
+            Scope::Delegate => &self.delegate,
+        };
+        self.execute(
+            Auth::App(tokens.as_ref()),
+            method,
+            endpoint,
+            query,
+            data,
+            chat,
+        )
+        .await
+        .map(|(value, _)| value)
     }
 
     pub async fn get_beatmap(&self, beatmap: &Beatmap) -> Result<(Value, Value)> {
@@ -649,18 +726,6 @@ impl Providers {
 
     /// Send chat as the managed bot account. This is the one Twitch call that
     /// needs the bot's user token; the response must acknowledge `is_sent`.
-    #[tracing::instrument(
-        name = "provider.http",
-        level = "info",
-        skip_all,
-        fields(
-            sentry.op = "http.client",
-            provider = "twitch",
-            operation = "chat",
-            http.method = "POST",
-            http.status_code = tracing::field::Empty,
-        )
-    )]
     pub async fn send_twitch_message(
         &self,
         auth: &TwitchAuth,
@@ -671,146 +736,43 @@ impl Providers {
         if self.config.dry_run {
             return Ok(());
         }
-        let url = format!(
-            "{}/chat/messages",
-            self.config.twitch_api_base.trim_end_matches('/')
-        );
-        let body =
-            json!({"broadcaster_id":broadcaster.to_string(),"sender_id":sender,"message":message});
-        let mut token = auth
+        let token = auth
             .bot_access_token(&self.shutdown)
             .await
             .map_err(known_error)?;
-        let mut refreshed = false;
-        let mut retries = 0u32;
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
-            let started = Instant::now();
-            let result = self
-                .client
-                .post(&url)
-                .bearer_auth(&token)
-                .header("Client-Id", &self.config.twitch_client_id)
-                .json(&body)
-                .send();
-            let result = tokio::select! {
-                _ = self.shutdown.cancelled() => {
-                    record_provider_attempt("twitch", "chat", "POST", "transport_error", started.elapsed());
-                    return Err(ChatError { uncertain: false, status: None, message: "chat send cancelled".into() });
-                },
-                result = result => result,
-            };
-            let elapsed = started.elapsed();
-            let response = match result {
-                Ok(response) => response,
-                Err(error) => {
-                    record_provider_attempt("twitch", "chat", "POST", "transport_error", elapsed);
-                    tracing::debug!(
-                        provider = "twitch",
-                        operation = "chat/messages",
-                        method = "POST",
-                        attempt,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        timeout = error.is_timeout(),
-                        connect = error.is_connect(),
-                        "provider HTTP attempt failed"
-                    );
-                    // A transport failure after the request may have reached
-                    // Twitch, so it is never replayed automatically.
-                    let uncertain = !error.is_connect() && !error.is_builder();
-                    return Err(ChatError {
-                        uncertain,
-                        status: None,
-                        message: format!("chat transport failure: {error}"),
-                    });
-                }
-            };
-            let status = response.status();
-            record_provider_attempt("twitch", "chat", "POST", status_outcome(status), elapsed);
-            tracing::Span::current().record("http.status_code", status.as_u16());
-            tracing::debug!(
-                provider = "twitch",
-                operation = "chat/messages",
-                method = "POST",
-                attempt,
-                elapsed_ms = elapsed.as_millis() as u64,
-                http_status = status.as_u16(),
-                "provider HTTP response headers received"
-            );
-            if status == StatusCode::UNAUTHORIZED && !refreshed {
-                record_provider_retry("twitch", "chat", "token_refresh", None);
-                tracing::debug!(
-                    provider = "twitch",
-                    operation = "chat/messages",
-                    method = "POST",
-                    attempt,
-                    http_status = status.as_u16(),
-                    reason = "token_refresh",
-                    "provider HTTP retry scheduled"
-                );
-                drop(response);
-                token = auth
-                    .bot_access_token_after_rejection(&token, &self.shutdown)
-                    .await
-                    .map_err(known_error)?;
-                refreshed = true;
-                continue;
-            }
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < 2 {
-                let delay = retry_after(&response, retries);
-                record_provider_retry("twitch", "chat", "rate_limited", Some(delay));
-                tracing::warn!(
-                    provider = "twitch",
-                    operation = "chat/messages",
-                    method = "POST",
-                    attempt,
-                    http_status = status.as_u16(),
-                    reason = "rate_limited",
-                    retry_delay_ms = delay.as_millis() as u64,
-                    "provider HTTP retry scheduled"
-                );
-                drop(response);
-                retries += 1;
-                self.pause(delay).await.map_err(known_error)?;
-                continue;
-            }
-            if !status.is_success() {
-                return Err(ChatError {
-                    uncertain: status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT,
-                    status: Some(status.as_u16()),
-                    message: format!("Twitch chat message failed: HTTP {status}"),
-                });
-            }
-            let value = body_json(response).await.map_err(|error| ChatError {
-                uncertain: true,
-                status: None,
-                message: format!("invalid chat response: {error:#}"),
-            })?;
-            let result = value["data"].as_array().and_then(|data| data.first());
-            return match result.and_then(|row| row["is_sent"].as_bool()) {
-                Some(true) => Ok(()),
-                Some(false) => Err(ChatError {
-                    uncertain: false,
-                    status: Some(status.as_u16()),
-                    message: format!(
-                        "Twitch dropped the chat message: {}: {}",
-                        result
-                            .and_then(|row| row["drop_reason"]["code"].as_str())
-                            .unwrap_or("unspecified"),
-                        result
-                            .and_then(|row| row["drop_reason"]["message"].as_str())
-                            .unwrap_or("no rejection message provided")
-                    ),
-                }),
-                None => Err(ChatError {
-                    uncertain: true,
-                    status: None,
-                    message:
-                        "Twitch chat response omitted the delivery acknowledgement; not replayed"
-                            .into(),
-                }),
-            };
+        let body =
+            json!({"broadcaster_id":broadcaster.to_string(),"sender_id":sender,"message":message});
+        let (value, status) = self
+            .execute(
+                Auth::Bot { auth, token },
+                Method::POST,
+                "chat/messages",
+                &[],
+                Some(body),
+                true,
+            )
+            .await?;
+        let result = value["data"].as_array().and_then(|data| data.first());
+        match result.and_then(|row| row["is_sent"].as_bool()) {
+            Some(true) => Ok(()),
+            Some(false) => Err(ChatError::new(
+                false,
+                Some(status.as_u16()),
+                format!(
+                    "Twitch dropped the chat message: {}: {}",
+                    result
+                        .and_then(|row| row["drop_reason"]["code"].as_str())
+                        .unwrap_or("unspecified"),
+                    result
+                        .and_then(|row| row["drop_reason"]["message"].as_str())
+                        .unwrap_or("no rejection message provided")
+                ),
+            )),
+            None => Err(ChatError::new(
+                true,
+                None,
+                "Twitch chat response omitted the delivery acknowledgement; not replayed",
+            )),
         }
     }
 
@@ -883,11 +845,7 @@ impl Providers {
 }
 
 fn known_error(error: anyhow::Error) -> ChatError {
-    ChatError {
-        uncertain: false,
-        status: None,
-        message: format!("{error:#}"),
-    }
+    ChatError::new(false, None, format!("{error:#}"))
 }
 fn retry_after(response: &Response, attempt: u32) -> Duration {
     let seconds = response
@@ -916,107 +874,4 @@ pub(crate) fn valid_login(login: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn login_rejects_invalid_identity_characters() {
-        assert!(valid_login("some_user123"));
-        for bad in ["", "user\r\nother", "user name", "#user", "üser"] {
-            assert!(!valid_login(bad));
-        }
-    }
-    #[derive(Default)]
-    struct MockState {
-        scopes: std::sync::Mutex<Vec<String>>,
-        map_calls: std::sync::atomic::AtomicUsize,
-        chat_calls: std::sync::atomic::AtomicUsize,
-    }
-    async fn mock_token(
-        axum::extract::State(state): axum::extract::State<Arc<MockState>>,
-        axum::Json(body): axum::Json<Value>,
-    ) -> axum::Json<Value> {
-        assert_eq!(body["grant_type"], "client_credentials");
-        let mut scopes = state.scopes.lock().unwrap();
-        scopes.push(body["scope"].as_str().unwrap().to_owned());
-        axum::Json(json!({"access_token":format!("token-{}",scopes.len()),"expires_in":3600}))
-    }
-    async fn mock_map(
-        axum::extract::State(state): axum::extract::State<Arc<MockState>>,
-    ) -> (axum::http::StatusCode, axum::Json<Value>) {
-        if state
-            .map_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            == 0
-        {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                axum::Json(json!({"error":"expired"})),
-            );
-        }
-        (
-            axum::http::StatusCode::OK,
-            axum::Json(
-                json!({"id":42,"beatmapset_id":7,"beatmapset":{"id":7,"artist":"Artist","title":"Title"}}),
-            ),
-        )
-    }
-    async fn mock_chat(
-        axum::extract::State(state): axum::extract::State<Arc<MockState>>,
-        axum::Json(body): axum::Json<Value>,
-    ) -> axum::http::StatusCode {
-        assert_eq!(body["target_id"], 7);
-        assert_eq!(body["message"], "hello");
-        assert_eq!(body["is_action"], false);
-        state
-            .chat_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    }
-    #[tokio::test]
-    async fn expired_public_token_refreshes_without_deadlock_and_ambiguous_chat_never_retries() {
-        use axum::{
-            Router,
-            routing::{get, post},
-        };
-        let state = Arc::new(MockState::default());
-        let router = Router::new()
-            .route("/oauth/token", post(mock_token))
-            .route("/api/v2/beatmaps/42", get(mock_map))
-            .route("/api/v2/chat/new", post(mock_chat))
-            .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        let mut config = Config::from_env().unwrap();
-        config.osu_client_id = "test".into();
-        config.osu_client_secret = "test".into();
-        config.osu_api_base = format!("http://{address}/api/v2");
-        config.osu_oauth_base = format!("http://{address}/oauth");
-        let providers = Providers::new(Arc::new(config), CancellationToken::new()).unwrap();
-        let (map, _) = tokio::time::timeout(
-            Duration::from_secs(5),
-            providers.get_beatmap(&Beatmap {
-                id: 42,
-                kind: BeatmapKind::Map,
-                mods: String::new(),
-            }),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(map["id"], 42);
-        let error = providers.send_message(7, "hello", false).await.unwrap_err();
-        assert!(error.uncertain);
-        assert_eq!(
-            state.chat_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-        assert_eq!(
-            *state.scopes.lock().unwrap(),
-            vec!["public", "public", "delegate chat.write"]
-        );
-        server.abort();
-    }
-}
+mod tests;
