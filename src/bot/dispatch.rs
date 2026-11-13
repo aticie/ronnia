@@ -1,8 +1,10 @@
 //! Notification dispatch: validates EventSub subscription identity, parses chat
 //! requests, applies stream-state and revocation transitions, and admits work.
 //!
-//! Duplicate suppression is left to the authoritative storage guarantees: chat
-//! by the `deliveries` primary key and stream state by timestamp guards.
+//! Duplicate suppression has two layers on purpose: a bounded in-memory guard on
+//! the provider's notification id drops redeliveries before any user-visible
+//! feedback is emitted, and the `deliveries` primary key stays the authoritative
+//! guard for an accepted request across concurrent shards.
 
 use super::{
     Config, Outcome,
@@ -21,9 +23,57 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use serde_json::Value;
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+
+/// Recently dispatched notification ids, bounded like the shard event channel.
+///
+/// Twitch redelivers a notification when a session handoff races, and a rejected
+/// request must not produce a second chat reply, so this guard runs before policy
+/// evaluation; the durable `deliveries` key still guards the accepted path.
+const SEEN_CAPACITY: usize = 2048;
+/// Provider-supplied ids can be large, so the guard keeps a fixed-size digest
+/// instead of the id itself: two copies of a 1 MiB id times 2,048 entries would
+/// otherwise be a multi-gigabyte allocation reachable from provider input.
+type SeenKey = [u8; 16];
+
+#[derive(Default)]
+pub(super) struct Seen {
+    order: VecDeque<SeenKey>,
+    ids: HashSet<SeenKey>,
+}
+
+fn seen_key(id: &str) -> SeenKey {
+    let digest = Sha256::digest(id.as_bytes());
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    key
+}
+
+impl Seen {
+    /// Returns `true` when the id is new. An empty id is never deduplicated.
+    pub(super) fn insert(&mut self, id: &str) -> bool {
+        if id.is_empty() {
+            return true;
+        }
+        let key = seen_key(id);
+        if !self.ids.insert(key) {
+            return false;
+        }
+        self.order.push_back(key);
+        while self.order.len() > SEEN_CAPACITY {
+            if let Some(old) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+        true
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Message {
@@ -124,6 +174,7 @@ pub(super) struct Runtime {
         watch::Receiver<maintenance::Signal>,
         mpsc::Receiver<maintenance::Action>,
     )>,
+    seen: Seen,
 }
 
 impl Runtime {
@@ -153,6 +204,7 @@ impl Runtime {
             signals,
             actions,
             maintenance_rx: Some((signal_rx, action_rx)),
+            seen: Seen::default(),
         })
     }
 
@@ -276,12 +328,16 @@ impl Runtime {
     }
 
     async fn notification(
-        &self,
+        &mut self,
         subscription: &Value,
         event: &Value,
         timestamp: &str,
-        _message_id: &str,
+        message_id: &str,
     ) -> Result<()> {
+        if !self.seen.insert(message_id) {
+            tracing::debug!(message_id, "dropping a redelivered EventSub notification");
+            return Ok(());
+        }
         let Some(owned) = conduit::owned(subscription, &self.conduit.id, Some(self.bot_id()))
         else {
             return Ok(());

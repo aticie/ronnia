@@ -54,9 +54,15 @@ impl Backoff {
     }
 
     /// Record a failed attempt: the next retry becomes due after the delay.
-    pub(super) fn fail(&mut self, now: Instant) {
-        self.until = Some(now + self.delay());
+    ///
+    /// The deadline is measured from when the failure was observed, never from a
+    /// timestamp captured before the attempt started: an operation that takes
+    /// longer than its own backoff (a slow HTTP timeout, say) would otherwise
+    /// come back already due and skip the whole schedule.
+    pub(super) fn fail(&mut self) {
+        let delay = self.delay();
         self.attempt = self.attempt.saturating_add(1);
+        self.until = Some(Instant::now() + delay);
     }
 }
 

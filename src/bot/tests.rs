@@ -2282,14 +2282,14 @@ fn subscription_backoff_grows_capped_and_recovers() {
     let now = Instant::now();
     let mut backoff = Backoff::new(Duration::from_secs(60), Duration::from_secs(600));
     assert!(backoff.ready(now));
-    backoff.fail(now);
+    backoff.fail();
     assert!(!backoff.ready(now));
     let first = backoff.until().unwrap() - now;
     assert!((Duration::from_secs(60)..=Duration::from_secs(75)).contains(&first));
-    backoff.fail(now);
+    backoff.fail();
     assert!(backoff.until().unwrap() - now > first);
     for _ in 0..10 {
-        backoff.fail(now);
+        backoff.fail();
     }
     assert!(
         (Duration::from_secs(600)..=Duration::from_secs(750))
@@ -3376,5 +3376,28 @@ async fn revision_guard_prevents_a_slow_snapshot_from_reactivating() {
     assert!(
         !store.user_by_twitch(1).await.unwrap().unwrap().is_live,
         "a slow snapshot must not reactivate an offline channel"
+    );
+}
+
+#[test]
+fn notification_guard_drops_redeliveries_and_stays_bounded() {
+    use super::dispatch::Seen;
+
+    let mut seen = Seen::default();
+    let huge = "m".repeat(1024 * 1024);
+    assert!(seen.insert(&huge), "first delivery is new");
+    assert!(!seen.insert(&huge), "a redelivered id must be dropped");
+    assert!(seen.insert(""), "an absent id is never deduplicated");
+
+    for index in 0..2_050u32 {
+        assert!(seen.insert(&format!("m{index}")));
+    }
+    assert!(
+        !seen.insert(&format!("m{}", 2_049)),
+        "the most recent id is still remembered"
+    );
+    assert!(
+        seen.insert("m0"),
+        "the oldest ids are evicted once the bound is reached"
     );
 }

@@ -406,7 +406,7 @@ impl Subscriptions {
                     self.blocked
                         .entry(block_key)
                         .or_insert_with(|| Backoff::new(BLOCK_BASE, BLOCK_CAP))
-                        .fail(now);
+                        .fail();
                     tracing::warn!(
                         kind = %kind,
                         broadcaster = *broadcaster,

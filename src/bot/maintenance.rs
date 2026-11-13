@@ -545,7 +545,7 @@ impl Maintenance {
                         member_retry.reset();
                     }
                     Err(error) => {
-                        member_retry.fail(now);
+                        member_retry.fail();
                         tracing::warn!(error = %error, "could not refresh channel membership; retaining both activation baselines");
                     }
                 }
@@ -561,7 +561,7 @@ impl Maintenance {
                         audit_retry.reset();
                     }
                     Err(error) => {
-                        audit_retry.fail(now);
+                        audit_retry.fail();
                         tracing::warn!(error = %error, "EventSub audit failed; retaining subscription cache");
                     }
                 }
@@ -618,7 +618,7 @@ impl Maintenance {
                         );
                     }
                     Err(error) => {
-                        reconcile_retry.fail(now);
+                        reconcile_retry.fail();
                         tracing::warn!(error = %error, "EventSub reconciliation failed; retaining subscription cache");
                     }
                 }
@@ -637,7 +637,7 @@ impl Maintenance {
                         }
                     }
                     Err(error) => {
-                        snapshot_retry.fail(now);
+                        snapshot_retry.fail();
                         tracing::warn!(error = %error, "stream snapshot failed; retaining previous state");
                     }
                 }
