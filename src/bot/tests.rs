@@ -1,3 +1,6 @@
+//! Behaviour tests for bot orchestration, dispatch, delivery, maintenance,
+//! request scheduling and the EventSub transport.
+
 use super::backoff::Backoff;
 use super::conduit::{self, Subscriptions};
 use super::delivery::{Clock, policy, prepare_message, process_one, sanitize_chat};
