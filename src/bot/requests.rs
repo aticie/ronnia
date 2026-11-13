@@ -128,7 +128,11 @@ impl Scheduler {
                         request.span.in_scope(|| {
                             record_outcome(
                                 "ronnia.requests.processed",
-                                if error.is_panic() { "panic" } else { "cancelled" },
+                                if error.is_panic() {
+                                    "panic"
+                                } else {
+                                    "cancelled"
+                                },
                             );
                             tracing::error!(
                                 channel_id = request.channel,
@@ -187,34 +191,28 @@ pub(super) async fn process_requests(
             let store = store.clone();
             let providers = providers.clone();
             let echoes = echoes.clone();
-            scheduler.spawn(
-                channel,
-                permit,
-                span,
-                queued_at,
-                async move {
-                    // Never select cancellation around process_one: its final
-                    // delivery, statistics, and cooldown bookkeeping must finish
-                    // atomically.
-                    let result = process_one(
-                        &config, &store, &providers, &echoes, &message, &beatmap, clock,
-                    )
-                    .await;
-                    record_outcome(
-                        "ronnia.requests.processed",
-                        if result.is_ok() { "ok" } else { "error" },
+            scheduler.spawn(channel, permit, span, queued_at, async move {
+                // Never select cancellation around process_one: its final
+                // delivery, statistics, and cooldown bookkeeping must finish
+                // atomically.
+                let result = process_one(
+                    &config, &store, &providers, &echoes, &message, &beatmap, clock,
+                )
+                .await;
+                record_outcome(
+                    "ronnia.requests.processed",
+                    if result.is_ok() { "ok" } else { "error" },
+                );
+                if let Err(error) = result {
+                    tracing::error!(
+                        channel = %message.channel,
+                        message_id = %message.id,
+                        error = error.as_ref() as &dyn std::error::Error,
+                        error_chain = %format_args!("{error:#}"),
+                        "request processing failed"
                     );
-                    if let Err(error) = result {
-                        tracing::error!(
-                            channel = %message.channel,
-                            message_id = %message.id,
-                            error = error.as_ref() as &dyn std::error::Error,
-                            error_chain = %format_args!("{error:#}"),
-                            "request processing failed"
-                        );
-                    }
-                },
-            );
+                }
+            });
         }
         tokio::select! {
             biased;

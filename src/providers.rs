@@ -571,11 +571,9 @@ impl Providers {
                 _ = self.shutdown.cancelled() => return Err(ChatError::new(chat, None, "cancelled reading provider response")),
                 value = body_json(response) => value,
             };
-            return value
-                .map(|value| (value, status))
-                .map_err(|error| {
-                    ChatError::new(chat, None, format!("invalid provider response: {error:#}"))
-                });
+            return value.map(|value| (value, status)).map_err(|error| {
+                ChatError::new(chat, None, format!("invalid provider response: {error:#}"))
+            });
         }
     }
 

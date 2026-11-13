@@ -9,9 +9,7 @@
 use super::{
     Config, Outcome,
     conduit::{self, Conduit},
-    isolated_hub,
-    maintenance,
-    record_queue_drop,
+    isolated_hub, maintenance, record_queue_drop,
     requests::{RequestEnvelope, RequestIngress},
     transport::{self, Incoming, Pool},
     validate_identity,

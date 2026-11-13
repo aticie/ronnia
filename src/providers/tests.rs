@@ -173,10 +173,7 @@ async fn missing_beatmaps_preserve_typed_404_without_retrying() {
         assert!(error.message.contains("404 Not Found"));
         assert!(error.message.contains(endpoint));
     }
-    assert_eq!(
-        state.map_calls.load(std::sync::atomic::Ordering::SeqCst),
-        2
-    );
+    assert_eq!(state.map_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(*state.scopes.lock().unwrap(), vec!["public"]);
     server.abort();
 }
