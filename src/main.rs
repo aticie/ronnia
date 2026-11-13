@@ -110,10 +110,11 @@ fn sentry_options() -> Result<Option<sentry::ClientOptions>> {
     let Some(dsn) = nonempty_env("SENTRY_DSN") else {
         return Ok(None);
     };
-    let release = nonempty_env("SENTRY_RELEASE")
+    let release: Option<std::borrow::Cow<'static, str>> = nonempty_env("SENTRY_RELEASE")
         .or_else(|| nonempty_env("RAILWAY_GIT_COMMIT_SHA"))
         .map(Into::into)
-        .or_else(|| sentry::release_name!());
+        .or_else(|| sentry::release_name!())
+        .map(|release| format!("ronnia-rust:{release}").into());
     let mut options = sentry::ClientOptions::new()
         .maybe_release(release)
         .send_default_pii(false)
