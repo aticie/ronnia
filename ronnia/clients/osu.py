@@ -158,7 +158,7 @@ class OsuApiV2(BaseOsuApiV2):
         except aiohttp.ClientResponseError as exc:
             if exc.status != 404:
                 raise
-            logger.info("Requested %s %s was not found on osu!", beatmap.type, beatmap.id)
+            logger.warning("Requested %s %s was not found on osu!", beatmap.type, beatmap.id)
             return None, None
 
         return beatmap_info, beatmapset_info
