@@ -41,47 +41,50 @@ pub struct Config {
     pub internal_api_token: Option<String>,
 }
 
-impl std::fmt::Debug for Config {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Config")
-            .field("database_path", &self.database_path)
-            .field("bind", &self.bind)
-            .field("bind_port", &self.bind_port)
-            .field("public_origin", &self.public_origin)
-            .field("api_origin", &self.api_origin)
-            .field("cookie_secure", &self.cookie_secure)
-            .field("debug_mode", &self.debug_mode)
-            .field("twitch_eventsub_url", &self.twitch_eventsub_url)
-            .field("twitch_api_base", &self.twitch_api_base)
-            .field("twitch_oauth_base", &self.twitch_oauth_base)
-            .field("osu_api_base", &self.osu_api_base)
-            .field("osu_oauth_base", &self.osu_oauth_base)
-            .field("dry_run", &self.dry_run)
-            .field("reconcile_interval_secs", &self.reconcile_interval_secs)
-            .field(
-                "eventsub_channels_per_shard",
-                &self.eventsub_channels_per_shard,
-            )
-            .field("eventsub_max_shards", &self.eventsub_max_shards)
-            .field("request_workers", &self.request_workers)
-            .field("request_queue_capacity", &self.request_queue_capacity)
-            .field("http_timeout_secs", &self.http_timeout_secs)
-            .field("session_ttl_secs", &self.session_ttl_secs)
-            .field("oauth_ttl_secs", &self.oauth_ttl_secs)
-            .field("bot_enabled", &self.bot_enabled)
-            .field("migration_active", &self.migration_active)
-            .field("migration_cutoff_at", &self.migration_cutoff_at)
-            .field(
-                "migration_grant_grace_secs",
-                &self.migration_grant_grace_secs,
-            )
-            .field(
-                "internal_api_configured",
-                &self.internal_api_token.is_some(),
-            )
+/// Every safe field is listed once; credentials are always redacted.
+macro_rules! debug_config {
+    ($formatter:expr, $config:expr, [$($field:ident),* $(,)?]) => {{
+        let mut debug = $formatter.debug_struct("Config");
+        $(debug.field(stringify!($field), &$config.$field);)*
+        debug.field("internal_api_configured", &$config.internal_api_token.is_some())
             .field("credentials", &"[REDACTED]")
             .finish()
+    }};
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        debug_config!(
+            formatter,
+            self,
+            [
+                database_path,
+                bind,
+                bind_port,
+                public_origin,
+                api_origin,
+                cookie_secure,
+                debug_mode,
+                twitch_eventsub_url,
+                twitch_api_base,
+                twitch_oauth_base,
+                osu_api_base,
+                osu_oauth_base,
+                dry_run,
+                reconcile_interval_secs,
+                eventsub_channels_per_shard,
+                eventsub_max_shards,
+                request_workers,
+                request_queue_capacity,
+                http_timeout_secs,
+                session_ttl_secs,
+                oauth_ttl_secs,
+                bot_enabled,
+                migration_active,
+                migration_cutoff_at,
+                migration_grant_grace_secs,
+            ]
+        )
     }
 }
 
@@ -100,6 +103,34 @@ where
         Err(env::VarError::NotPresent) => Ok(default),
         Err(e) => Err(e).with_context(|| format!("Reading {name}")),
     }
+}
+
+fn within<T: PartialOrd + Copy + std::fmt::Display>(
+    name: &str,
+    value: T,
+    min: T,
+    max: T,
+) -> Result<()> {
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        bail!("{name} must be between {min} and {max}")
+    }
+}
+
+fn origin(name: &str, value: &str) -> Result<()> {
+    let url = Url::parse(value).with_context(|| format!("Invalid {name}"))?;
+    let clean = matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    if !clean {
+        bail!("{name} must be an HTTP(S) origin without path, query, fragment or credentials");
+    }
+    Ok(())
 }
 
 impl Config {
@@ -173,15 +204,14 @@ impl Config {
         if result.eventsub_channels_per_shard == 0 {
             bail!("EVENTSUB_CHANNELS_PER_SHARD must be positive");
         }
-        if !(1..=64).contains(&result.eventsub_max_shards) {
-            bail!("EVENTSUB_MAX_SHARDS must be between 1 and 64");
-        }
-        if !(1..=64).contains(&result.request_workers) {
-            bail!("REQUEST_WORKERS must be between 1 and 64");
-        }
-        if !(1..=4096).contains(&result.request_queue_capacity) {
-            bail!("REQUEST_QUEUE_CAPACITY must be between 1 and 4096");
-        }
+        within("EVENTSUB_MAX_SHARDS", result.eventsub_max_shards, 1, 64)?;
+        within("REQUEST_WORKERS", result.request_workers, 1, 64)?;
+        within(
+            "REQUEST_QUEUE_CAPACITY",
+            result.request_queue_capacity,
+            1,
+            4096,
+        )?;
         if result.reconcile_interval_secs == 0
             || result.http_timeout_secs == 0
             || result.session_ttl_secs <= 0
@@ -189,24 +219,8 @@ impl Config {
         {
             bail!("Intervals and expiration durations must be positive");
         }
-        for (name, origin) in [
-            ("PUBLIC_ORIGIN", &result.public_origin),
-            ("API_ORIGIN", &result.api_origin),
-        ] {
-            let url = Url::parse(origin).with_context(|| format!("Invalid {name}"))?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || url.path() != "/"
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || !url.username().is_empty()
-                || url.password().is_some()
-            {
-                bail!(
-                    "{name} must be an HTTP(S) origin without path, query, fragment or credentials"
-                );
-            }
-        }
+        origin("PUBLIC_ORIGIN", &result.public_origin)?;
+        origin("API_ORIGIN", &result.api_origin)?;
         if result.api_origin.starts_with("https://") && !result.cookie_secure {
             bail!("COOKIE_SECURE must be true for an HTTPS API_ORIGIN");
         }
@@ -214,39 +228,38 @@ impl Config {
     }
 
     pub fn validate_serve(&self) -> Result<()> {
-        if self.bot_enabled {
-            for (key, val) in [
-                ("TWITCH_CLIENT_ID", &self.twitch_client_id),
-                ("TWITCH_CLIENT_SECRET", &self.twitch_client_secret),
-                ("OSU_CLIENT_ID", &self.osu_client_id),
-                ("OSU_CLIENT_SECRET", &self.osu_client_secret),
-            ] {
-                if val.is_empty() {
-                    bail!("{key} is required when the bot is enabled");
-                }
+        if !self.bot_enabled {
+            return Ok(());
+        }
+        for (key, val) in [
+            ("TWITCH_CLIENT_ID", &self.twitch_client_id),
+            ("TWITCH_CLIENT_SECRET", &self.twitch_client_secret),
+            ("OSU_CLIENT_ID", &self.osu_client_id),
+            ("OSU_CLIENT_SECRET", &self.osu_client_secret),
+        ] {
+            if val.is_empty() {
+                bail!("{key} is required when the bot is enabled");
             }
-            if self.twitch_token_key.is_none() {
-                bail!(
-                    "TWITCH_TOKEN_KEY is required when the bot is enabled; generate it with generate-token-key"
-                );
-            }
-            let endpoint =
-                Url::parse(&self.twitch_eventsub_url).context("Invalid TWITCH_EVENTSUB_URL")?;
-            if !matches!(endpoint.scheme(), "ws" | "wss")
-                || endpoint.host_str().is_none()
-                || !endpoint.username().is_empty()
-                || endpoint.password().is_some()
-                || endpoint.fragment().is_some()
-            {
-                bail!(
-                    "TWITCH_EVENTSUB_URL must be a WebSocket URL without credentials or fragment"
-                );
-            }
-            if endpoint.scheme() == "ws" {
-                tracing::warn!(
-                    "Unencrypted EventSub endpoint configured; use only for isolated local tests"
-                );
-            }
+        }
+        if self.twitch_token_key.is_none() {
+            bail!(
+                "TWITCH_TOKEN_KEY is required when the bot is enabled; generate it with generate-token-key"
+            );
+        }
+        let endpoint =
+            Url::parse(&self.twitch_eventsub_url).context("Invalid TWITCH_EVENTSUB_URL")?;
+        if !matches!(endpoint.scheme(), "ws" | "wss")
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.fragment().is_some()
+        {
+            bail!("TWITCH_EVENTSUB_URL must be a WebSocket URL without credentials or fragment");
+        }
+        if endpoint.scheme() == "ws" {
+            tracing::warn!(
+                "Unencrypted EventSub endpoint configured; use only for isolated local tests"
+            );
         }
         Ok(())
     }

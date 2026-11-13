@@ -176,28 +176,7 @@ impl Modify for BrowserSecurity {
     }
 }
 #[derive(OpenApi)]
-#[openapi(
-    info(title = "Ronnia API", description = "Website API. Authentication uses fresh opaque HttpOnly cookies, not legacy JWTs. Browser cookie mutations (including GET logout) require a trusted Origin or Referer. OAuth callbacks require a browser-bound single-use state and preserve account ownership. Interactive docs are available only with DEBUG_MODE=true."),
-    paths(
-        super::oauth::osu_login, super::oauth::osu_redirect,
-        super::oauth::twitch_login, super::oauth::twitch_redirect,
-        super::me, super::logout, super::delete_me,
-        super::settings, super::update_settings, super::excluded,
-        super::add_excluded, super::remove_excluded, super::live,
-        super::daily, super::weekly, super::monthly, super::migration_status,
-        super::health, super::ready
-    ),
-    components(schemas(UserResponse, SignupProvider, SignupStatus, MeResponse, NullResponse, SettingValue, SettingMetadata, ApiErrorBody, LeaderboardEntry, HealthStatus, MigrationStatus, crate::domain::Settings)),
-    modifiers(&BrowserSecurity),
-    tags(
-        (name = "oauth2", description = "OAuth login and two-provider account signup"),
-        (name = "user", description = "Account, settings and excluded requesters"),
-        (name = "live", description = "Currently live Twitch channels"),
-        (name = "requests", description = "Requested beatmap leaderboards"),
-        (name = "migration", description = "Public coexistence migration banner state"),
-        (name = "operations", description = "Process and initialized database status")
-    )
-)]
+#[openapi( info(title = "Ronnia API", description = "Website API. Authentication uses fresh opaque HttpOnly cookies, not legacy JWTs. Browser cookie mutations (including GET logout) require a trusted Origin or Referer. OAuth callbacks require a browser-bound single-use state and preserve account ownership. Interactive docs are available only with DEBUG_MODE=true."), paths( super::oauth::osu_login, super::oauth::osu_redirect, super::oauth::twitch_login, super::oauth::twitch_redirect, super::me, super::logout, super::delete_me, super::settings, super::update_settings, super::excluded, super::add_excluded, super::remove_excluded, super::live, super::daily, super::weekly, super::monthly, super::migration_status, super::health, super::ready ), components(schemas(UserResponse, SignupProvider, SignupStatus, MeResponse, NullResponse, SettingValue, SettingMetadata, ApiErrorBody, LeaderboardEntry, HealthStatus, MigrationStatus, crate::domain::Settings)), modifiers(&BrowserSecurity), tags( (name = "oauth2", description = "OAuth login and two-provider account signup"), (name = "user", description = "Account, settings and excluded requesters"), (name = "live", description = "Currently live Twitch channels"), (name = "requests", description = "Requested beatmap leaderboards"), (name = "migration", description = "Public coexistence migration banner state"), (name = "operations", description = "Process and initialized database status") ) )]
 struct ApiDoc;
 
 pub(super) fn router() -> Router<ApiState> {
