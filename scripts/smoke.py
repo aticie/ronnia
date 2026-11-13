@@ -600,8 +600,10 @@ def exercise_api(service):
     eventually(lambda: browser.ok("/live/users?limit=100&offset=0") == ["streamer"],
                "Existing imported account becomes eligible immediately on grant activation", timeout=15)
     check(browser.ok("/user/me")["isLive"] is True, "Verified grant+osu live state not reflected")
-    check(service.providers.count_path("/twitch/helix/streams") == before_streams + 1,
-          "Existing enabled imported account did not get exactly one grant-driven stream lookup")
+    observed_streams = service.providers.count_path("/twitch/helix/streams")
+    check(observed_streams == before_streams + 1,
+          f"Existing enabled imported account got {observed_streams - before_streams} grant-driven stream "
+          f"lookups, want exactly 1 (baseline {before_streams}, observed {observed_streams})")
 
     # Reauthorizing the same identity is allowed and rotates the browser session.
     old_token = next(cookie.value for cookie in browser.cookies if cookie.name == "token")
