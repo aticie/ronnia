@@ -171,11 +171,11 @@ class TwitchBot(Client):
         except LegacyAPIError:
             logger.exception("Legacy API failure while handling a Twitch message")
 
-    async def get_beatmap(self, beatmap: Beatmap) -> tuple[dict, dict]:
+    async def get_beatmap(self, beatmap: Beatmap) -> tuple[dict | None, dict | None]:
         db_beatmap = await self.ronnia_db.get_beatmap(beatmap=beatmap)
         if db_beatmap is None:
             beatmap_info, beatmapset_info = await self.osu_api.get_beatmap(beatmap=beatmap)
-            if beatmap.type is BeatmapType.MAP:
+            if beatmap.type is BeatmapType.MAP and beatmap_info is not None:
                 _ = asyncio.create_task(self.ronnia_db.add_beatmap(beatmap_info))
         else:
             beatmap_info = db_beatmap

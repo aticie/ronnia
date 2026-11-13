@@ -80,6 +80,8 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
         url = f"{self._api_base_url}{endpoint}"
         async with self._session.get(url, params=params,
                                      headers=self._auth_header) as resp:
+            self._last_request_time = datetime.datetime.now()
+            resp.raise_for_status()
             contents = await resp.json()
 
         logger.debug("Response after GET request to the osu! api.",
@@ -88,7 +90,6 @@ class BaseOsuApiV2(metaclass=SingletonMeta):
                             "params": params
                             }
                      )
-        self._last_request_time = datetime.datetime.now()
 
         return contents
 
@@ -136,25 +137,29 @@ class OsuApiV2(BaseOsuApiV2):
         super().__init__(client_id, client_secret)
         self._scopes = "public"
 
-    async def get_beatmap(self, beatmap: Beatmap) -> Tuple[Dict, Dict]:
+    async def get_beatmap(self, beatmap: Beatmap) -> Tuple[Optional[Dict], Optional[Dict]]:
         """
         Gets beatmap data for the specified beatmap ID.
         :param beatmap: The beatmap object.
-        :return: Returns a tuple of information about beatmap and beatmapset.
-
-        This endpoint returns a single beatmap dict.
+        :return: A tuple of beatmap and beatmapset data, or (None, None) if not found.
         """
         logger.debug(f"Requesting beatmap information for id: {beatmap.id}")
-        match beatmap.type:
-            case BeatmapType.MAP:
-                beatmap_info = await self._get_endpoint(f"beatmaps/{beatmap.id}")
-                beatmapset_info = beatmap_info["beatmapset"]
-            case BeatmapType.MAPSET:
-                beatmapset_info = await self._get_endpoint(f"beatmapsets/{beatmap.id}")
-                beatmap_info = beatmapset_info["beatmaps"][0]
-            case _:
-                beatmap_info = None
-                beatmapset_info = None
+        try:
+            match beatmap.type:
+                case BeatmapType.MAP:
+                    beatmap_info = await self._get_endpoint(f"beatmaps/{beatmap.id}")
+                    beatmapset_info = beatmap_info["beatmapset"]
+                case BeatmapType.MAPSET:
+                    beatmapset_info = await self._get_endpoint(f"beatmapsets/{beatmap.id}")
+                    beatmap_info = beatmapset_info["beatmaps"][0]
+                case _:
+                    beatmap_info = None
+                    beatmapset_info = None
+        except aiohttp.ClientResponseError as exc:
+            if exc.status != 404:
+                raise
+            logger.warning("Requested %s %s was not found on osu!", beatmap.type, beatmap.id)
+            return None, None
 
         return beatmap_info, beatmapset_info
 

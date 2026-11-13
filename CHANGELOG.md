@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Twitch chat and osu! PM.
 
 ### Fixed
+- Missing or unsubmitted osu! beatmaps and beatmapsets are skipped without
+  caching an error response or raising `KeyError: 'beatmapset'`
+  (`RONNIA-BOT-3Y`). Other osu! API HTTP failures remain errors.
 - Twitch stream discovery now queries both the `osu!` (21465) and `Osu!Lazer`
   (295941293) categories, so channels streaming the Lazer client count as live
   osu! streams for live status, requests, and announcements.
