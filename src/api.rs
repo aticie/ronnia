@@ -97,6 +97,17 @@ pub fn router(config: Arc<Config>, store: Store) -> Router {
 #[derive(Debug)]
 struct ApiError(StatusCode, &'static str);
 type ApiResult<T> = Result<T, ApiError>;
+impl ApiError {
+    fn bad_request(message: &'static str) -> Self {
+        Self(StatusCode::BAD_REQUEST, message)
+    }
+    fn unprocessable(message: &'static str) -> Self {
+        Self(StatusCode::UNPROCESSABLE_ENTITY, message)
+    }
+    fn not_found(message: &'static str) -> Self {
+        Self(StatusCode::NOT_FOUND, message)
+    }
+}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"detail":self.1}))).into_response()
@@ -117,18 +128,17 @@ impl From<anyhow::Error> for ApiError {
 fn unauthorized() -> ApiError {
     ApiError(StatusCode::UNAUTHORIZED, "Authentication required")
 }
+/// Legacy relay errors all report malformed JSON as an unprocessable body.
+fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
+    body.map(|Json(value)| value)
+        .map_err(|_| ApiError::unprocessable("Invalid request body"))
+}
+fn found(user: Option<crate::domain::User>) -> ApiResult<Json<crate::domain::User>> {
+    user.map(Json)
+        .ok_or_else(|| ApiError::not_found("Channel not found"))
+}
 
-#[utoipa::path(
-    get, path = "/user/me", tag = "user",
-    summary = "Get the signed-in user or pending signup",
-    description = "Returns the public user profile without settings, a signup provider marker, or JSON null when no login is present. twitchBotAuthorized reports verified channel:bot consent; imported accounts must authorize through Twitch login before the bot can become active. An expired, deleted-account or legacy JWT session is rejected.",
-    security((), ("session" = []), ("signup" = [])),
-    responses(
-        (status = 200, description = "User, signup marker, or null", body = docs::MeResponse),
-        (status = 401, description = "Invalid or expired session", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/user/me", tag = "user", summary = "Get the signed-in user or pending signup", description = "Returns the public user profile without settings, a signup provider marker, or JSON null when no login is present. twitchBotAuthorized reports verified channel:bot consent; imported accounts must authorize through Twitch login before the bot can become active. An expired, deleted-account or legacy JWT session is rejected.", security((), ("session" = []), ("signup" = [])), responses((status = 200, description = "User, signup marker, or null", body = docs::MeResponse), (status = 401, description = "Invalid or expired session", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn me(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -153,17 +163,7 @@ async fn me(
     }
     Ok(Json(docs::MeResponse::Anonymous(docs::NullResponse)))
 }
-#[utoipa::path(
-    get, path = "/user/logout", tag = "user",
-    summary = "Revoke browser login and signup state",
-    description = "Requires a trusted Origin or Referer even though this legacy mutation uses GET. Revokes server-side browser sessions and clears authentication cookies. Redirects only to a trusted Referer or the configured frontend origin.",
-    params(docs::BrowserOrigin),
-    responses(
-        (status = 303, description = "Browser state revoked", headers(("Location" = String, description = "Safe frontend/API return URL"), ("Set-Cookie" = String, description = "Expired authentication cookies"))),
-        (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/user/logout", tag = "user", summary = "Revoke browser login and signup state", description = "Requires a trusted Origin or Referer even though this legacy mutation uses GET. Revokes server-side browser sessions and clears authentication cookies. Redirects only to a trusted Referer or the configured frontend origin.", params(docs::BrowserOrigin), responses((status = 303, description = "Browser state revoked", headers(("Location" = String, description = "Safe frontend/API return URL"), ("Set-Cookie" = String, description = "Expired authentication cookies"))), (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Response> {
     security::require_origin(&state.config, &headers)?;
     let session = security::cookie(&headers, "token").map(security::hash);
@@ -187,43 +187,20 @@ async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<
             Ok(())
         })
         .await?;
-    let mut response = security::redirect(&security::return_to(&state.config, &headers));
-    security::clear_auth_cookies(&mut response, &state.config);
+    let mut response = security::redirect_cleared(&state.config, &headers);
     for name in ["oauth_state_osu", "oauth_state_twitch"] {
         security::set_cookie(&mut response, &state.config, name, "", 0);
     }
     Ok(response)
 }
-#[utoipa::path(
-    delete, path = "/user/me", tag = "user",
-    summary = "Delete the signed-in account",
-    params(docs::BrowserOrigin), security(("session" = [])),
-    responses(
-        (status = 303, description = "Account deleted and sessions revoked", headers(("Location" = String, description = "Safe frontend/API return URL"), ("Set-Cookie" = String, description = "Expired authentication cookies"))),
-        (status = 401, description = "Authentication required", body = docs::ApiErrorBody),
-        (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(delete, path = "/user/me", tag = "user", summary = "Delete the signed-in account", params(docs::BrowserOrigin), security(("session" = [])), responses((status = 303, description = "Account deleted and sessions revoked", headers(("Location" = String, description = "Safe frontend/API return URL"), ("Set-Cookie" = String, description = "Expired authentication cookies"))), (status = 401, description = "Authentication required", body = docs::ApiErrorBody), (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn delete_me(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Response> {
     security::require_origin(&state.config, &headers)?;
     let user = security::authenticate(&state, &headers).await?;
     state.store.delete_user(user.twitch_id).await?;
-    let mut response = security::redirect(&security::return_to(&state.config, &headers));
-    security::clear_auth_cookies(&mut response, &state.config);
-    Ok(response)
+    Ok(security::redirect_cleared(&state.config, &headers))
 }
-#[utoipa::path(
-    get, path = "/user/settings", tag = "user",
-    summary = "Get setting metadata and effective values",
-    description = "Returns the initialized seven settings (enable, echo, sub-only, points-only, test, cooldown, sr), with imported metadata customizations preserved and user values overlaid.",
-    security(("session" = [])),
-    responses(
-        (status = 200, description = "Setting definitions with effective values", body = [docs::SettingMetadata]),
-        (status = 401, description = "Authentication required", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/user/settings", tag = "user", summary = "Get setting metadata and effective values", description = "Returns the initialized seven settings (enable, echo, sub-only, points-only, test, cooldown, sr), with imported metadata customizations preserved and user values overlaid.", security(("session" = [])), responses((status = 200, description = "Setting definitions with effective values", body = [docs::SettingMetadata]), (status = 401, description = "Authentication required", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn settings(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = security::authenticate(&state, &headers).await?;
     let effective = serde_json::to_value(user.settings).map_err(anyhow::Error::from)?;
@@ -240,22 +217,7 @@ async fn settings(State(state): State<ApiState>, headers: HeaderMap) -> ApiResul
     }
     Ok(Json(Value::Array(metadata)))
 }
-#[utoipa::path(
-    post, path = "/user/settings", tag = "user",
-    summary = "Replace the known user settings",
-    description = "Omitted known settings take their documented defaults. Cooldown must be finite and nonnegative. Star bounds require lower>=0 and upper=-1 or upper>=lower; upper>=10 is normalized to -1 (unlimited). Unknown imported customization keys are preserved.",
-    params(docs::BrowserOrigin), security(("session" = [])),
-    request_body = Settings,
-    responses(
-        (status = 200, description = "Settings saved; JSON null", body = docs::NullResponse, content_type = "application/json"),
-        (status = 400, description = "Malformed JSON request"),
-        (status = 401, description = "Authentication required", body = docs::ApiErrorBody),
-        (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody),
-        (status = 415, description = "JSON content type required"),
-        (status = 422, description = "Invalid settings or field types"),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(post, path = "/user/settings", tag = "user", summary = "Replace the known user settings", description = "Omitted known settings take their documented defaults. Cooldown must be finite and nonnegative. Star bounds require lower>=0 and upper=-1 or upper>=lower; upper>=10 is normalized to -1 (unlimited). Unknown imported customization keys are preserved.", params(docs::BrowserOrigin), security(("session" = [])), request_body = Settings, responses((status = 200, description = "Settings saved; JSON null", body = docs::NullResponse, content_type = "application/json"), (status = 400, description = "Malformed JSON request"), (status = 401, description = "Authentication required", body = docs::ApiErrorBody), (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody), (status = 415, description = "JSON content type required"), (status = 422, description = "Invalid settings or field types"), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn update_settings(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -265,19 +227,11 @@ async fn update_settings(
     let user = security::authenticate(&state, &headers).await?;
     settings
         .validate()
-        .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid settings"))?;
+        .map_err(|_| ApiError::unprocessable("Invalid settings"))?;
     state.store.set_settings(user.twitch_id, settings).await?;
     Ok(Json(Value::Null))
 }
-#[utoipa::path(
-    get, path = "/user/exclude", tag = "user",
-    summary = "Get excluded Twitch logins", security(("session" = [])),
-    responses(
-        (status = 200, description = "Normalized lowercase exclusion list", body = [String]),
-        (status = 401, description = "Authentication required", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/user/exclude", tag = "user", summary = "Get excluded Twitch logins", security(("session" = [])), responses((status = 200, description = "Normalized lowercase exclusion list", body = [String]), (status = 401, description = "Authentication required", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn excluded(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -295,19 +249,7 @@ struct Exclusion {
     #[param(min_length = 1, max_length = 25, pattern = "^[A-Za-z0-9_]+$")]
     excluded_user: String,
 }
-#[utoipa::path(
-    post, path = "/user/exclude", tag = "user",
-    summary = "Add an excluded Twitch login",
-    params(Exclusion, docs::BrowserOrigin), security(("session" = [])),
-    responses(
-        (status = 200, description = "Normalized excluded login", body = String, content_type = "application/json"),
-        (status = 400, description = "Missing or malformed query parameter"),
-        (status = 401, description = "Authentication required", body = docs::ApiErrorBody),
-        (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody),
-        (status = 422, description = "Invalid Twitch login", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(post, path = "/user/exclude", tag = "user", summary = "Add an excluded Twitch login", params(Exclusion, docs::BrowserOrigin), security(("session" = [])), responses((status = 200, description = "Normalized excluded login", body = String, content_type = "application/json"), (status = 400, description = "Missing or malformed query parameter"), (status = 401, description = "Authentication required", body = docs::ApiErrorBody), (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody), (status = 422, description = "Invalid Twitch login", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn add_excluded(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -315,19 +257,7 @@ async fn add_excluded(
 ) -> ApiResult<Json<String>> {
     change_excluded(state, headers, query, true).await
 }
-#[utoipa::path(
-    delete, path = "/user/exclude", tag = "user",
-    summary = "Remove an excluded Twitch login",
-    params(Exclusion, docs::BrowserOrigin), security(("session" = [])),
-    responses(
-        (status = 200, description = "Normalized excluded login", body = String, content_type = "application/json"),
-        (status = 400, description = "Missing or malformed query parameter"),
-        (status = 401, description = "Authentication required", body = docs::ApiErrorBody),
-        (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody),
-        (status = 422, description = "Invalid Twitch login", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(delete, path = "/user/exclude", tag = "user", summary = "Remove an excluded Twitch login", params(Exclusion, docs::BrowserOrigin), security(("session" = [])), responses((status = 200, description = "Normalized excluded login", body = String, content_type = "application/json"), (status = 400, description = "Missing or malformed query parameter"), (status = 401, description = "Authentication required", body = docs::ApiErrorBody), (status = 403, description = "Untrusted or missing browser origin", body = docs::ApiErrorBody), (status = 422, description = "Invalid Twitch login", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn remove_excluded(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -344,16 +274,8 @@ async fn change_excluded(
     security::require_origin(&state.config, &headers)?;
     let user = security::authenticate(&state, &headers).await?;
     let login = query.excluded_user.to_ascii_lowercase();
-    if login.is_empty()
-        || login.len() > 25
-        || !login
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "Invalid Twitch login",
-        ));
+    if !crate::providers::valid_login(&login) {
+        return Err(ApiError::unprocessable("Invalid Twitch login"));
     }
     state
         .store
@@ -376,26 +298,14 @@ fn default_limit() -> i64 {
 }
 impl Pagination {
     fn validate(&self) -> ApiResult<()> {
-        if !(1..=100).contains(&self.limit) || self.offset < 0 {
-            Err(ApiError(
-                StatusCode::UNPROCESSABLE_ENTITY,
+        ((1..=100).contains(&self.limit) && self.offset >= 0)
+            .then_some(())
+            .ok_or(ApiError::unprocessable(
                 "limit must be 1..100 and offset nonnegative",
             ))
-        } else {
-            Ok(())
-        }
     }
 }
-#[utoipa::path(
-    get, path = "/live/users", tag = "live",
-    summary = "Get currently streaming Twitch logins", params(Pagination),
-    responses(
-        (status = 200, description = "Live Twitch logins", body = [String]),
-        (status = 400, description = "Malformed pagination"),
-        (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/live/users", tag = "live", summary = "Get currently streaming Twitch logins", params(Pagination), responses((status = 200, description = "Live Twitch logins", body = [String]), (status = 400, description = "Malformed pagination"), (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn live(
     State(state): State<ApiState>,
     Query(page): Query<Pagination>,
@@ -405,70 +315,36 @@ async fn live(
 }
 async fn top(state: ApiState, page: Pagination, days: i64) -> ApiResult<Json<Vec<Value>>> {
     page.validate()?;
+    let since = chrono::Utc::now().timestamp() - days * 86400;
     Ok(Json(
         state
             .store
-            .leaderboard(
-                chrono::Utc::now().timestamp() - days * 86400,
-                page.limit,
-                page.offset,
-            )
+            .leaderboard(since, page.limit, page.offset)
             .await?,
     ))
 }
-#[utoipa::path(
-    get, path = "/requests/beatmaps/top/daily", tag = "requests",
-    summary = "Get top requested beatmaps over the last 24 hours", params(Pagination),
-    responses(
-        (status = 200, description = "Beatmap metadata with integer _id and request count", body = [docs::LeaderboardEntry]),
-        (status = 400, description = "Malformed pagination"),
-        (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/requests/beatmaps/top/daily", tag = "requests", summary = "Get top requested beatmaps over the last 24 hours", params(Pagination), responses((status = 200, description = "Beatmap metadata with integer _id and request count", body = [docs::LeaderboardEntry]), (status = 400, description = "Malformed pagination"), (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn daily(
     State(state): State<ApiState>,
     Query(page): Query<Pagination>,
 ) -> ApiResult<Json<Vec<Value>>> {
     top(state, page, 1).await
 }
-#[utoipa::path(
-    get, path = "/requests/beatmaps/top/weekly", tag = "requests",
-    summary = "Get top requested beatmaps over the last seven UTC days", params(Pagination),
-    responses(
-        (status = 200, description = "Beatmap metadata with integer _id and request count", body = [docs::LeaderboardEntry]),
-        (status = 400, description = "Malformed pagination"),
-        (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/requests/beatmaps/top/weekly", tag = "requests", summary = "Get top requested beatmaps over the last seven UTC days", params(Pagination), responses((status = 200, description = "Beatmap metadata with integer _id and request count", body = [docs::LeaderboardEntry]), (status = 400, description = "Malformed pagination"), (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn weekly(
     State(state): State<ApiState>,
     Query(page): Query<Pagination>,
 ) -> ApiResult<Json<Vec<Value>>> {
     top(state, page, 7).await
 }
-#[utoipa::path(
-    get, path = "/requests/beatmaps/top/monthly", tag = "requests",
-    summary = "Get top requested beatmaps over the last thirty UTC days", params(Pagination),
-    responses(
-        (status = 200, description = "Beatmap metadata with integer _id and request count", body = [docs::LeaderboardEntry]),
-        (status = 400, description = "Malformed pagination"),
-        (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/requests/beatmaps/top/monthly", tag = "requests", summary = "Get top requested beatmaps over the last thirty UTC days", params(Pagination), responses((status = 200, description = "Beatmap metadata with integer _id and request count", body = [docs::LeaderboardEntry]), (status = 400, description = "Malformed pagination"), (status = 422, description = "Pagination outside allowed bounds", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn monthly(
     State(state): State<ApiState>,
     Query(page): Query<Pagination>,
 ) -> ApiResult<Json<Vec<Value>>> {
     top(state, page, 30).await
 }
-#[utoipa::path(
-    get, path = "/migration/status", tag = "migration",
-    summary = "Get the public migration banner state",
-    responses((status = 200, description = "Migration flag and optional cutoff", body = docs::MigrationStatus))
-)]
+#[utoipa::path(get, path = "/migration/status", tag = "migration", summary = "Get the public migration banner state", responses((status = 200, description = "Migration flag and optional cutoff", body = docs::MigrationStatus)) )]
 async fn migration_status(State(state): State<ApiState>) -> Json<docs::MigrationStatus> {
     Json(docs::MigrationStatus {
         active: state.config.migration_active,
@@ -493,13 +369,9 @@ async fn legacy_channels(
     query: Result<Query<LegacyChannelsQuery>, QueryRejection>,
 ) -> ApiResult<Json<Vec<crate::domain::User>>> {
     security::require_internal(&state.config, &headers)?;
-    let Query(query) =
-        query.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "Invalid pagination"))?;
+    let Query(query) = query.map_err(|_| ApiError::bad_request("Invalid pagination"))?;
     if !(1..=100).contains(&query.limit) {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "limit must be between 1 and 100",
-        ));
+        return Err(ApiError::unprocessable("limit must be between 1 and 100"));
     }
     Ok(Json(
         state
@@ -515,12 +387,7 @@ async fn legacy_channel_by_login(
     Path(login): Path<String>,
 ) -> ApiResult<Json<crate::domain::User>> {
     security::require_internal(&state.config, &headers)?;
-    state
-        .store
-        .legacy_user_by_login(&login)
-        .await?
-        .map(Json)
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "Channel not found"))
+    found(state.store.legacy_user_by_login(&login).await?)
 }
 
 async fn legacy_channel(
@@ -529,12 +396,7 @@ async fn legacy_channel(
     Path(twitch_id): Path<i64>,
 ) -> ApiResult<Json<crate::domain::User>> {
     security::require_internal(&state.config, &headers)?;
-    state
-        .store
-        .legacy_user_by_twitch(twitch_id)
-        .await?
-        .map(Json)
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "Channel not found"))
+    found(state.store.legacy_user_by_twitch(twitch_id).await?)
 }
 
 #[derive(Deserialize)]
@@ -556,13 +418,9 @@ async fn report_legacy_live(
     body: Result<Json<LegacyLiveReport>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     security::require_internal(&state.config, &headers)?;
-    let Json(report) =
-        body.map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid request body"))?;
+    let report = json_body(body)?;
     if report.channels.len() > 10_000 {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "Too many live channels",
-        ));
+        return Err(ApiError::unprocessable("Too many live channels"));
     }
     let mut seen = std::collections::HashSet::with_capacity(report.channels.len());
     for channel in &report.channels {
@@ -570,10 +428,7 @@ async fn report_legacy_live(
             || channel.login.trim().is_empty()
             || !seen.insert(channel.twitch_id)
         {
-            return Err(ApiError(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Invalid live channels",
-            ));
+            return Err(ApiError::unprocessable("Invalid live channels"));
         }
     }
     let updated = state
@@ -604,14 +459,13 @@ async fn claim_legacy(
     body: Result<Json<LegacyClaim>, JsonRejection>,
 ) -> ApiResult<Response> {
     security::require_internal(&state.config, &headers)?;
-    let Json(claim) =
-        body.map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid request body"))?;
+    let claim = json_body(body)?;
     if claim.twitch_message_id.trim().is_empty()
         || claim.message.trim().is_empty()
         || claim.twitch_id <= 0
         || claim.target_osu_id <= 0
     {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid claim"));
+        return Err(ApiError::unprocessable("Invalid claim"));
     }
     let outcome = state
         .store
@@ -634,23 +488,13 @@ async fn claim_legacy(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LegacyStatistics {
-    requester_channel_name: String,
-    requested_beatmap_id: i64,
-    requested_channel_name: String,
-    #[serde(default)]
-    mods: Option<String>,
-    timestamp: i64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct LegacyDeliveryReport {
     sent: bool,
     #[serde(default)]
     error: Option<String>,
+    /// RequestEvent aliases cover the legacy camelCase statistics keys.
     #[serde(default)]
-    statistics: Option<LegacyStatistics>,
+    statistics: Option<RequestEvent>,
 }
 
 async fn report_legacy_delivery(
@@ -660,30 +504,18 @@ async fn report_legacy_delivery(
     body: Result<Json<LegacyDeliveryReport>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     security::require_internal(&state.config, &headers)?;
-    let Json(report) =
-        body.map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid request body"))?;
+    let report = json_body(body)?;
     let statistics = if report.sent {
-        let stats = report.statistics.ok_or(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
+        let stats = report.statistics.ok_or(ApiError::unprocessable(
             "Statistics are required for a sent delivery",
         ))?;
         if stats.timestamp < 0 {
-            return Err(ApiError(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Invalid statistics",
-            ));
+            return Err(ApiError::unprocessable("Invalid statistics"));
         }
-        let event = RequestEvent {
-            requester_channel_name: stats.requester_channel_name,
-            requested_beatmap_id: stats.requested_beatmap_id,
-            requested_channel_name: stats.requested_channel_name,
-            mods: stats.mods,
-            timestamp: stats.timestamp,
-        };
-        event
+        stats
             .validate()
-            .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid statistics"))?;
-        Some(event)
+            .map_err(|_| ApiError::unprocessable("Invalid statistics"))?;
+        Some(stats)
     } else {
         None
     };
@@ -693,27 +525,16 @@ async fn report_legacy_delivery(
         .await?
     {
         DeliveryOutcome::Recorded => Ok(Json(json!({"ok": true}))),
-        DeliveryOutcome::NotFound => {
-            Err(ApiError(StatusCode::NOT_FOUND, "Legacy delivery not found"))
-        }
+        DeliveryOutcome::NotFound => Err(ApiError::not_found("Legacy delivery not found")),
     }
 }
 
-#[utoipa::path(
-    get, path = "/health", tag = "operations", summary = "Check process liveness",
-    responses((status = 200, description = "Process is serving HTTP", body = docs::HealthStatus))
-)]
+#[utoipa::path(get, path = "/health", tag = "operations", summary = "Check process liveness", responses((status = 200, description = "Process is serving HTTP", body = docs::HealthStatus)) )]
 async fn health() -> Json<Value> {
     Json(json!({"status":"ok"}))
 }
 
-#[utoipa::path(
-    get, path = "/ready", tag = "operations", summary = "Check initialized database readiness",
-    responses(
-        (status = 200, description = "Database actor accepts queries", body = docs::HealthStatus),
-        (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/ready", tag = "operations", summary = "Check initialized database readiness", responses((status = 200, description = "Database actor accepts queries", body = docs::HealthStatus), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn ready(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
     state
         .store

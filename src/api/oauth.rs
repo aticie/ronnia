@@ -14,6 +14,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
+/// Every provider-specific fact about the authorization-code exchange lives
+/// here; the flow itself (`start`, `callback`, `complete_account`) is shared.
 #[derive(Clone, Copy, PartialEq)]
 enum Provider {
     Osu,
@@ -48,35 +50,65 @@ impl Provider {
             ),
         }
     }
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Osu => "identify",
+            Self::Twitch => "channel:bot",
+        }
+    }
+    /// Twitch needs explicit consent for the chat bot; osu! has no such flag.
+    fn extra_authorize(self) -> Option<(&'static str, &'static str)> {
+        (self == Self::Twitch).then_some(("force_verify", "true"))
+    }
+    fn api_base(self, state: &ApiState) -> &str {
+        match self {
+            Self::Osu => &state.config.osu_api_base,
+            Self::Twitch => &state.config.twitch_api_base,
+        }
+    }
+    fn profile_path(self) -> &'static str {
+        match self {
+            Self::Osu => "me",
+            Self::Twitch => "users",
+        }
+    }
+    /// Helix wraps the account in a `data` array; osu! returns it directly.
+    fn profile(self, value: &Value) -> Option<&Value> {
+        match self {
+            Self::Osu => Some(value),
+            Self::Twitch => value
+                .get("data")
+                .and_then(Value::as_array)
+                .and_then(|data| data.first()),
+        }
+    }
+    fn name_key(self) -> &'static str {
+        match self {
+            Self::Osu => "username",
+            Self::Twitch => "login",
+        }
+    }
+    fn avatar_key(self) -> &'static str {
+        match self {
+            Self::Osu => "avatar_url",
+            Self::Twitch => "profile_image_url",
+        }
+    }
 }
-#[utoipa::path(
-    get, path = "/oauth2/osu-login", tag = "oauth2",
-    summary = "Start osu! login or account signup",
-    description = "Creates a short-lived browser-bound OAuth nonce and redirects to osu! with identify scope. Existing valid session/signup cookies are captured to prevent changing account context during authorization. Invalid legacy or expired cookies are cleared.",
-    params(("Referer" = Option<String>, Header, description = "Trusted frontend/API return URL; untrusted or absent values use the configured frontend origin")),
-    responses(
-        (status = 303, description = "Redirect to osu! authorization", headers(("Location" = String, description = "Provider authorize URL with opaque state"), ("Set-Cookie" = String, description = "HttpOnly oauth_state_osu cookie"))),
-        (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody),
-        (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)
+fn not_configured() -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "OAuth provider is not configured",
     )
-)]
+}
+#[utoipa::path(get, path = "/oauth2/osu-login", tag = "oauth2", summary = "Start osu! login or account signup", description = "Creates a short-lived browser-bound OAuth nonce and redirects to osu! with identify scope. Existing valid session/signup cookies are captured to prevent changing account context during authorization. Invalid legacy or expired cookies are cleared.", params(("Referer" = Option<String>, Header, description = "Trusted frontend/API return URL; untrusted or absent values use the configured frontend origin")), responses((status = 303, description = "Redirect to osu! authorization", headers(("Location" = String, description = "Provider authorize URL with opaque state"), ("Set-Cookie" = String, description = "HttpOnly oauth_state_osu cookie"))), (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody), (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)) )]
 pub(super) async fn osu_login(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     start(state, headers, Provider::Osu).await
 }
-#[utoipa::path(
-    get, path = "/oauth2/twitch-login", tag = "oauth2",
-    summary = "Start Twitch login or account signup",
-    description = "Creates a short-lived browser-bound OAuth nonce and redirects to Twitch with channel:bot scope and force_verify=true for explicit chat-bot consent. Existing valid session/signup cookies are captured to prevent changing account context during authorization. Signed-in users may reauthorize only the same Twitch identity. Invalid legacy or expired cookies are cleared.",
-    params(("Referer" = Option<String>, Header, description = "Trusted frontend/API return URL; untrusted or absent values use the configured frontend origin")),
-    responses(
-        (status = 303, description = "Redirect to Twitch authorization", headers(("Location" = String, description = "Provider authorize URL with opaque state"), ("Set-Cookie" = String, description = "HttpOnly oauth_state_twitch cookie"))),
-        (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody),
-        (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/oauth2/twitch-login", tag = "oauth2", summary = "Start Twitch login or account signup", description = "Creates a short-lived browser-bound OAuth nonce and redirects to Twitch with channel:bot scope and force_verify=true for explicit chat-bot consent. Existing valid session/signup cookies are captured to prevent changing account context during authorization. Signed-in users may reauthorize only the same Twitch identity. Invalid legacy or expired cookies are cleared.", params(("Referer" = Option<String>, Header, description = "Trusted frontend/API return URL; untrusted or absent values use the configured frontend origin")), responses((status = 303, description = "Redirect to Twitch authorization", headers(("Location" = String, description = "Provider authorize URL with opaque state"), ("Set-Cookie" = String, description = "HttpOnly oauth_state_twitch cookie"))), (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody), (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)) )]
 pub(super) async fn twitch_login(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -87,10 +119,7 @@ pub(super) async fn twitch_login(
 async fn start(state: ApiState, headers: HeaderMap, provider: Provider) -> ApiResult<Response> {
     let (client_id, secret, callback, base) = provider.credentials(&state);
     if client_id.is_empty() || secret.is_empty() {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "OAuth provider is not configured",
-        ));
+        return Err(not_configured());
     }
     let mut target =
         Url::parse(&format!("{}/authorize", base.trim_end_matches('/'))).map_err(|_| {
@@ -104,29 +133,14 @@ async fn start(state: ApiState, headers: HeaderMap, provider: Provider) -> ApiRe
         ("client_id", client_id),
         ("redirect_uri", callback),
         ("response_type", "code"),
-        (
-            "scope",
-            if provider == Provider::Osu {
-                "identify"
-            } else {
-                "channel:bot"
-            },
-        ),
+        ("scope", provider.scope()),
         ("state", nonce.as_str()),
     ]);
-    if provider == Provider::Twitch {
-        target.query_pairs_mut().append_pair("force_verify", "true");
+    if let Some((key, value)) = provider.extra_authorize() {
+        target.query_pairs_mut().append_pair(key, value);
     }
     // An old JWT or expired opaque cookie is never accepted as a new session.
-    let valid_session = if security::cookie(&headers, "token").is_some() {
-        match security::authenticate(&state, &headers).await {
-            Ok(_) => true,
-            Err(ApiError(StatusCode::UNAUTHORIZED, _)) => false,
-            Err(error) => return Err(error),
-        }
-    } else {
-        false
-    };
+    let valid_session = security::session_valid(&state, &headers).await?;
     let valid_signup = security::pending(&state, &headers).await?.is_some();
     let session_hash = valid_session
         .then(|| security::hash(security::cookie(&headers, "token").expect("session cookie")));
@@ -157,9 +171,11 @@ async fn start(state: ApiState, headers: HeaderMap, provider: Provider) -> ApiRe
         security::set_cookie(&mut response, &state.config, "token", "", 0);
     }
     if !valid_signup {
-        for name in ["signup", "signup_details"] {
-            security::set_cookie(&mut response, &state.config, name, "", 0);
-        }
+        security::set_cookies(
+            &mut response,
+            &state.config,
+            &[("signup", "", 0), ("signup_details", "", 0)],
+        );
     }
     Ok(response)
 }
@@ -174,21 +190,7 @@ pub(super) struct Callback {
     /// Provider denial/error; authorization does not complete when supplied.
     error: Option<String>,
 }
-#[utoipa::path(
-    get, path = "/oauth2/osu-redirect", tag = "oauth2",
-    summary = "Complete osu! authorization",
-    description = "Exchanges the code with osu!, then returns to the stored trusted URL. A registered identity logs in immediately; an unknown first identity creates an opaque signup_details cookie and signup=osu marker. An opposite-provider pending signup is linked atomically without replacing existing ownership or resetting settings. The nonce and browser auth context must match the initiating request.",
-    params(Callback), security(("osuState" = [])),
-    responses(
-        (status = 303, description = "Login or partial signup completed", headers(("Location" = String, description = "Stored trusted return URL"), ("Set-Cookie" = String, description = "Opaque token session or signup_details and signup cookies"))),
-        (status = 400, description = "Missing, expired, replayed or mismatched state; missing code or provider denial", body = super::docs::ApiErrorBody),
-        (status = 401, description = "Initiating session/signup expired or account deleted", body = super::docs::ApiErrorBody),
-        (status = 409, description = "Same-provider signup or conflicting linked identity", body = super::docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody),
-        (status = 502, description = "Provider HTTP failure or malformed token/profile", body = super::docs::ApiErrorBody),
-        (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/oauth2/osu-redirect", tag = "oauth2", summary = "Complete osu! authorization", description = "Exchanges the code with osu!, then returns to the stored trusted URL. A registered identity logs in immediately; an unknown first identity creates an opaque signup_details cookie and signup=osu marker. An opposite-provider pending signup is linked atomically without replacing existing ownership or resetting settings. The nonce and browser auth context must match the initiating request.", params(Callback), security(("osuState" = [])), responses((status = 303, description = "Login or partial signup completed", headers(("Location" = String, description = "Stored trusted return URL"), ("Set-Cookie" = String, description = "Opaque token session or signup_details and signup cookies"))), (status = 400, description = "Missing, expired, replayed or mismatched state; missing code or provider denial", body = super::docs::ApiErrorBody), (status = 401, description = "Initiating session/signup expired or account deleted", body = super::docs::ApiErrorBody), (status = 409, description = "Same-provider signup or conflicting linked identity", body = super::docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody), (status = 502, description = "Provider HTTP failure or malformed token/profile", body = super::docs::ApiErrorBody), (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)) )]
 pub(super) async fn osu_redirect(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -196,21 +198,7 @@ pub(super) async fn osu_redirect(
 ) -> ApiResult<Response> {
     callback(state, headers, query, Provider::Osu).await
 }
-#[utoipa::path(
-    get, path = "/oauth2/twitch-redirect", tag = "oauth2",
-    summary = "Complete Twitch authorization",
-    description = "Exchanges the code with Twitch and validates the token's client ID, user ID and channel:bot scope before accepting its profile. Verified consent is stored with the linked account, never the broadcaster token. A registered identity logs in or reauthorizes with a rotated session; an unknown first identity creates an opaque signup_details cookie and signup=twitch marker. Either signup order links atomically without replacing ownership or resetting settings. A signed-in different Twitch identity is rejected. The nonce and browser auth context must match the initiating request.",
-    params(Callback), security(("twitchState" = [])),
-    responses(
-        (status = 303, description = "Login or partial signup completed", headers(("Location" = String, description = "Stored trusted return URL"), ("Set-Cookie" = String, description = "Opaque token session or signup_details and signup cookies"))),
-        (status = 400, description = "Missing, expired, replayed or mismatched state; missing code or provider denial", body = super::docs::ApiErrorBody),
-        (status = 401, description = "Initiating session/signup expired or account deleted", body = super::docs::ApiErrorBody),
-        (status = 409, description = "Same-provider signup or a different Twitch identity than the signed-in account", body = super::docs::ApiErrorBody),
-        (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody),
-        (status = 502, description = "Provider HTTP failure, malformed token/profile, or token rejected by validation (client ID, user ID or channel:bot scope mismatch)", body = super::docs::ApiErrorBody),
-        (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)
-    )
-)]
+#[utoipa::path(get, path = "/oauth2/twitch-redirect", tag = "oauth2", summary = "Complete Twitch authorization", description = "Exchanges the code with Twitch and validates the token's client ID, user ID and channel:bot scope before accepting its profile. Verified consent is stored with the linked account, never the broadcaster token. A registered identity logs in or reauthorizes with a rotated session; an unknown first identity creates an opaque signup_details cookie and signup=twitch marker. Either signup order links atomically without replacing ownership or resetting settings. A signed-in different Twitch identity is rejected. The nonce and browser auth context must match the initiating request.", params(Callback), security(("twitchState" = [])), responses((status = 303, description = "Login or partial signup completed", headers(("Location" = String, description = "Stored trusted return URL"), ("Set-Cookie" = String, description = "Opaque token session or signup_details and signup cookies"))), (status = 400, description = "Missing, expired, replayed or mismatched state; missing code or provider denial", body = super::docs::ApiErrorBody), (status = 401, description = "Initiating session/signup expired or account deleted", body = super::docs::ApiErrorBody), (status = 409, description = "Same-provider signup or a different Twitch identity than the signed-in account", body = super::docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = super::docs::ApiErrorBody), (status = 502, description = "Provider HTTP failure, malformed token/profile, or token rejected by validation (client ID, user ID or channel:bot scope mismatch)", body = super::docs::ApiErrorBody), (status = 503, description = "OAuth provider not configured", body = super::docs::ApiErrorBody)) )]
 pub(super) async fn twitch_redirect(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -280,23 +268,19 @@ async fn callback(
                 state.config.session_ttl_secs,
             );
         }
-        Outcome::Signup(token) => {
-            security::set_cookie(&mut response, &state.config, "token", "", 0);
-            security::set_cookie(
-                &mut response,
-                &state.config,
-                "signup",
-                provider.name(),
-                state.config.oauth_ttl_secs,
-            );
-            security::set_cookie(
-                &mut response,
-                &state.config,
-                "signup_details",
-                &token,
-                state.config.oauth_ttl_secs,
-            );
-        }
+        Outcome::Signup(token) => security::set_cookies(
+            &mut response,
+            &state.config,
+            &[
+                ("token", "", 0),
+                ("signup", provider.name(), state.config.oauth_ttl_secs),
+                (
+                    "signup_details",
+                    token.as_str(),
+                    state.config.oauth_ttl_secs,
+                ),
+            ],
+        ),
     }
     Ok(response)
 }
@@ -306,10 +290,7 @@ fn provider_error() -> ApiError {
 async fn fetch_identity(state: &ApiState, provider: Provider, code: &str) -> ApiResult<Identity> {
     let (client_id, secret, callback, base) = provider.credentials(state);
     if client_id.is_empty() || secret.is_empty() {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "OAuth provider is not configured",
-        ));
+        return Err(not_configured());
     }
     let token: Value = state
         .http
@@ -336,58 +317,16 @@ async fn fetch_identity(state: &ApiState, provider: Provider, code: &str) -> Api
         .ok_or_else(provider_error)?;
     // The authorization response alone is not proof of permission. Bind the
     // exchanged token to this application and its actual Twitch user.
-    let validated_twitch_id = if provider == Provider::Twitch {
-        #[derive(Deserialize)]
-        struct Validation {
-            client_id: String,
-            user_id: String,
-            scopes: Vec<String>,
-        }
-        let validation: Validation = state
-            .http
-            .get(format!(
-                "{}/validate",
-                state.config.twitch_oauth_base.trim_end_matches('/')
-            ))
-            .header("Authorization", format!("OAuth {token}"))
-            .send()
-            .await
-            .map_err(|_| provider_error())?
-            .error_for_status()
-            .map_err(|_| provider_error())?
-            .json()
-            .await
-            .map_err(|_| provider_error())?;
-        if validation.client_id.as_str() != client_id
-            || !validation.scopes.iter().any(|scope| scope == "channel:bot")
-        {
-            return Err(provider_error());
-        }
-        Some(
-            validation
-                .user_id
-                .parse::<i64>()
-                .ok()
-                .filter(|id| *id > 0)
-                .ok_or_else(provider_error)?,
-        )
-    } else {
-        None
-    };
-    let base = match provider {
-        Provider::Osu => &state.config.osu_api_base,
-        Provider::Twitch => &state.config.twitch_api_base,
+    let validated_twitch_id = match provider {
+        Provider::Osu => None,
+        Provider::Twitch => Some(validate_twitch(state, client_id, token).await?),
     };
     let mut request = state
         .http
         .get(format!(
             "{}/{}",
-            base.trim_end_matches('/'),
-            if provider == Provider::Osu {
-                "me"
-            } else {
-                "users"
-            }
+            provider.api_base(state).trim_end_matches('/'),
+            provider.profile_path()
         ))
         .bearer_auth(token);
     if provider == Provider::Twitch {
@@ -402,44 +341,27 @@ async fn fetch_identity(state: &ApiState, provider: Provider, code: &str) -> Api
         .json()
         .await
         .map_err(|_| provider_error())?;
-    let profile = if provider == Provider::Twitch {
-        profile
-            .get("data")
-            .and_then(Value::as_array)
-            .and_then(|v| v.first())
-            .ok_or_else(provider_error)?
-    } else {
-        &profile
-    };
+    let profile = provider.profile(&profile).ok_or_else(provider_error)?;
     let id = profile
         .get("id")
-        .and_then(|v| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|v| v.parse().ok()))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
         })
         .filter(|id| *id > 0)
         .ok_or_else(provider_error)?;
     if validated_twitch_id.is_some_and(|validated| validated != id) {
         return Err(provider_error());
     }
-    let name_key = if provider == Provider::Osu {
-        "username"
-    } else {
-        "login"
-    };
-    let avatar_key = if provider == Provider::Osu {
-        "avatar_url"
-    } else {
-        "profile_image_url"
-    };
     let username = profile
-        .get(name_key)
+        .get(provider.name_key())
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(provider_error)?
         .to_owned();
     let avatar_url = profile
-        .get(avatar_key)
+        .get(provider.avatar_key())
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
@@ -451,14 +373,47 @@ async fn fetch_identity(state: &ApiState, provider: Provider, code: &str) -> Api
         channel_bot_granted_at: validated_twitch_id.map(|_| chrono::Utc::now().timestamp()),
     })
 }
+/// Twitch tokens must be bound to this client ID, a positive user ID and the
+/// channel:bot scope; the profile id is cross-checked by the caller.
+async fn validate_twitch(state: &ApiState, client_id: &str, token: &str) -> ApiResult<i64> {
+    #[derive(Deserialize)]
+    struct Validation {
+        client_id: String,
+        user_id: String,
+        scopes: Vec<String>,
+    }
+    let validation: Validation = state
+        .http
+        .get(format!(
+            "{}/validate",
+            state.config.twitch_oauth_base.trim_end_matches('/')
+        ))
+        .header("Authorization", format!("OAuth {token}"))
+        .send()
+        .await
+        .map_err(|_| provider_error())?
+        .error_for_status()
+        .map_err(|_| provider_error())?
+        .json()
+        .await
+        .map_err(|_| provider_error())?;
+    if validation.client_id.as_str() != client_id
+        || !validation.scopes.iter().any(|scope| scope == "channel:bot")
+    {
+        return Err(provider_error());
+    }
+    validation
+        .user_id
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(provider_error)
+}
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub(super) enum AccountFault {
-    #[error("Account is already linked to another identity")]
     Conflict,
-    #[error("Linking requires two different providers")]
     SameProvider,
-    #[error("Signup or session expired")]
     Expired,
 }
 impl AccountFault {
@@ -470,6 +425,12 @@ impl AccountFault {
         }
     }
 }
+impl std::fmt::Display for AccountFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+impl std::error::Error for AccountFault {}
 enum Outcome {
     Session(String),
     Signup(String),
@@ -504,9 +465,10 @@ async fn complete_account(
             Some(serde_json::from_str::<Identity>(&raw)?)
         } else { None };
         if pending.as_ref().is_some_and(|p| p.provider == identity.provider) { return Err(AccountFault::SameProvider.into()); }
-        let existing = tx.query_row(if identity.provider == "osu" { "SELECT twitch_id,osu_id FROM users WHERE osu_id=?1" } else { "SELECT twitch_id,osu_id FROM users WHERE twitch_id=?1" }, [identity.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).optional()?;
+        let is_osu = identity.provider == "osu";
+        let existing = tx.query_row(if is_osu { "SELECT twitch_id,osu_id FROM users WHERE osu_id=?1" } else { "SELECT twitch_id,osu_id FROM users WHERE twitch_id=?1" }, [identity.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).optional()?;
         let pair = if let Some(pending) = &pending {
-            let (osu, twitch) = if identity.provider == "osu" { (&identity, pending) } else { (pending, &identity) };
+            let (osu, twitch) = if is_osu { (&identity, pending) } else { (pending, &identity) };
             if existing.is_some_and(|(t,o)| t != twitch.id || o != osu.id) { return Err(AccountFault::Conflict.into()); }
             let other = tx.query_row("SELECT twitch_id,osu_id FROM users WHERE osu_id=?1 OR twitch_id=?2", params![osu.id, twitch.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).optional()?;
             if other.is_some_and(|(t,o)| t != twitch.id || o != osu.id) { return Err(AccountFault::Conflict.into()); }
@@ -520,16 +482,16 @@ async fn complete_account(
         } else { existing };
         if let Some((twitch_id, osu_id)) = pair {
             if anchor.is_some_and(|a| a != twitch_id) { return Err(AccountFault::Conflict.into()); }
-            if identity.provider == "osu" {
+            if is_osu {
                 tx.execute("UPDATE users SET osu_username=?1,osu_avatar_url=?2 WHERE osu_id=?3", params![identity.username, identity.avatar_url, osu_id]).map_err(constraint)?;
             } else {
                 tx.execute("UPDATE users SET twitch_username=?1,twitch_avatar_url=?2 WHERE twitch_id=?3", params![identity.username.to_ascii_lowercase(), identity.avatar_url, twitch_id]).map_err(constraint)?;
             }
-            let grant = if identity.provider == "twitch" {
-                identity.channel_bot_granted_at
-            } else {
+            let grant = if is_osu {
                 pending.as_ref().filter(|p| p.provider == "twitch")
                     .and_then(|p| p.channel_bot_granted_at)
+            } else {
+                identity.channel_bot_granted_at
             };
             if let Some(granted_at) = grant {
                 let active_at = now + grant_grace as i64;
