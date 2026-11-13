@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     domain::{StreamEvent, User},
     parser::{self, Beatmap, BeatmapKind},
-    providers::{Providers, valid_login},
+    providers::{ChatError, Providers, valid_login},
     storage::Store,
     twitch_auth::{BotIdentity, TwitchAuth},
 };
@@ -1084,10 +1084,32 @@ async fn process_one(
             (map, set)
         }
         None => {
-            let (map, set) = providers
-                .get_beatmap(beatmap)
-                .await
-                .context("fetching osu! beatmap metadata")?;
+            let (map, set) = match providers.get_beatmap(beatmap).await {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if error
+                        .downcast_ref::<ChatError>()
+                        .is_some_and(|error| error.status == Some(404)) =>
+                {
+                    if !config.dry_run {
+                        queue_echo(
+                            echoes,
+                            message,
+                            format!("@{} Beatmap not found.", message.author),
+                        );
+                    }
+                    tracing::info!(
+                        channel = %message.channel,
+                        requester = %message.author,
+                        beatmap_id = beatmap.id,
+                        "request rejected: beatmap not found"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(error).context("fetching osu! beatmap metadata");
+                }
+            };
             match beatmap.kind {
                 BeatmapKind::Map => store.cache_put(map.clone()).await?,
                 BeatmapKind::Mapset => store.cache_put_set(beatmap.id, map.clone()).await?,

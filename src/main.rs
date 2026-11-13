@@ -110,12 +110,13 @@ fn sentry_options() -> Result<Option<sentry::ClientOptions>> {
     let Some(dsn) = nonempty_env("SENTRY_DSN") else {
         return Ok(None);
     };
+    let version = env!("CARGO_PKG_VERSION");
     let release = nonempty_env("SENTRY_RELEASE")
         .or_else(|| nonempty_env("RAILWAY_GIT_COMMIT_SHA"))
-        .map(Into::into)
-        .or_else(|| sentry::release_name!());
+        .map(|build| format!("ronnia-rust@{version}+{build}"))
+        .unwrap_or_else(|| format!("ronnia-rust@{version}"));
     let mut options = sentry::ClientOptions::new()
-        .maybe_release(release)
+        .release(release)
         .send_default_pii(false)
         .traces_sample_rate(traces_sample_rate as f32);
     options.dsn = Some(dsn.parse().context("Invalid SENTRY_DSN")?);

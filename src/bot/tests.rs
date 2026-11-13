@@ -1771,6 +1771,51 @@ async fn delivery_fixture(
 }
 
 #[tokio::test]
+async fn missing_beatmap_is_rejected_without_delivery_or_processing_error() {
+    let (config, store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let (echoes, mut echo_rx) = mpsc::channel(4);
+    let beatmap = Beatmap {
+        id: 1,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    process_one(
+        &config,
+        &store,
+        &providers,
+        &echoes,
+        &request_message(),
+        &beatmap,
+        Clock::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        echo_rx.recv().await.unwrap().text,
+        "@viewer Beatmap not found."
+    );
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM deliveries", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
 async fn failed_or_ambiguous_deliveries_never_replay_or_consume_success_bookkeeping() {
     for (response, expected_status) in [
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "uncertain"),
