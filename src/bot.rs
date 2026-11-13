@@ -1200,7 +1200,23 @@ async fn process_one(
             format!("{} - Request sent!", map_title(&map, &set)?),
         );
     }
-    tracing::info!(channel = %message.channel, map_id, message_id = %message.id, "osu request delivered and recorded");
+    tracing::info!(
+        channel = %message.channel,
+        channel_id = message.channel_id,
+        requester = %message.author,
+        requester_id = %message.author_id,
+        osu_username = %user.osu_username,
+        osu_id = user.osu_id,
+        map_id,
+        beatmapset_id = set["id"].as_i64(),
+        artist = set["artist"].as_str(),
+        title = set["title"].as_str(),
+        difficulty = map["version"].as_str(),
+        stars,
+        mods = %beatmap.mods,
+        message_id = %message.id,
+        "osu request delivered and recorded"
+    );
     Ok(())
 }
 

@@ -1185,7 +1185,32 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
         Json, Router,
         routing::{get, post},
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        io::Write,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let logs = Arc::new(StdMutex::new(Vec::new()));
+    let writer = LogWriter(logs.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
     let lookups = Arc::new(AtomicUsize::new(0));
     let observed_lookups = lookups.clone();
     let sends = Arc::new(AtomicUsize::new(0));
@@ -1242,21 +1267,57 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
     let beatmap = Beatmap {
         id: 7,
         kind: BeatmapKind::Mapset,
-        mods: String::new(),
+        mods: "HDDT".into(),
     };
     let clock = Clock::new();
-    let mut request = request_message();
-    process_one(
-        &config, &store, &providers, &echoes, &request, &beatmap, clock,
-    )
-    .await
-    .unwrap();
-    request.id = "second-set-request".into();
-    process_one(
-        &config, &store, &providers, &echoes, &request, &beatmap, clock,
-    )
-    .await
-    .unwrap();
+    async {
+        let mut request = request_message();
+        process_one(
+            &config, &store, &providers, &echoes, &request, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        request.id = "second-set-request".into();
+        process_one(
+            &config, &store, &providers, &echoes, &request, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+    }
+    .with_subscriber(subscriber)
+    .await;
+
+    let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    let completions: Vec<Value> = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["fields"]["message"] == "osu request delivered and recorded")
+        .collect();
+    assert_eq!(
+        completions.len(),
+        2,
+        "lookup and cache-hit requests must both log completion"
+    );
+    for (event, message_id) in completions.iter().zip(["evt-1", "second-set-request"]) {
+        let fields = &event["fields"];
+        assert_eq!(fields["channel"], "streamer");
+        assert_eq!(fields["channel_id"], 1);
+        assert_eq!(fields["requester"], "viewer");
+        assert_eq!(fields["requester_id"], "77");
+        assert_eq!(fields["osu_username"], "a");
+        assert_eq!(fields["osu_id"], 1);
+        assert_eq!(
+            fields["map_id"], 99,
+            "log the selected map, not input set ID 7 or cached map 42"
+        );
+        assert_eq!(fields["beatmapset_id"], 7);
+        assert_eq!(fields["artist"], "Artist");
+        assert_eq!(fields["title"], "Title");
+        assert_eq!(fields["difficulty"], "First");
+        assert_eq!(fields["stars"], 5.0);
+        assert_eq!(fields["mods"], "HDDT");
+        assert_eq!(fields["message_id"], message_id);
+    }
     assert_eq!(lookups.load(Ordering::SeqCst), 1);
     assert_eq!(sends.load(Ordering::SeqCst), 2);
     let cached = store.cache_get_set(7).await.unwrap().unwrap();
