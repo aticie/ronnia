@@ -761,12 +761,18 @@ fn find_legacy_user(
     }))
 }
 
+/// Twitch categories that count as an osu! stream: the classic `osu!` game and
+/// the separate `Osu!Lazer` client category.
+pub(crate) const OSU_CATEGORIES: [&str; 2] = ["21465", "295941293"];
+
 /// Keep public activity and bot membership derived from current state and consent.
 /// Call within the transaction that changes a user, setting, grant, or stream state.
 pub(crate) fn refresh_eligibility(conn: &Connection, twitch_id: i64) -> Result<()> {
+    // Destructuring keeps the statement's placeholders in step with the list.
+    let [osu, lazer] = OSU_CATEGORIES;
     conn.execute(
-        "UPDATE users SET is_live=(COALESCE(json_extract(settings_json,'$.enable'),0)=1 AND EXISTS(SELECT 1 FROM twitch_channel_grants g WHERE g.twitch_id=users.twitch_id AND g.status='granted') AND EXISTS(SELECT 1 FROM channel_stream_state s WHERE s.twitch_id=users.twitch_id AND s.online=1 AND s.category_id='21465')) WHERE twitch_id=?1",
-        [twitch_id],
+        "UPDATE users SET is_live=(COALESCE(json_extract(settings_json,'$.enable'),0)=1 AND EXISTS(SELECT 1 FROM twitch_channel_grants g WHERE g.twitch_id=users.twitch_id AND g.status='granted') AND EXISTS(SELECT 1 FROM channel_stream_state s WHERE s.twitch_id=users.twitch_id AND s.online=1 AND s.category_id IN (?2,?3))) WHERE twitch_id=?1",
+        params![twitch_id, osu, lazer],
     )?;
     Ok(())
 }
@@ -1243,6 +1249,79 @@ mod tests {
         assert!(store.granted_twitch_ids().await.unwrap().is_empty());
         assert!(!store.user_by_twitch(2).await.unwrap().unwrap().is_live);
         store.set_settings(2, Settings::default()).await.unwrap();
+        assert!(store.user_by_twitch(2).await.unwrap().unwrap().is_live);
+    }
+    #[tokio::test]
+    async fn osu_lazer_counts_as_osu_but_other_categories_do_not() {
+        let store = Store::open(":memory:").await.unwrap();
+        store.save_user(user()).await.unwrap();
+        grant(&store, 2).await;
+
+        store
+            .apply_stream_event(2, "channel".into(), StreamEvent::Online, 100)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .apply_stream_event(
+                    2,
+                    "channel".into(),
+                    StreamEvent::Category(OSU_CATEGORIES[1].into()),
+                    200,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            store.user_by_twitch(2).await.unwrap().unwrap().is_live,
+            "Osu!Lazer is an osu! stream"
+        );
+        assert_eq!(
+            store.live_channels().await.unwrap(),
+            vec![(2, "channel".into())]
+        );
+
+        // A discovery snapshot carrying Osu!Lazer keeps the channel eligible.
+        let revision = store.snapshot_versions(vec![2]).await.unwrap()[0].1;
+        store
+            .apply_stream_snapshot(vec![StreamSnapshot {
+                twitch_id: 2,
+                expected_revision: revision,
+                online: true,
+                category_id: OSU_CATEGORIES[1].into(),
+                login: Some("channel".into()),
+            }])
+            .await
+            .unwrap();
+        assert!(store.user_by_twitch(2).await.unwrap().unwrap().is_live);
+
+        // Any other category, such as Just Chatting, is not an osu! stream.
+        assert!(
+            store
+                .apply_stream_event(
+                    2,
+                    "channel".into(),
+                    StreamEvent::Category("509659".into()),
+                    300,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(!store.user_by_twitch(2).await.unwrap().unwrap().is_live);
+        assert!(store.live_channels().await.unwrap().is_empty());
+
+        // The classic osu! category remains eligible.
+        let revision = store.snapshot_versions(vec![2]).await.unwrap()[0].1;
+        store
+            .apply_stream_snapshot(vec![StreamSnapshot {
+                twitch_id: 2,
+                expected_revision: revision,
+                online: true,
+                category_id: OSU_CATEGORIES[0].into(),
+                login: Some("channel".into()),
+            }])
+            .await
+            .unwrap();
         assert!(store.user_by_twitch(2).await.unwrap().unwrap().is_live);
     }
     #[tokio::test]
