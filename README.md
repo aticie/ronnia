@@ -75,7 +75,7 @@ DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve
 | `LOG_LEVEL` / `RUST_LOG` | `info`; `RUST_LOG` takes precedence |
 | `SENTRY_DSN` | Optional existing Sentry project; enables errors, sampled traces, and native metrics; no Sentry log duplication |
 | `SENTRY_TRACES_SAMPLE_RATE` | `0.1`; finite number in `[0,1]`; `0` disables transactions, not metrics/errors |
-| `SENTRY_RELEASE` | Optional release suffix, sent as `ronnia-rust:<release>`; otherwise Railway commit SHA, then package release |
+| `SENTRY_RELEASE` | Optional build metadata, sent as `ronnia-rust@<semver>+<build>`; otherwise Railway commit SHA, or plain `ronnia-rust@<semver>` without build metadata |
 | `SENTRY_ENVIRONMENT` | Optional override; otherwise Railway environment name |
 
 Provider endpoint overrides exist for isolated integration runs: `TWITCH_API_BASE`, `TWITCH_OAUTH_BASE`, `OSU_API_BASE`, `OSU_OAUTH_BASE`, `TWITCH_EVENTSUB_URL`. Defaults use official providers. Never use unencrypted WebSocket or HTTP endpoints in production.
