@@ -73,12 +73,18 @@ fn require_user(tx: &Connection, twitch_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Twitch categories that count as an osu! stream: the classic `osu!` game and
+/// the separate `Osu!Lazer` client category.
+pub(crate) const OSU_CATEGORIES: [&str; 2] = ["21465", "295941293"];
+
 /// Keep public activity and bot membership derived from current state and consent.
 /// Call within the transaction that changes a user, setting, grant, or stream state.
 pub(crate) fn refresh_eligibility(conn: &Connection, twitch_id: i64) -> Result<()> {
+    // Destructuring keeps the statement's placeholders in step with the list.
+    let [osu, lazer] = OSU_CATEGORIES;
     conn.execute(
-        "UPDATE users SET is_live=(COALESCE(json_extract(settings_json,'$.enable'),0)=1 AND EXISTS(SELECT 1 FROM twitch_channel_grants g WHERE g.twitch_id=users.twitch_id AND g.status='granted') AND EXISTS(SELECT 1 FROM channel_stream_state s WHERE s.twitch_id=users.twitch_id AND s.online=1 AND s.category_id='21465')) WHERE twitch_id=?1",
-        [twitch_id],
+        "UPDATE users SET is_live=(COALESCE(json_extract(settings_json,'$.enable'),0)=1 AND EXISTS(SELECT 1 FROM twitch_channel_grants g WHERE g.twitch_id=users.twitch_id AND g.status='granted') AND EXISTS(SELECT 1 FROM channel_stream_state s WHERE s.twitch_id=users.twitch_id AND s.online=1 AND s.category_id IN (?2,?3))) WHERE twitch_id=?1",
+        params![twitch_id, osu, lazer],
     )?;
     Ok(())
 }

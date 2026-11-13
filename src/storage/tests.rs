@@ -1,6 +1,6 @@
 //! Behavioural tests for the storage facade: identity, eligibility, stream
 //! revisions, legacy deliveries, statistics, caching, and migrations.
-use super::{ClaimOutcome, DeliveryOutcome, Store, refresh_eligibility};
+use super::{ClaimOutcome, DeliveryOutcome, Store, refresh_eligibility, users::OSU_CATEGORIES};
 use crate::domain::{RequestEvent, Settings, StreamEvent, StreamSnapshot, User};
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -416,6 +416,55 @@ async fn grants_and_independent_stream_families_drive_eligibility() {
     assert!(store.granted_twitch_ids().await.unwrap().is_empty());
     assert!(!is_live(&store, 2).await);
     store.set_settings(2, Settings::default()).await.unwrap();
+    assert!(is_live(&store, 2).await);
+}
+
+#[tokio::test]
+async fn osu_lazer_counts_as_osu_but_other_categories_do_not() {
+    let store = memory().await;
+    store.save_user(user()).await.unwrap();
+    grant(&store, 2).await;
+    assert!(event(&store, 2, StreamEvent::Online, 100).await);
+    assert!(
+        event(
+            &store,
+            2,
+            StreamEvent::Category(OSU_CATEGORIES[1].into()),
+            200,
+        )
+        .await
+    );
+    assert!(is_live(&store, 2).await, "Osu!Lazer is an osu! stream");
+    assert_eq!(
+        store.live_channels().await.unwrap(),
+        vec![(2, "channel".into())]
+    );
+
+    // A discovery snapshot carrying Osu!Lazer keeps the channel eligible.
+    let revision = store.snapshot_versions(vec![2]).await.unwrap()[0].1;
+    store
+        .apply_stream_snapshot(vec![snapshot(
+            2,
+            revision,
+            true,
+            OSU_CATEGORIES[1],
+            Some("channel"),
+        )])
+        .await
+        .unwrap();
+    assert!(is_live(&store, 2).await);
+
+    // Any other category, such as Just Chatting, is not an osu! stream.
+    assert!(event(&store, 2, StreamEvent::Category("509659".into()), 300).await);
+    assert!(!is_live(&store, 2).await);
+    assert!(store.live_channels().await.unwrap().is_empty());
+
+    // The classic osu! category remains eligible.
+    let revision = store.snapshot_versions(vec![2]).await.unwrap()[0].1;
+    store
+        .apply_stream_snapshot(vec![snapshot(2, revision, true, OSU_CATEGORIES[0], None)])
+        .await
+        .unwrap();
     assert!(is_live(&store, 2).await);
 }
 

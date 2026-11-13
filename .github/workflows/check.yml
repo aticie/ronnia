@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A hung step would otherwise sit on GitHub's 360 minute default and block
+    # every queued job; the full job normally finishes in under 10 minutes.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -15,3 +18,4 @@ jobs:
       - run: cargo build --locked --release
       - run: python3 scripts/smoke.py --binary target/release/ronnia
       - run: docker build -f Dockerfile.docker -t ronnia:check .
+        timeout-minutes: 12

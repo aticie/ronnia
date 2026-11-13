@@ -5,8 +5,10 @@ use super::{
     Config, Providers, Store,
     delivery::{self, Echo, process_one},
     dispatch::Message,
+    isolated_hub, record_duration, record_outcome,
 };
 use crate::parser::Beatmap;
+use sentry::SentryFutureExt;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
@@ -15,8 +17,10 @@ use std::{
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc},
     task::{Id, JoinError, JoinSet},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Admission always carries the scheduler's single shared memory budget.
 #[derive(Clone)]
@@ -29,6 +33,14 @@ pub(super) struct RequestEnvelope {
     pub(super) message: Message,
     pub(super) beatmap: Beatmap,
     pub(super) permit: OwnedSemaphorePermit,
+    pub(super) span: tracing::Span,
+    pub(super) queued_at: Instant,
+}
+
+pub(super) struct RequestTask {
+    channel: i64,
+    span: tracing::Span,
+    hub: Arc<sentry::Hub>,
 }
 
 #[derive(Default)]
@@ -37,7 +49,7 @@ pub(super) struct Scheduler {
     pub(super) ready: VecDeque<i64>,
     pub(super) active: BTreeSet<i64>,
     pub(super) jobs: JoinSet<OwnedSemaphorePermit>,
-    pub(super) channels_by_task: HashMap<Id, i64>,
+    pub(super) channels_by_task: HashMap<Id, RequestTask>,
 }
 
 impl Scheduler {
@@ -79,14 +91,29 @@ impl Scheduler {
         &mut self,
         channel: i64,
         permit: OwnedSemaphorePermit,
+        span: tracing::Span,
+        queued_at: Instant,
         work: impl Future<Output = ()> + Send + 'static,
     ) {
-        let task = self.jobs.spawn(async move {
-            work.await;
-            permit
-        });
+        let hub = isolated_hub();
+        let task = self.jobs.spawn(
+            async move {
+                let queue_wait_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
+                record_duration("ronnia.request.queue_wait", queue_wait_ms);
+                tracing::debug!(queue_wait_ms, "request processing started");
+                let started = Instant::now();
+                work.await;
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                record_duration("ronnia.request.processing_time", elapsed_ms);
+                tracing::debug!(elapsed_ms, "request processing finished");
+                permit
+            }
+            .instrument(span.clone())
+            .bind_hub(hub.clone()),
+        );
         self.active.insert(channel);
-        self.channels_by_task.insert(task.id(), channel);
+        self.channels_by_task
+            .insert(task.id(), RequestTask { channel, span, hub });
     }
 
     pub(super) fn complete(&mut self, result: Result<(Id, OwnedSemaphorePermit), JoinError>) {
@@ -96,19 +123,29 @@ impl Scheduler {
                 id
             }
             Err(error) => {
-                tracing::error!(
-                    channel_id = self.channels_by_task.get(&error.id()),
-                    panic = error.is_panic(),
-                    error = %error,
-                    "request worker stopped unexpectedly"
-                );
+                if let Some(request) = self.channels_by_task.get(&error.id()) {
+                    sentry::Hub::run(request.hub.clone(), || {
+                        request.span.in_scope(|| {
+                            record_outcome(
+                                "ronnia.requests.processed",
+                                if error.is_panic() { "panic" } else { "cancelled" },
+                            );
+                            tracing::error!(
+                                channel_id = request.channel,
+                                panic = error.is_panic(),
+                                error = %error,
+                                "request worker stopped unexpectedly"
+                            );
+                        });
+                    });
+                }
                 error.id()
             }
         };
-        if let Some(channel) = self.channels_by_task.remove(&id) {
-            self.active.remove(&channel);
-            if self.pending.contains_key(&channel) {
-                self.ready.push_back(channel);
+        if let Some(request) = self.channels_by_task.remove(&id) {
+            self.active.remove(&request.channel);
+            if self.pending.contains_key(&request.channel) {
+                self.ready.push_back(request.channel);
             }
         }
     }
@@ -139,6 +176,8 @@ pub(super) async fn process_requests(
                 message,
                 beatmap,
                 permit,
+                span,
+                queued_at,
             }) = scheduler.next()
             else {
                 break;
@@ -151,16 +190,28 @@ pub(super) async fn process_requests(
             scheduler.spawn(
                 channel,
                 permit,
+                span,
+                queued_at,
                 async move {
                     // Never select cancellation around process_one: its final
                     // delivery, statistics, and cooldown bookkeeping must finish
                     // atomically.
-                    if let Err(error) = process_one(
+                    let result = process_one(
                         &config, &store, &providers, &echoes, &message, &beatmap, clock,
                     )
-                    .await
-                    {
-                        tracing::error!(channel = %message.channel, message_id = %message.id, error = %error, "request processing failed");
+                    .await;
+                    record_outcome(
+                        "ronnia.requests.processed",
+                        if result.is_ok() { "ok" } else { "error" },
+                    );
+                    if let Err(error) = result {
+                        tracing::error!(
+                            channel = %message.channel,
+                            message_id = %message.id,
+                            error = error.as_ref() as &dyn std::error::Error,
+                            error_chain = %format_args!("{error:#}"),
+                            "request processing failed"
+                        );
                     }
                 },
             );

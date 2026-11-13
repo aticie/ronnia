@@ -8,7 +8,11 @@ use clap::{Parser, Subcommand};
 use ronnia::{api, bot, config::Config, storage::Store};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{EnvFilter, prelude::*};
+use tracing_subscriber::{
+    EnvFilter,
+    filter::{LevelFilter, filter_fn},
+    prelude::*,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -55,33 +59,75 @@ enum Command {
     GenerateTokenKey,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into()))
-        }))
-        .with_writer(std::io::stderr)
-        .finish()
-        .with(sentry_tracing::layer())
-        .init();
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let _sentry = std::env::var("SENTRY_DSN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|dsn| {
-            sentry::init((
-                dsn,
-                sentry::ClientOptions {
-                    release: sentry::release_name!(),
-                    send_default_pii: false,
-                    traces_sample_rate: 0.0,
-                    ..Default::default()
-                },
-            ))
-        });
+    let _sentry = sentry_options()?.map(sentry::init);
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(std::io::stderr)
+                .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    EnvFilter::new(std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into()))
+                })),
+        )
+        .with(sentry_tracing::SpanLayer::new().with_filter(LevelFilter::INFO))
+        .with(
+            sentry_tracing::BreadcrumbLayer::new().with_filter(filter_fn(|metadata| {
+                matches!(
+                    *metadata.level(),
+                    tracing::Level::INFO | tracing::Level::WARN
+                )
+            })),
+        )
+        .with(sentry_tracing::ErrorLayer::new().with_filter(LevelFilter::ERROR))
+        .init();
+    // The runtime stops before the Sentry guard flushes its independent transport.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Starting Tokio runtime")?;
+    runtime.block_on(async_main(cli))
+}
+
+fn sentry_options() -> Result<Option<sentry::ClientOptions>> {
+    let traces_sample_rate = match std::env::var("SENTRY_TRACES_SAMPLE_RATE") {
+        Ok(value) => value
+            .parse::<f64>()
+            .context("SENTRY_TRACES_SAMPLE_RATE must be a finite number between 0 and 1")?,
+        Err(std::env::VarError::NotPresent) => 0.1,
+        Err(error) => return Err(error).context("Reading SENTRY_TRACES_SAMPLE_RATE"),
+    };
+    if !traces_sample_rate.is_finite() || !(0.0..=1.0).contains(&traces_sample_rate) {
+        bail!("SENTRY_TRACES_SAMPLE_RATE must be a finite number between 0 and 1");
+    }
+    let Some(dsn) = nonempty_env("SENTRY_DSN") else {
+        return Ok(None);
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let release = nonempty_env("SENTRY_RELEASE")
+        .or_else(|| nonempty_env("RAILWAY_GIT_COMMIT_SHA"))
+        .map(|build| format!("ronnia-rust@{version}+{build}"))
+        .unwrap_or_else(|| format!("ronnia-rust@{version}"));
+    let mut options = sentry::ClientOptions::new()
+        .release(release)
+        .send_default_pii(false)
+        .traces_sample_rate(traces_sample_rate as f32);
+    options.dsn = Some(dsn.parse().context("Invalid SENTRY_DSN")?);
+    if let Some(environment) =
+        nonempty_env("SENTRY_ENVIRONMENT").or_else(|| nonempty_env("RAILWAY_ENVIRONMENT_NAME"))
+    {
+        options = options.environment(environment);
+    }
+    Ok(Some(options))
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+async fn async_main(cli: Cli) -> Result<()> {
     let mut config = Config::from_env()?;
     if let Some(path) = cli.database {
         config.database_path = path;

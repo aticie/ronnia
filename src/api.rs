@@ -87,11 +87,17 @@ pub fn router(config: Arc<Config>, store: Store) -> Router {
     } else {
         app
     };
-    app.layer(cors).with_state(ApiState {
-        config,
-        store,
-        http,
-    })
+    // Every API request becomes a Sentry transaction named "METHOD /path"; when a
+    // browser sends `sentry-trace`/`baggage`, the trace continues into the Rust
+    // span tree instead of starting a new one.
+    app.layer(cors)
+        .layer(sentry_tower::SentryHttpLayer::new().enable_transaction())
+        .layer(sentry_tower::NewSentryLayer::new_from_top())
+        .with_state(ApiState {
+            config,
+            store,
+            http,
+        })
 }
 
 #[derive(Debug)]

@@ -9,7 +9,9 @@
 use super::{
     Config, Outcome,
     conduit::{self, Conduit},
+    isolated_hub,
     maintenance,
+    record_queue_drop,
     requests::{RequestEnvelope, RequestIngress},
     transport::{self, Incoming, Pool},
     validate_identity,
@@ -28,7 +30,10 @@ use std::{
     collections::{HashSet, VecDeque},
     sync::Arc,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Recently dispatched notification ids, bounded like the shard event channel.
@@ -383,16 +388,45 @@ impl Runtime {
                     );
                     return Ok(());
                 };
+                let span = tracing::info_span!(
+                    "request",
+                    sentry.op = "queue.process",
+                    message_id = %chat.message.id,
+                    channel_id = chat.message.channel_id,
+                    beatmap_id = beatmap.id,
+                    beatmap_kind = match beatmap.kind {
+                        parser::BeatmapKind::Map => "map",
+                        parser::BeatmapKind::Mapset => "mapset",
+                    },
+                );
                 let permit = match self.ingress.permits.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(tokio::sync::TryAcquireError::NoPermits) => {
-                        tracing::warn!(channel = %chat.message.channel,
-                            "request queue is full; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            span.in_scope(|| {
+                                record_queue_drop("request", "full");
+                                tracing::warn!(
+                                    channel = %chat.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request queue is full; incoming request rejected"
+                                );
+                            })
+                        });
                         return Ok(());
                     }
                     Err(tokio::sync::TryAcquireError::Closed) => {
-                        tracing::warn!(channel = %chat.message.channel,
-                            "request scheduler is closed; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            span.in_scope(|| {
+                                record_queue_drop("request", "closed");
+                                tracing::warn!(
+                                    channel = %chat.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request scheduler is closed; incoming request rejected"
+                                );
+                            })
+                        });
                         return Ok(());
                     }
                 };
@@ -400,15 +434,35 @@ impl Runtime {
                     message: chat.message,
                     beatmap,
                     permit,
+                    span,
+                    queued_at: Instant::now(),
                 }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(envelope)) => {
-                        tracing::warn!(channel = %envelope.message.channel,
-                            "request queue is full; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            envelope.span.in_scope(|| {
+                                record_queue_drop("request", "full");
+                                tracing::warn!(
+                                    channel = %envelope.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request queue is full; incoming request rejected"
+                                );
+                            })
+                        });
                     }
                     Err(mpsc::error::TrySendError::Closed(envelope)) => {
-                        tracing::warn!(channel = %envelope.message.channel,
-                            "request scheduler is closed; incoming request rejected");
+                        sentry::Hub::run(isolated_hub(), || {
+                            envelope.span.in_scope(|| {
+                                record_queue_drop("request", "closed");
+                                tracing::warn!(
+                                    channel = %envelope.message.channel,
+                                    queue_capacity = self.config.request_queue_capacity,
+                                    permits_available = self.ingress.permits.available_permits(),
+                                    "request scheduler is closed; incoming request rejected"
+                                );
+                            })
+                        });
                     }
                 }
             }

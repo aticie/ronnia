@@ -73,7 +73,10 @@ DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve
 | `MIGRATION_GRANT_GRACE_SECS` | `10`; handoff delay before the new bot subscribes to a newly consented channel |
 | `INTERNAL_API_TOKEN` | Optional strong shared secret for the old bot's legacy bridge. Never expose to browsers |
 | `LOG_LEVEL` / `RUST_LOG` | `info`; `RUST_LOG` takes precedence |
-| `SENTRY_DSN` | Optional; errors/panics reported, default PII and full-rate tracing disabled |
+| `SENTRY_DSN` | Optional existing Sentry project; enables errors, sampled traces, and native metrics; no Sentry log duplication |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.1`; finite number in `[0,1]`; `0` disables transactions, not metrics/errors |
+| `SENTRY_RELEASE` | Optional build metadata, sent as `ronnia-rust@<semver>+<build>`; otherwise Railway commit SHA, or plain `ronnia-rust@<semver>` without build metadata |
+| `SENTRY_ENVIRONMENT` | Optional override; otherwise Railway environment name |
 
 Provider endpoint overrides exist for isolated integration runs: `TWITCH_API_BASE`, `TWITCH_OAUTH_BASE`, `OSU_API_BASE`, `OSU_OAUTH_BASE`, `TWITCH_EVENTSUB_URL`. Defaults use official providers. Never use unencrypted WebSocket or HTTP endpoints in production.
 
@@ -194,7 +197,7 @@ Tokio uses its normal available-parallelism default; `TOKIO_WORKER_THREADS` can 
 
 ## Request behavior
 
-The bot subscribes to chat and state events for every enabled, authorized channel through EventSub, including channels that are offline. `stream.online`, `stream.offline`, and `channel.update` update request eligibility immediately for channels live in osu! category ID `21465`; `stream.online` triggers a targeted category lookup because Twitch does not include it in that event. Batched snapshots and a remote subscription audit run at startup, after recovery, and every `RECONCILE_INTERVAL_SECS` (default ten minutes) to repair missed events. A slow snapshot cannot overwrite a newer event. Signup, reauthorization, settings changes, and account deletion wake reconciliation. It recognizes the first supported beatmap/set URL in each message, including historical `/b`, `/s`, and `/p/beatmap` forms, and forwards supported mods in their original order without pretending to calculate modded stars/BPM/duration. Set requests consistently use the first map returned by the set API, independent of unrelated map-cache contents. That selected-map mapping persists in SQLite for 24 hours; both the mapping and map must be fresh, so repeated set requests avoid another provider lookup.
+The bot subscribes to chat and state events for every enabled, authorized channel through EventSub, including channels that are offline. `stream.online`, `stream.offline`, and `channel.update` update request eligibility immediately for channels live in the osu! (`21465`) or `Osu!Lazer` (`295941293`) category; `stream.online` triggers a targeted category lookup because Twitch does not include it in that event. Batched snapshots and a remote subscription audit run at startup, after recovery, and every `RECONCILE_INTERVAL_SECS` (default ten minutes) to repair missed events. A slow snapshot cannot overwrite a newer event. Signup, reauthorization, settings changes, and account deletion wake reconciliation. It recognizes the first supported beatmap/set URL in each message, including historical `/b`, `/s`, and `/p/beatmap` forms, and forwards supported mods in their original order without pretending to calculate modded stars/BPM/duration. Set requests consistently use the first map returned by the set API, independent of unrelated map-cache contents. That selected-map mapping persists in SQLite for 24 hours; both the mapping and map must be fresh, so repeated set requests avoid another provider lookup.
 
 | Setting | Default | Behavior |
 |---|---|---|
@@ -215,6 +218,37 @@ The EventSub supervisor owns reconnect attempts outside the WebSocket client. DN
 There is no claim to recover chat messages Twitch never delivered during an outage. Invalid or revoked bot authorization remains a degraded waiting state with backoff and explicit diagnostics, not an authentication hot loop or a fatal API failure.
 
 Each accepted request is persisted before its osu! send. Only confirmed delivery produces success history, successful cooldown, and a Twitch success echo. If the response is lost after a possible send, the outcome becomes **uncertain** and is not replayed, including after restart. Known failures require a new chat message to resubmit. This chooses possible omission over duplicate private messages; upstream offers no exactly-once guarantee. Failed/pending requests do not consume successful cooldowns. Twitch acknowledgement failure never changes an already confirmed osu! result.
+
+Twitch feedback warnings include the channel ID, bot sender ID, HTTP status when available, and delivery certainty. For `is_sent=false`, the error preserves both Twitch's `drop_reason.code` and `drop_reason.message`; `msg_rejected` alone does not identify the cause. Missing rejection text is reported explicitly. Outgoing chat text and access tokens are not added to these diagnostics.
+
+Request-related events carry a `request` span with `message_id` (the originating Twitch chat message), `channel_id`, `beatmap_id`, and `beatmap_kind`. The same span follows channel-serial worker execution and queued Twitch feedback, so a failed acknowledgement can be joined to its confirmed osu! delivery without logging message bodies. JSON span context appears under `span`/`spans`, separate from event `fields`.
+
+At `INFO`, successful Twitch feedback is recorded alongside request outcomes; warnings report request admission saturation (`queue_capacity`, `permits_available`), feedback queue drops (`queue_capacity`, `queue_depth`), provider retries, and feedback failures. Feedback completion records queue/pacing wait and send time separately as `queue_wait_ms` and `elapsed_ms`. Missing bot identity and empty feedback are diagnosed without sending text.
+
+For detailed latency/retry investigation, use `RUST_LOG=info,ronnia=debug` rather than enabling global HTTP protocol logging. Worker start/finish events report request queue wait and processing time; provider attempt events include `provider`, controlled operation path, method, 1-based attempt number, elapsed time to response headers (or transport failure), and HTTP status or timeout/connect flags. Retry events include the reason and applicable delay. Attempts do not log query strings, headers, request bodies, or raw response bodies. Retry budgets, ambiguous-send safety, readiness checks, and Sentry severity are unchanged.
+
+### Sentry traces and metrics
+
+Railway remains the JSON-log destination. The existing Sentry integration captures error issues with source chains, INFO/WARN breadcrumbs, sampled request/provider traces, and native metrics. It does not add another collector, exporter, metrics endpoint, or telemetry service. Sentry initializes before Tokio and flushes after the runtime stops. Without `SENTRY_DSN`, no Sentry data is sent.
+
+Root `request` transactions follow admission, channel-serial work, and any queued Twitch feedback; `provider.http` child spans cover token/pacing waits, retries, and response-body decoding. Each request worker and feedback operation uses an isolated Sentry hub, retaining the same trace without mixing concurrently processed requests. A worker panic keeps its request span alive until collection so the failure can be correlated. Transaction names are stable; request IDs are trace/log context, not metric attributes.
+
+`RUST_LOG`/`LOG_LEVEL` filter Railway JSON output only. Sentry's span, breadcrumb, and error filters are independent, so reducing log verbosity does not disable Sentry traces or error ingestion.
+
+Trace sampling defaults to 10%, independently of native metric/error capture. Metrics use bounded attributes only: provider, normalized operation family, HTTP method/status class, outcome, queue, and retry reason. No channel, requester, message, beatmap ID, URL, query, or error text is added as a metric dimension. The SDK batches native metric ingestion through the configured Sentry DSN.
+
+| Native metric | Meaning |
+|---|---|
+| `ronnia.requests.processed` | Worker outcomes: `ok`, `error`, `panic`, `cancelled`; `ok` also includes policy skips, so this is not a delivery count |
+| `ronnia.osu.deliveries` | Actual PM send outcomes: `sent`, `failed`, `uncertain`; independent of subsequent local bookkeeping |
+| `ronnia.twitch.feedback` | Chat acknowledgement outcomes: `sent`, `failed`, `uncertain`, `skipped` |
+| `ronnia.queue.dropped` | Request/feedback admission drops, grouped by `full` or `closed` |
+| `ronnia.request.queue_wait`, `ronnia.request.processing_time` | Millisecond distributions for queue delay and worker execution |
+| `ronnia.feedback.queue_wait`, `ronnia.feedback.send_time` | Millisecond distributions separating queue/pacing delay from logical send time |
+| `ronnia.provider.attempts`, `ronnia.provider.headers_latency` | HTTP attempt counts and time to response headers/transport failure, including token requests |
+| `ronnia.provider.retries`, `ronnia.provider.retry_delay` | Scheduled retry counts and sleep durations, including token refresh retries where no delay is scheduled |
+
+Use Sentry's Traces view to inspect a sampled `request` and its provider children. In Metrics, compare osu! delivery outcomes with Twitch feedback outcomes, inspect latency percentiles, and group queue drops/retries by their bounded reasons. Use Railway's `message_id` span context to inspect unsampled requests; sampling does not remove their JSON logs. `/ready` remains a database-readiness probe, not an upstream-provider availability check.
 
 ## HTTP compatibility
 

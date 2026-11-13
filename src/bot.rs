@@ -10,12 +10,14 @@ use crate::{
     twitch_auth::{BotIdentity, TwitchAuth},
 };
 use anyhow::{Result, bail};
+use sentry::SentryFutureExt;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, watch},
     time::{Instant, sleep, sleep_until, timeout},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 mod backoff;
 mod conduit;
@@ -270,29 +272,70 @@ async fn send_feedback(
         if config.dry_run {
             continue;
         }
-        let Some(sender) = identities.borrow().clone() else {
-            continue;
-        };
-        let text = sanitize_chat(&echo.text, 450);
-        if text.is_empty() {
-            continue;
+        let span = echo.span.clone();
+        async {
+            let Some(sender) = identities.borrow().clone() else {
+                record_outcome("ronnia.twitch.feedback", "skipped");
+                tracing::warn!(
+                    channel_id = echo.channel_id,
+                    reason = "bot_unavailable",
+                    "Twitch chat feedback skipped"
+                );
+                return;
+            };
+            let text = sanitize_chat(&echo.text, 450);
+            if text.is_empty() {
+                record_outcome("ronnia.twitch.feedback", "skipped");
+                tracing::debug!(
+                    channel_id = echo.channel_id,
+                    reason = "empty_message",
+                    "Twitch chat feedback skipped"
+                );
+                return;
+            }
+            // Pacing belongs to queue wait, not provider send time.
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = sleep_until(next_send) => {}
+            }
+            next_send = Instant::now() + FEEDBACK_PACE;
+            let queue_wait_ms = echo.queued_at.elapsed().as_secs_f64() * 1000.0;
+            record_duration("ronnia.feedback.queue_wait", queue_wait_ms);
+            let started = Instant::now();
+            let result = providers
+                .send_twitch_message(&auth, echo.channel_id, &sender, &text)
+                .await;
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            record_duration("ronnia.feedback.send_time", elapsed_ms);
+            let outcome = match &result {
+                Ok(()) => "sent",
+                Err(error) if error.uncertain => "uncertain",
+                Err(_) => "failed",
+            };
+            record_outcome("ronnia.twitch.feedback", outcome);
+            match result {
+                Ok(()) => tracing::info!(
+                    channel_id = echo.channel_id,
+                    sender_id = %sender,
+                    queue_wait_ms,
+                    elapsed_ms,
+                    "Twitch chat feedback delivered"
+                ),
+                Err(error) => tracing::warn!(
+                    channel_id = echo.channel_id,
+                    sender_id = %sender,
+                    http_status = error.status,
+                    uncertain = error.uncertain,
+                    queue_wait_ms,
+                    elapsed_ms,
+                    error = %error,
+                    "Twitch chat feedback was not delivered"
+                ),
+            }
         }
-        tokio::select! {
-            _ = shutdown.cancelled() => return,
-            _ = sleep_until(next_send) => {}
-        }
-        next_send = Instant::now() + FEEDBACK_PACE;
-        if let Err(error) = providers
-            .send_twitch_message(&auth, echo.channel_id, &sender, &text)
-            .await
-        {
-            tracing::warn!(
-                channel_id = echo.channel_id,
-                uncertain = error.uncertain,
-                error = %error,
-                "Twitch chat feedback was not delivered"
-            );
-        }
+        .instrument(span)
+        .bind_hub(isolated_hub())
+        .await;
     }
 }
 
@@ -328,6 +371,41 @@ async fn validate_identity(
             Err(_) => tracing::warn!("Twitch bot revalidation timed out"),
         }
     }
+}
+
+fn isolated_hub() -> Arc<sentry::Hub> {
+    let hub = sentry::Hub::current();
+    if hub.client().is_some_and(|client| client.is_enabled()) {
+        Arc::new(sentry::Hub::new_from_top(&hub))
+    } else {
+        // No scope copy/allocation when Sentry is disabled.
+        hub
+    }
+}
+
+fn record_outcome(name: &'static str, outcome: &'static str) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(sentry::metrics::counter(name, 1).attribute("outcome", outcome));
+    });
+}
+
+fn record_duration(name: &'static str, milliseconds: f64) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(
+            sentry::metrics::distribution(name, milliseconds)
+                .unit(sentry::protocol::Unit::Millisecond),
+        );
+    });
+}
+
+fn record_queue_drop(queue: &'static str, reason: &'static str) {
+    sentry::Hub::with_active(|hub| {
+        hub.capture_metric(
+            sentry::metrics::counter("ronnia.queue.dropped", 1)
+                .attribute("queue", queue)
+                .attribute("reason", reason),
+        );
+    });
 }
 
 #[cfg(test)]

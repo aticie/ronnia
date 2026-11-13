@@ -551,12 +551,17 @@ pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::Join
         if state.hold_streams.load(Ordering::SeqCst) {
             state.release_streams.notified().await;
         }
-        if state.stream_mode.load(Ordering::SeqCst) == 0 {
-            axum::Json(
-                json!({"data":[{"user_id":"1","user_login":"streamer","game_id":"21465"}],"pagination":{}}),
-            )
-        } else {
-            axum::Json(json!({"data":[],"pagination":{}}))
+        let category = match state.stream_mode.load(Ordering::SeqCst) {
+            0 => Some("21465"),
+            2 => Some("295941293"),
+            3 => Some("509659"),
+            _ => None,
+        };
+        match category {
+            Some(category) => axum::Json(
+                json!({"data":[{"user_id":"1","user_login":"streamer","game_id":category}],"pagination":{}}),
+            ),
+            None => axum::Json(json!({"data":[],"pagination":{}})),
         }
     }
 
@@ -787,6 +792,38 @@ async fn hybrid_snapshots_see_offline_states_and_never_filter_by_category() {
         .await
         .unwrap();
     assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    server.abort();
+}
+
+#[tokio::test]
+async fn lazer_streams_are_discovered_and_eligible_but_just_chatting_is_not() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+    let providers = Providers::new(config, CancellationToken::new()).unwrap();
+
+    // A Lazer stream is discovered like an osu! stream and stays eligible.
+    state.stream_mode.store(2, Ordering::SeqCst);
+    super::maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
+    assert!(
+        store.user_by_twitch(1).await.unwrap().unwrap().is_live,
+        "Osu!Lazer restores eligibility"
+    );
+
+    // Just Chatting is observed too, but never grants eligibility.
+    state.stream_mode.store(3, Ordering::SeqCst);
+    super::maintenance::snapshot(&store, &providers, None)
+        .await
+        .unwrap();
+    assert!(
+        !store.user_by_twitch(1).await.unwrap().unwrap().is_live,
+        "Just Chatting removes eligibility"
+    );
     server.abort();
 }
 
@@ -1763,6 +1800,51 @@ async fn delivery_fixture(
         .await
         .unwrap();
     (config, store, providers, sends, server)
+}
+
+#[tokio::test]
+async fn missing_beatmap_is_rejected_without_delivery_or_processing_error() {
+    let (config, store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let (echoes, mut echo_rx) = mpsc::channel(4);
+    let beatmap = Beatmap {
+        id: 1,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    process_one(
+        &config,
+        &store,
+        &providers,
+        &echoes,
+        &request_message(),
+        &beatmap,
+        Clock::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        echo_rx.recv().await.unwrap().text,
+        "@viewer Beatmap not found."
+    );
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM deliveries", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -3082,6 +3164,8 @@ impl Fixture {
                 mods: String::new(),
             },
             permit: self.budget.clone().try_acquire_owned().unwrap(),
+            span: tracing::Span::none(),
+            queued_at: Instant::now(),
         }
     }
 
@@ -3110,13 +3194,15 @@ fn fill(scheduler: &mut Scheduler, fixture: &mut Fixture, workers: usize) {
             message,
             beatmap,
             permit,
+            span,
+            queued_at,
         }) = scheduler.next()
         else {
             break;
         };
         let channel = message.channel_id;
         let work = fixture.control.work(message, beatmap);
-        scheduler.spawn(channel, permit, work);
+        scheduler.spawn(channel, permit, span, queued_at, work);
     }
 }
 
@@ -3285,13 +3371,15 @@ async fn shutdown_closes_ingress_discards_pending_and_joins_active_work() {
         message,
         beatmap,
         permit,
+        span,
+        queued_at,
     }) = scheduler.next()
     else {
         panic!("the first request must be runnable");
     };
     let channel = message.channel_id;
     let work = fixture.control.work(message, beatmap);
-    scheduler.spawn(channel, permit, work);
+    scheduler.spawn(channel, permit, span, queued_at, work);
     assert_eq!(fixture.started().await, "a1");
     while let Ok(request) = rx.try_recv() {
         scheduler.admit(request);

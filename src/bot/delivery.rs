@@ -2,8 +2,14 @@
 //! transaction. Delivery is at-most-once: the `deliveries` primary key is the
 //! only duplicate guard.
 
-use super::dispatch::Message;
-use crate::{config::Config, domain::User, parser, providers::Providers, storage::Store};
+use super::{dispatch::Message, record_outcome, record_queue_drop};
+use crate::{
+    config::Config,
+    domain::User,
+    parser,
+    providers::{ChatError, Providers},
+    storage::Store,
+};
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
@@ -12,6 +18,8 @@ use tokio::{sync::mpsc, time::Instant};
 pub(super) struct Echo {
     pub(super) channel_id: i64,
     pub(super) text: String,
+    pub(super) span: tracing::Span,
+    pub(super) queued_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -37,8 +45,23 @@ pub(super) fn queue_echo(echoes: &mpsc::Sender<Echo>, message: &Message, text: S
     if let Err(error) = echoes.try_send(Echo {
         channel_id: message.channel_id,
         text,
+        span: tracing::Span::current(),
+        queued_at: Instant::now(),
     }) {
-        tracing::warn!(channel = %message.channel, error = %error, "Twitch feedback not queued");
+        let reason = match &error {
+            mpsc::error::TrySendError::Full(_) => "full",
+            mpsc::error::TrySendError::Closed(_) => "closed",
+        };
+        record_queue_drop("feedback", reason);
+        tracing::warn!(
+            channel = %message.channel,
+            channel_id = message.channel_id,
+            message_id = %message.id,
+            queue_capacity = echoes.max_capacity(),
+            queue_depth = echoes.max_capacity() - echoes.capacity(),
+            error = %error,
+            "Twitch feedback not queued"
+        );
     }
 }
 
@@ -127,7 +150,32 @@ pub(super) async fn process_one(
             (map, set)
         }
         None => {
-            let (map, set) = providers.get_beatmap(beatmap).await?;
+            let (map, set) = match providers.get_beatmap(beatmap).await {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if error
+                        .downcast_ref::<ChatError>()
+                        .is_some_and(|error| error.status == Some(404)) =>
+                {
+                    if !config.dry_run {
+                        queue_echo(
+                            echoes,
+                            message,
+                            format!("@{} Beatmap not found.", message.author),
+                        );
+                    }
+                    tracing::info!(
+                        channel = %message.channel,
+                        requester = %message.author,
+                        beatmap_id = beatmap.id,
+                        "request rejected: beatmap not found"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(error).context("fetching osu! beatmap metadata");
+                }
+            };
             match beatmap.kind {
                 parser::BeatmapKind::Map => store.cache_put(map.clone()).await?,
                 parser::BeatmapKind::Mapset => store.cache_put_set(beatmap.id, map.clone()).await?,
@@ -177,6 +225,7 @@ pub(super) async fn process_one(
         } else {
             "failed"
         };
+        record_outcome("ronnia.osu.deliveries", status);
         let description = error.to_string();
         store
             .call(move |db| {
@@ -187,8 +236,9 @@ pub(super) async fn process_one(
                 Ok(())
             })
             .await?;
-        return Err(error.into());
+        return Err(anyhow::Error::new(error).context("sending osu! private message"));
     }
+    record_outcome("ronnia.osu.deliveries", "sent");
     // One local transaction ties confirmed delivery, statistics and cooldown.
     // A crash before this commit leaves 'sending', hence uncertain on restart.
     let id = message.id.clone();
@@ -216,7 +266,23 @@ pub(super) async fn process_one(
             format!("{} - Request sent!", map_title(&map, &set)?),
         );
     }
-    tracing::info!(channel = %message.channel, map_id, message_id = %message.id, "osu request delivered and recorded");
+    tracing::info!(
+        channel = %message.channel,
+        channel_id = message.channel_id,
+        requester = %message.author,
+        requester_id = %message.author_id,
+        osu_username = %user.osu_username,
+        osu_id = user.osu_id,
+        map_id,
+        beatmapset_id = set["id"].as_i64(),
+        artist = set["artist"].as_str(),
+        title = set["title"].as_str(),
+        difficulty = map["version"].as_str(),
+        stars,
+        mods = %beatmap.mods,
+        message_id = %message.id,
+        "osu request delivered and recorded"
+    );
     Ok(())
 }
 
