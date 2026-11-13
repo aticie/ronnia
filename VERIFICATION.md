@@ -91,7 +91,7 @@ The retained Docker path also built successfully with `docker build -f Dockerfil
 
 ## PR #57 P2 grant-activation regression (2026-11-05)
 
-The runtime now tracks enabled accounts and active grants separately. An already-enabled imported/legacy account receives a targeted stream-state lookup when its verified grant becomes active, including the delayed migration-grace notification. New enable/import lookups, subscription reconciliation, revision guards, and targeted retries remain on their existing paths; unrelated settings notifications do not repeatedly poll Helix.
+The runtime now tracks enabled accounts and active grants separately. An already-enabled legacy account receives a targeted stream-state lookup when its verified grant becomes active, including the delayed migration-grace notification. New enable lookups, subscription reconciliation, revision guards, and targeted retries remain on their existing paths; unrelated settings notifications do not repeatedly poll Helix.
 
 Before the fix, `cargo test --locked membership_refreshes_existing_enabled_channel -- --nocapture` failed both new regressions: immediate activation and grace expiry each left the stream-call count at 1 instead of the expected 2. Both use the existing fake Helix and WebSocket/state fixtures, complete real runtime startup with an enabled ungranted account offline, then change the provider to online/osu! without a state event or periodic snapshot. They assert one channel-targeted lookup, immediate stored/public live eligibility, no lookup during grace, and no repeated lookup on unrelated settings notifications.
 
@@ -109,7 +109,7 @@ python3 scripts/smoke.py --binary target/release/ronnia --keep
                                                  PASS
 ```
 
-The updated smoke ran the newly built release executable, completed startup before granting the already-enabled imported account, and verified an offline-to-online/osu! transition immediately after OAuth consent with exactly one stream lookup. A separate restart with two-second migration grace verifies no premature eligibility/polling, activation via the real delayed OAuth notification, and no repeated stream lookups from unrelated settings writes. Both paths keep `RECONCILE_INTERVAL_SECS=600` and emit no stream-state event to supply the missing state. The full existing smoke also passed enable/delete wakeups, stale-snapshot ordering, delivery, transport recovery, and maintenance coverage. Artifact: `/tmp/ronnia-smoke-tlwulf02`. The complete sequential formatting/regression/clippy/test/build/smoke command finished in 169.50 seconds. No live providers, credentials, deployments, or PR #56 files were touched.
+The updated smoke ran the newly built release executable, completed startup before granting the already-enabled fixture account, and verified an offline-to-online/osu! transition immediately after OAuth consent with exactly one stream lookup. A separate restart with two-second migration grace verifies no premature eligibility/polling, activation via the real delayed OAuth notification, and no repeated stream lookups from unrelated settings writes. Both paths keep `RECONCILE_INTERVAL_SECS=600` and emit no stream-state event to supply the missing state. The full existing smoke also passed enable/delete wakeups, stale-snapshot ordering, delivery, transport recovery, and maintenance coverage. Artifact: `/tmp/ronnia-smoke-tlwulf02`. The complete sequential formatting/regression/clippy/test/build/smoke command finished in 169.50 seconds. No live providers, credentials, deployments, or PR #56 files were touched.
 
 ## Repository split (2026-11-04; verified)
 
@@ -126,15 +126,13 @@ python3 scripts/smoke.py --binary target/release/ronnia --keep
                                                  PASS
 ```
 
-The actual root-built release executable passed all 16 original HTTP routes plus `/health` and `/ready`, import/maintenance, both signup orders, encrypted device authorization, EventSub delivery/recovery, hybrid state, ambiguous-delivery safety, and isolated same-process DNS recovery. Artifact: `/tmp/ronnia-smoke-g3q1gr6z`. Rust tests also included zero-test binary and doc-test suites; none failed. The complete sequential check command finished in 220.71 seconds. These checks used this checkout's `target/`, not a borrowed executable.
+The actual root-built release executable passed all 16 original HTTP routes plus `/health` and `/ready`, maintenance, both signup orders, encrypted device authorization, EventSub delivery/recovery, hybrid state, ambiguous-delivery safety, and isolated same-process DNS recovery. Artifact: `/tmp/ronnia-smoke-g3q1gr6z`. Rust tests also included zero-test binary and doc-test suites; none failed. The complete sequential check command finished in 220.71 seconds. These checks used this checkout's `target/`, not a borrowed executable.
 
 The root Dockerfile also built successfully as `ronnia:split-web-runtime-20261104` (manifest `sha256:96583bea15970d4bc73ba1e1aa91ecf1e843098655e820deeb6ea1941b8ec8b4`). The frontend verification owner exercised two real, separate Compose projects on the disposable `ronnia-split-proof-20261104` network with synthetic configuration, a fresh backend volume, API-only mode, and loopback ports 28857/23857. Chromium rendered the dashboard and provider links; `/api/ready` returned HTTP 200 with `{"status":"ready"}`, `/api/user/me` returned HTTP 200 `null`, and `/api/internal/` returned Nginx HTTP 404. Both projects, their network, and the disposable database volume were removed afterward. No live credentials, deployments, or provider OAuth calls were used. Browser external fonts were intentionally blocked by the localhost-only test policy.
 
 The dashboard changes and frontend-specific checks are in [ronnia-web PR #24](https://github.com/aticie/ronnia-web/pull/24). This split proof is API-only; historical full-bot and provider-simulator coverage is recorded separately below.
 
 Backend `compose.yaml` now contains only the backend, loopback-published on `BIND_PORT` (default 8080). Start backend Compose first to create `${RONNIA_NETWORK:-ronnia}`; the separate frontend Compose joins that external network and defaults its upstream to `http://ronnia:${BIND_PORT:-8080}`. Both projects need matching `BIND_PORT` and `RONNIA_NETWORK`. The frontend repository owns its browser/build checks; the current cross-project proof above supersedes earlier integrated two-service Compose evidence for this layout.
-
-For memory comparison, defaults now use sibling `../ronnia-legacy` and `../ronnia-backend` source checkouts, not the current Rust tree. Prepare the legacy bot interpreter at `../ronnia-legacy/.venv/bin/python` and backend interpreter at `/tmp/ronnia-backend-baseline/bin/python`, or override the corresponding flags. `scripts/memory.py` starts isolated processes and MongoDB only when explicitly run; no benchmark was rerun for the split.
 
 
 ## Static and unit verification
@@ -146,7 +144,7 @@ cargo test --locked                                 PASS — 103 tests
 cargo build --release --locked                      PASS
 ```
 
-The 103 tests include: request parsing and mods; policy and formatting; EventSub frame/timeout/handoff and loopback URL validation; conduit reuse and owned-only subscription reconciliation; hybrid stream-state ordering and stale-snapshot races; targeted category lookup; account grants and consent; encrypted credential rotation/tamper/revocation; OAuth both-order signup and CSRF/session checks; all HTTP route contracts; OpenAPI generation; SQLite v1→v4 upgrade; mongodump JSON/NDJSON/BSON import validation and replay protection; cache freshness and deterministic set mapping; delivery deduplication and ambiguous outcomes; and shutdown/cancellation behavior.
+The 103 tests include: request parsing and mods; policy and formatting; EventSub frame/timeout/handoff and loopback URL validation; conduit reuse and owned-only subscription reconciliation; hybrid stream-state ordering and stale-snapshot races; targeted category lookup; account grants and consent; encrypted credential rotation/tamper/revocation; OAuth both-order signup and CSRF/session checks; all HTTP route contracts; OpenAPI generation; SQLite v1→v4 upgrade; cache freshness and deterministic set mapping; delivery deduplication and ambiguous outcomes; and shutdown/cancellation behavior.
 
 ## End-to-end executable smoke
 
@@ -160,9 +158,8 @@ Latest result: **PASS** (97.43 s), artifact `/tmp/ronnia-smoke-6gu81j80`. The ha
 
 Exercised through the actual binary, real HTTP/WebSocket servers, and SQLite:
 
-- Mongo export import with all four collections, normalization, raw provenance, and no fabricated chat consent.
 - All 16 original routes plus `/health` and `/ready`; authenticated and anonymous shapes; debug `/openapi.json`, `/docs`, `/redoc` gated by `DEBUG_MODE`.
-- Both signup orders with verified Twitch `channel:bot` consent; imported users inactive until reauthorization; same/different identity relinking rules; session rotation/revocation and CSRF/origin checks.
+- Both signup orders with verified Twitch `channel:bot` consent; accounts inactive until reauthorization; same/different identity relinking rules; session rotation/revocation and CSRF/origin checks.
 - Real device-code bot authorization: pending → browser activation → success; encrypted-only database evidence; invalid scope/denial/different-bot refusal; token refresh after 401.
 - EventSub conduit creation/reuse, WebSocket welcome/shard attach, owned subscription reconciliation, `channel.chat.message` → osu! PM → statistics → Twitch acknowledgement.
 - Hybrid state: online with targeted category lookup, immediate offline/category deactivation, out-of-order event rejection, slow snapshot versus newer offline race, grant/enable/delete wakeups, short reconciliation repair.
@@ -170,34 +167,11 @@ Exercised through the actual binary, real HTTP/WebSocket servers, and SQLite:
 - Connection loss and reattachment without duplicating owned subscriptions; server `session_reconnect` make-before-break with old-connection delivery and close ordering; keepalive-timeout recovery where Ping/Pong frames do not extend the deadline.
 - Authorization revocation without deleting the account or entering a resubscribe hot loop; `is_sent=false`, 429 `Retry-After`, and missing-success acknowledgement handling.
 - Ambiguous osu! POST retained and not replayed, including after restart; conduit/subscription reuse on restart.
-- Dry-run behavior; maintenance `import --check` commit safety, integrity check, backup/restore, delivery inspection, and backfill through the real CLI.
+- Dry-run behavior; maintenance integrity check, backup/restore, delivery inspection, and backfill through the real CLI.
 
 A temporary ignored integration probe using the same `tokio-tungstenite` dependency connected to the real `wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30`, completed the TLS/WebSocket upgrade, and received a `session_welcome`. It passed in 0.33 s; the throwaway probe was then removed.
 
 Not covered: authenticated live Twitch/osu! provider calls, real EventSub outage retention behavior, provider account restrictions, and production load.
-
-## Memory comparison
-
-The harness ran the unchanged original Python bot and backend from the two source trees, with an isolated real `mongo:7` container, against the Rust binary with in-process SQLite on the same host. Original code was not edited; only transport destination URLs were redirected to local simulators. The same synthetic workload, user settings, exports, and chat schedule were used (30 requests at 2.25 s intervals over 75 s).
-
-```sh
-python3 scripts/memory.py --binary target/release/ronnia \
-  --requests 30 --seconds 75 --interval 2.25 \
-  --output verification/memory.json --keep
-```
-
-Status: **complete**. Artifact: `/tmp/ronnia-memory-liv6pj0v`; samples in `verification/memory.json`.
-
-| Measurement | Python bot + backend + MongoDB | Rust + SQLite |
-|---|---:|---:|
-| Median service RSS | 323,252,224 B (308.28 MiB) | 13,754,368 B (13.12 MiB) |
-| Minimum RSS | 314,404,864 B | 13,619,200 B |
-| Maximum RSS | 327,655,424 B | 13,795,328 B |
-| Successful osu! PMs | 30 | 30 |
-| Twitch success echoes | 30 | 30 |
-| Imported + workload request statistics | 34 | 34 |
-
-Rust service RSS is **4.25%** of the Python service RSS in this workload (≈23.5× lower). The service figure includes descendants and the dedicated MongoDB host, not the common provider simulators. Sum of RSS can double-count shared pages; PSS samples are included when `/proc` permits. SQLite resides in the Rust process. This is a small local workload, not a production peak or capacity benchmark. The modern EventSub transport replaces IRC, so transport overhead is an intentional implementation difference; the chat count, delivery, echo, and persistence work are matched.
 
 ## Container
 
@@ -216,7 +190,7 @@ The debug documentation surface was opened in a real headless Chromium against `
 - A combined `IP:port` in `BIND_IP`, an out-of-range port (`65536`), and a nonnumeric port were rejected with diagnostics naming the relevant setting.
 - `docker compose config --format json`, projected to binding fields only, read the local `.env` port 4343 and produced host `127.0.0.1:4343`, container target 4343, listener `BIND_IP=0.0.0.0`, and `BIND_PORT=4343`.
 - Formatting, Clippy with warnings denied, all 89 Rust tests, and the release build passed after the split.
-- The updated executable smoke harness passed all route, import/maintenance, authorization, EventSub recovery, and hybrid-state scenarios using separate IP and port variables (96.90 seconds). Compose's missing-port fallback was also checked: listener, target, and published port all default to 8080.
+- The updated executable smoke harness passed all route, maintenance, authorization, EventSub recovery, and hybrid-state scenarios using separate IP and port variables (96.90 seconds). Compose's missing-port fallback was also checked: listener, target, and published port all default to 8080.
 
 ## Full-stack Compose startup
 
@@ -236,7 +210,6 @@ The debug documentation surface was opened in a real headless Chromium against `
 - Browser checks passed for logout, exclusion add/remove with server normalization, Twitch re-consent without changing identity, expired-session handling, login after expiration, and account deletion.
 - A delayed first settings POST held longer than the debounce interval while a second setting changed. There was at most one active POST; the latest complete seven-field snapshot was flushed afterward, both edits persisted, and `[0,-1]` remained an unlimited star range.
 - Local deployment origins and HTTP cookie settings were corrected without changing provider credentials, the encryption key, or existing localhost:4343 callbacks. The running stack uses its existing named SQLite volume.
-- The memory comparison above measures the backend stacks only; it does not include the newly integrated static Nginx frontend and is not a new total-memory measurement for both services.
 
 ## Offline chat subscriptions and test mode
 
@@ -252,7 +225,7 @@ The debug documentation surface was opened in a real headless Chromium against `
 
 - Rust: 103 tests, Clippy with warnings denied, release build, and the full smoke harness passed after the coexistence changes.
 - Legacy Python bot: 61 unit tests passed, including 38 new bridge/API tests, using an in-process aiohttp fixture; `py_compile` passed. The pre-existing beatmap parser test import was corrected so the suite runs under package-qualified imports.
-- Real wire integration: a fresh Rust service with the internal token enabled and an imported fixture was exercised through the patched Python `LegacyAPI`. Pagination, ID/login lookup, claim, duplicate-claim rejection, delivery reporting, idempotent statistic replay, public migration status, and wrong-token rejection all passed.
+- Real wire integration: a fresh Rust service with the internal token enabled and a fixture account was exercised through the patched Python `LegacyAPI`. Pagination, ID/login lookup, claim, duplicate-claim rejection, delivery reporting, idempotent statistic replay, public migration status, and wrong-token rejection all passed.
 - The persisted delivery was `sent` with `source=legacy`; exactly one statistics row with `source_id=twitch:<message>` and the original beatmap ID existed. Inserting a grant immediately removed the channel from the legacy list and caused a new claim to be rejected as migrated.
 - The patched `LegacyAPI.report_live` endpoint was exercised against a real isolated service: it updated the legacy login, exposed the channel through the public live-users union, and an empty live report cleared it. The legacy by-login lookup then resolved the updated name.
 - This verifies the anti-duplication contract at the API boundary; real Twitch IRC and osu! delivery were not used.

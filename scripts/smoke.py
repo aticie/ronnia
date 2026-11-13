@@ -5,14 +5,13 @@ Usage: scripts/smoke.py --binary target/debug/ronnia
 
 The real executable is driven through its own CLI, HTTP API, SQLite database,
 outbound Helix/OAuth requests and a real local EventSub WebSocket server. No
-application source is imported, patched or text-inspected. The original TwitchIO
-IRC fixture is retained only for the untouched Python memory baseline.
+application source is imported, patched or text-inspected. Fixture accounts and
+history are written directly into a freshly initialized SQLite database.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
-import datetime as dt
 import http.cookiejar
 import json
 import os
@@ -116,164 +115,54 @@ def settings(**overrides):
     return result
 
 
-def make_exports(directory):
-    """Full four-collection Mongo Extended JSON export, generated from scratch."""
-    directory.mkdir(parents=True, exist_ok=True)
-    now = dt.datetime.now(dt.timezone.utc)
-
-    def date(age):
-        return {"$date": (now - dt.timedelta(days=age)).isoformat().replace("+00:00", "Z")}
-
-    user = {"_id": {"$oid": "000000000000000000000001"}, "osuId": 201,
-            "osuUsername": "osu201", "osuAvatarUrl": "https://example.invalid/osu201.png",
-            "twitchId": 101, "twitchUsername": "streamer",
-            "twitchAvatarUrl": "https://example.invalid/twitch101.png", "isLive": True,
-            "excludedUsers": ["IMPORTEDBLOCK"], "settings": settings(),
-            "fixture_extra": "preserve-import-profile"}
-    metadata = [{"name": name, "value": value,
-                 "type": "range" if name == "sr" else "value" if name == "cooldown" else "toggle",
-                 "description": "synthetic imported metadata " + name}
-                for name, value in settings().items()]
-    history = []
-    for index, (map_id, age) in enumerate([(9001, 0), (9002, 8), (9003, 40)], 10):
-        history.append({"_id": {"$oid": f"{index:024x}"},
-                        "requester_channel_name": "fixtureviewer", "requested_beatmap_id": map_id,
-                        "requested_channel_name": "streamer", "mods": "+HD" if age == 0 else None,
-                        "timestamp": date(age), "fixture_history": True})
-    maps = []
-    for map_id in (9001, 9002, 9003):
-        row = beatmap(map_id)
-        row.update({"_id": {"$oid": f"{map_id:024x}"}, "ronnia_updated_at": date(0)})
-        maps.append(row)
-    for name, rows in [("Users", [user]), ("Settings", metadata),
-                       ("Statistics", history), ("Beatmaps", maps)]:
-        (directory / f"{name}.json").write_text(json.dumps(rows), encoding="utf-8")
+def insert_history(connection, map_id, age_days=0, mods=None):
+    """Insert one historical request row for the fixture streamer."""
+    connection.execute(
+        "INSERT INTO statistics(requester_channel_name,requested_beatmap_id,requested_channel_name,"
+        "mods,timestamp,raw_json) VALUES('fixtureviewer',?,'streamer',?,?,?)",
+        (map_id, mods, int(time.time()) - age_days * 86400,
+         json.dumps({"requested_beatmap_id": map_id})))
 
 
-class IRC:
-    """Original TwitchIO IRC transport. Used only by the unchanged Python baseline."""
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.socket = socket.socket()
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind(("127.0.0.1", 0))
-        self.port = self.socket.getsockname()[1]
-        self.stopped = threading.Event()
-        self.clients = {}
-        self.lines = []
-        self.connections = 0
-        self.started = False
+def seed_catalog(database):
+    """Insert the historical request/beatmap fixture used by leaderboard and backfill checks."""
+    with sqlite3.connect(database) as connection:
+        for map_id, age, mods in ((9001, 0, "+HD"), (9002, 8, None), (9003, 40, None)):
+            insert_history(connection, map_id, age, mods)
+        for map_id in (9001, 9002, 9003):
+            connection.execute(
+                "INSERT INTO beatmaps(id,beatmapset_id,fetched_at,raw_json) VALUES(?,500,?,?)",
+                (map_id, int(time.time()), json.dumps(beatmap(map_id))))
 
-    def start(self):
-        self.socket.listen()
-        self.socket.settimeout(0.2)
-        self.started = True
-        threading.Thread(target=self.accept, daemon=True).start()
 
-    def accept(self):
-        while not self.stopped.is_set():
-            try:
-                conn, _address = self.socket.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            conn.settimeout(0.2)
-            with self.lock:
-                self.connections += 1
-                number = self.connections
-                self.clients[number] = {"socket": conn, "joined": set(), "nick": "smokebot", "ready": False}
-            threading.Thread(target=self.receive, args=(number,), daemon=True).start()
-
-    def send(self, number, text):
-        with self.lock:
-            self.clients[number]["socket"].sendall((text + "\r\n").encode())
-
-    def receive(self, number):
-        pending = b""
-        try:
-            while not self.stopped.is_set():
-                try:
-                    data = self.clients[number]["socket"].recv(65536)
-                except socket.timeout:
-                    continue
-                if not data:
-                    break
-                pending += data
-                while b"\n" in pending:
-                    raw, pending = pending.split(b"\n", 1)
-                    line = raw.decode().rstrip("\r")
-                    with self.lock:
-                        self.lines.append((number, line))
-                        client = self.clients[number]
-                        if line.startswith("NICK "):
-                            client["nick"] = line[5:]
-                            client["ready"] = True
-                            self.send(number, f":local.test 001 {client['nick']} :Welcome")
-                        elif line.startswith("CAP REQ "):
-                            self.send(number, ":local.test CAP * ACK :twitch.tv/tags twitch.tv/commands twitch.tv/membership")
-                        elif line.startswith("JOIN "):
-                            for channel in line[5:].split(","):
-                                client["joined"].add(channel.lstrip("#"))
-                                self.send(number, f":{client['nick']}!bot@localhost JOIN {channel}")
-                                self.send(number, f":local.test 353 {client['nick']} = {channel} :{client['nick']}")
-                                self.send(number, f":local.test 366 {client['nick']} {channel} :End of NAMES list")
-                        elif line.startswith("PART "):
-                            for channel in line[5:].split(","):
-                                client["joined"].discard(channel.lstrip("#"))
-                        elif line.startswith("PING "):
-                            self.send(number, "PONG " + line[5:])
-        except OSError:
-            pass
-        finally:
-            with self.lock:
-                self.clients[number]["joined"].clear()
-                self.clients[number]["ready"] = False
-
-    def joined(self, channel="streamer"):
-        with self.lock:
-            return [number for number, client in self.clients.items() if channel in client["joined"]]
-
-    def inject(self, message_id, text, author="viewer", subscriber=False, moderator=False,
-               vip=False, points=False, user_id=301):
-        numbers = self.joined()
-        check(numbers, "Cannot inject a request before the real bot JOINs")
-        badges = []
-        if user_id == 101:
-            badges.append("broadcaster/1")
-        if moderator:
-            badges.append("moderator/1")
-        if subscriber:
-            badges.append("subscriber/1")
-        if vip:
-            badges.append("vip/1")
-        tags = {"badge-info": "subscriber/1" if subscriber else "", "badges": ",".join(badges),
-                "color": "#1E90FF", "display-name": author, "emote-only": "0", "emotes": "",
-                "first-msg": "0", "flags": "", "id": message_id, "mod": str(int(moderator)),
-                "returning-chatter": "0", "room-id": "101", "subscriber": str(int(subscriber)),
-                "tmi-sent-ts": str(int(time.time() * 1000)), "turbo": "0", "user-id": str(user_id),
-                "user-type": "mod" if moderator else "", "vip": str(int(vip))}
-        if points:
-            tags["custom-reward-id"] = "synthetic-reward"
-        wire = ";".join(f"{key}={value}" for key, value in tags.items())
-        self.send(max(numbers), f"@{wire} :{author}!{author}@{author}.tmi.twitch.tv PRIVMSG #streamer :{text}")
-
-    def drop(self):
-        with self.lock:
-            for client in self.clients.values():
-                client["joined"].clear()
-                with contextlib.suppress(OSError):
-                    client["socket"].shutdown(socket.SHUT_RDWR)
-                client["socket"].close()
-
-    def echoes(self):
-        with self.lock:
-            return [line for _, line in self.lines if line.startswith("PRIVMSG ")]
-
-    def close(self):
-        self.stopped.set()
-        self.drop()
-        self.socket.close()
+def seed_fixture(service):
+    """Populate a fresh SQLite database with the account, settings, and history fixture."""
+    result = run_captured(service.command("check"), env=service.env)
+    check(result.returncode == 0, f"Fresh SQLite check failed:\n{result.stdout}")
+    with sqlite3.connect(service.database) as connection:
+        connection.execute(
+            "INSERT INTO users(osu_id,osu_username,osu_avatar_url,twitch_id,twitch_username,"
+            "twitch_avatar_url,is_live,settings_json,raw_json) VALUES(?,?,?,?,?,?,?,?,?)",
+            (201, "osu201", "https://example.invalid/osu201.png", 101, "streamer",
+             "https://example.invalid/twitch101.png", 0, json.dumps(settings()),
+             json.dumps({"fixture_extra": "preserve-profile"})))
+        connection.execute("INSERT INTO exclusions(twitch_id,login) VALUES(101,'importedblock')")
+        for name, value in settings().items():
+            document = {"name": name, "value": value,
+                        "description": "synthetic fixture metadata " + name,
+                        "type": "range" if name == "sr" else "value" if name == "cooldown" else "toggle"}
+            connection.execute(
+                "UPDATE settings_metadata SET value_json=?,description=?,type=?,raw_json=? WHERE name=?",
+                (json.dumps(value), document["description"], document["type"],
+                 json.dumps(document), name))
+    seed_catalog(service.database)
+    check(service.scalar("SELECT count(*) FROM users") == 1, "Fixture user missing")
+    check(service.scalar("SELECT count(*) FROM statistics") == 3, "Fixture history missing")
+    check(service.scalar("SELECT count(*) FROM beatmaps") == 3, "Fixture beatmaps missing")
+    check(service.scalar("SELECT count(*) FROM twitch_channel_grants") == 0,
+          "Fixture fabricated a Twitch channel grant")
+    check(service.scalar("SELECT is_live FROM users WHERE twitch_id=101") == 0,
+          "Fixture live flag must not imply bot eligibility")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -370,44 +259,6 @@ class Service:
 
     def command(self, *args):
         return [self.binary, "--database", str(self.database), *args]
-
-    def import_fixture(self):
-        directory = self.root / "exports"
-        make_exports(directory)
-        initial = run_captured(self.command("check"), env=self.env)
-        check(initial.returncode == 0, f"Fresh SQLite check failed:\n{initial.stdout}")
-        before = database_rows(self.database)
-        validated = run_captured(self.command("import", "--directory", str(directory), "--check"), env=self.env)
-        check(validated.returncode == 0, f"Valid export validation failed:\n{validated.stdout}")
-        report = cli_json(validated.stdout)
-        check(report["dry_run"] and not report["committed"] and report["issue_count"] == 0,
-              f"Invalid --check report: {report}")
-        check(database_rows(self.database) == before, "Valid import --check committed changes")
-        invalid_directory = self.root / "invalid-exports"
-        make_exports(invalid_directory)
-        invalid_path = invalid_directory / "Users.json"
-        invalid_users = json.loads(invalid_path.read_text())
-        invalid_users[0]["settings"]["cooldown"] = -1
-        invalid_path.write_text(json.dumps(invalid_users))
-        invalid = run_captured(self.command("import", "--directory", str(invalid_directory), "--check"), env=self.env)
-        check(invalid.returncode != 0, "Invalid exports passed import --check")
-        check(database_rows(self.database) == before, "Invalid import --check committed changes")
-        result = run_captured(self.command("import", "--directory", str(directory)), env=self.env)
-        check(result.returncode == 0, f"Import failed ({result.returncode}):\n{result.stdout}")
-        check(self.scalar("SELECT count(*) FROM users") == 1, "User export was not imported")
-        check(self.scalar("SELECT count(*) FROM statistics") == 3, "History export was not imported")
-        check(self.scalar("SELECT count(*) FROM beatmaps") == 3, "Beatmap export was not imported")
-        check(self.scalar("SELECT login FROM exclusions") == "importedblock", "Imported exclusions not normalized")
-        check(self.scalar("SELECT description FROM settings_metadata WHERE name='echo'") ==
-              "synthetic imported metadata echo", "Settings export customization was not imported")
-        raw = json.loads(self.scalar("SELECT raw_json FROM beatmaps WHERE id=9001"))
-        check(raw["synthetic_marker"] == "generated-not-user-data", "Raw beatmap fields were lost")
-        check(json.loads(self.scalar("SELECT settings_json FROM users")) == settings(), "Imported settings changed")
-        # Imported isLive/stream metadata never fabricates chat permission.
-        check(self.scalar("SELECT count(*) FROM twitch_channel_grants") == 0,
-              "Import fabricated a Twitch channel grant")
-        check(self.scalar("SELECT is_live FROM users WHERE twitch_id=101") == 0,
-              "Imported live flag was trusted as bot eligibility")
 
     def configure_dns_failure(self):
         if not sys.platform.startswith("linux"):
@@ -568,7 +419,7 @@ def exercise_api(service):
     before_streams = service.providers.count_path("/twitch/helix/streams")
     browser.oauth("twitch", 101)
     user = browser.ok("/user/me")
-    check(user["osuId"] == 201 and user["twitchId"] == 101, "Existing imported account login failed")
+    check(user["osuId"] == 201 and user["twitchId"] == 101, "Existing fixture account login failed")
     check(set(user) == {"osuId", "osuUsername", "osuAvatarUrl", "twitchId", "twitchUsername",
                         "twitchAvatarUrl", "excludedUsers", "isLive", "twitchBotAuthorized"},
           f"Public UserResponse fields changed: {sorted(user)}")
@@ -578,8 +429,8 @@ def exercise_api(service):
     metadata = browser.ok("/user/settings")
     check({entry["name"] for entry in metadata} == set(settings()), "Settings metadata missing")
     check(next(row for row in metadata if row["name"] == "echo")["description"] ==
-          "synthetic imported metadata echo", "API lost imported metadata")
-    check(browser.ok("/user/exclude") == ["importedblock"], "API lost imported exclusion")
+          "synthetic fixture metadata echo", "API lost fixture metadata")
+    check(browser.ok("/user/exclude") == ["importedblock"], "API lost fixture exclusion")
     browser.ok("/user/exclude?excluded_user=MiXeDBlock", "POST")
     check("mixedblock" in browser.ok("/user/exclude"), "Exclusion add not normalized")
     browser.ok("/user/exclude?excluded_user=MIXEDBLOCK", "DELETE")
@@ -595,13 +446,13 @@ def exercise_api(service):
         expected = {9001: 1, 9002: 1} if route == "monthly" else {9001: 1}
         check(counts == expected, f"{route} UTC window wrong (weekly must be 7d): {counts}")
         check(rows[0]["synthetic_marker"] == "generated-not-user-data", "Leaderboard lost map metadata")
-        check("result" not in rows[0], "Mongo lookup internals leaked into API")
+        check("result" not in rows[0], "Legacy lookup internals leaked into API")
     check(browser.request("/live/users?limit=0")[0] in (400, 422), "Invalid pagination accepted")
     eventually(lambda: browser.ok("/live/users?limit=100&offset=0") == ["streamer"],
-               "Existing imported account becomes eligible immediately on grant activation", timeout=15)
+               "Existing fixture account becomes eligible immediately on grant activation", timeout=15)
     check(browser.ok("/user/me")["isLive"] is True, "Verified grant+osu live state not reflected")
     check(service.providers.count_path("/twitch/helix/streams") == before_streams + 1,
-          "Existing enabled imported account did not get exactly one grant-driven stream lookup")
+          "Existing enabled fixture account did not get exactly one grant-driven stream lookup")
 
     # Reauthorizing the same identity is allowed and rotates the browser session.
     old_token = next(cookie.value for cookie in browser.cookies if cookie.name == "token")
@@ -697,7 +548,7 @@ def exercise_grant_grace(service, browser):
     providers = service.providers
     service.stop()
     service.env["MIGRATION_GRANT_GRACE_SECS"] = "2"
-    # Reuse the imported account with no consent at startup, as during cutover.
+    # Reuse the fixture account with no consent at startup, as during cutover.
     with sqlite3.connect(service.database) as conn:
         conn.execute("DELETE FROM twitch_channel_grants WHERE twitch_id=101")
     providers.live = {}
@@ -1228,21 +1079,16 @@ def exercise_debug_and_maintenance(service, browser):
         service.stop()
         service.database = source
 
-    directory = service.root / "backfill-exports"
-    make_exports(directory)
-    history_path = directory / "Statistics.json"
-    history = json.loads(history_path.read_text())
-    missing = dict(history[0], requested_beatmap_id=1300,
-                   _id={"$oid": "000000000000000000000099"})
-    history.append(missing)
-    history_path.write_text(json.dumps(history))
     database = service.root / "backfill.sqlite3"
     command = [service.binary, "--database", str(database)]
-    imported = run_captured([*command, "import", "--directory", str(directory)], env=service.env)
-    check(imported.returncode == 0, f"Backfill fixture import failed:\n{imported.stdout}")
+    result = run_captured([*command, "check"], env=service.env)
+    check(result.returncode == 0, f"Backfill database check failed:\n{result.stdout}")
+    seed_catalog(database)
+    with sqlite3.connect(database) as conn:
+        insert_history(conn, 1300)
     with sqlite3.connect(database) as conn:
         check(conn.execute("SELECT count(*) FROM statistics WHERE requested_beatmap_id=1300").fetchone()[0] == 1,
-              "Missing metadata fixture did not import real history")
+              "Missing metadata fixture did not contain real history")
         check(conn.execute("SELECT count(*) FROM beatmaps WHERE id=1300").fetchone()[0] == 0,
               "Backfill fixture unexpectedly already has metadata")
     before = service.providers.count_path("/osu/api/v2/beatmaps/1300")
@@ -1272,7 +1118,7 @@ def main():
     service = None
     try:
         service = Service(args.binary, root, providers, eventsub)
-        service.import_fixture()
+        seed_fixture(service)
         dns_fault = service.configure_dns_failure()
         # An unrelated conduit already on the account must not be adopted or deleted.
         providers.conduits["foreign-conduit"] = {"id": "foreign-conduit", "shard_count": 1}
@@ -1288,7 +1134,7 @@ def main():
         initial = Browser(service.origin)
         check(initial.ok("/health") == {"status": "ok"} and initial.ok("/ready") == {"status": "ready"},
               "No-grant degraded startup did not serve API")
-        check(initial.ok("/live/users?limit=100") == [], "Ungranted imported channel was active")
+        check(initial.ok("/live/users?limit=100") == [], "Ungranted fixture channel was active")
         check(providers.count_path("/twitch/helix/eventsub/conduits") == 0,
               "Bot contacted EventSub before a grant existed")
         check(service.scalar("SELECT count(*) FROM twitch_bot_auth") == 0,
@@ -1318,10 +1164,10 @@ def main():
         time.sleep(0.5)
         check(service.process.poll() is None, "Transport refusal killed the service")
         eventsub.start()
-        # Finish startup with the enabled imported account offline and ungranted.
+        # Finish startup with the enabled fixture account offline and ungranted.
         # Going live now must be discovered by consent, not startup or a state event.
         wait_offline_startup(service, startup_streams, startup_revision,
-                             "ungranted imported account provider startup snapshot applied")
+                             "ungranted fixture account provider startup snapshot applied")
         check(initial.ok("/live/users?limit=100") == [], "Ungranted startup account became eligible")
         providers.live = {101: "streamer"}
 
@@ -1337,12 +1183,12 @@ def main():
         exercise_cli_errors(service)
         exercise_debug_and_maintenance(service, browser)
         check(not providers.errors, f"Fake provider protocol errors: {providers.errors}")
-        print("PASS: Mongo import, all 16 HTTP routes, /health+/ready, both signup orders with channel:bot,")
+        print("PASS: all 16 HTTP routes, /health+/ready, both signup orders with channel:bot,")
         print("      encrypted device authorization, EventSub conduit/shard/subscriptions, real WS chat→osu PMs,")
         print("      hybrid online/offline/category ordering, existing-account grant/grace lookup, watch wakeups,")
         print("      refused connect + DNS EAI_NONAME recovery, reconnect/handoff/keepalive, revocation safety,")
         print("      token refresh/401, is_sent=false, ambiguous accepted POST not replayed, dry-run.")
-        print("PASS: CLI import --check no-commit (valid/invalid), check, backup/restore, deliveries, backfill,")
+        print("PASS: CLI check, backup/restore, deliveries, backfill,")
         print("      device denial/invalid scopes/identity replacement, debug OpenAPI gated by DEBUG_MODE.")
         print("PASS: same-process DNS EAI_NONAME recovery via isolated LD_PRELOAD." if dns_fault else
               "NOT COVERED: process-local DNS recovery (requires Linux LD_PRELOAD).")
