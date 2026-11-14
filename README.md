@@ -187,7 +187,7 @@ target/release/ronnia --database /path/ronnia.sqlite3 deliveries --limit 50
 
 ### Automated SQLite backups
 
-Set `BACKUP_BUCKET` to enable scheduled service-side backups. The worker creates a consistent snapshot at startup and every `BACKUP_INTERVAL_SECS` (default `86400`), verifies SQLite integrity and foreign keys, compresses it with gzip, and uploads it to the configured S3-compatible bucket. `BACKUP_PREFIX` defaults to `ronnia`; objects are named `<prefix>/ronnia-<timestamp>.sqlite3.gz`. After each successful upload, snapshots older than `BACKUP_RETENTION_DAYS` (default `30`) under that prefix are deleted. Failures are logged and reported through Sentry without stopping the service.
+Set `BACKUP_BUCKET` to enable scheduled service-side backups. The worker creates a consistent snapshot at startup and every `BACKUP_INTERVAL_SECS` (default `86400`), verifies SQLite integrity and foreign keys, compresses it with gzip, and uploads it to the configured S3-compatible bucket. `BACKUP_PREFIX` defaults to `ronnia`; objects are named `<prefix>/ronnia-<timestamp>.sqlite3.gz`. After each successful upload, snapshots older than `BACKUP_RETENTION_DAYS` (default `10`) under that prefix are deleted. Failures are logged and reported through Sentry without stopping the service.
 
 Configure the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, and `AWS_ENDPOINT_URL` variables for the bucket. The credentials need object read, write, list, and delete permissions only for the backup bucket. Leaving `BACKUP_BUCKET` empty disables scheduling; the manual `backup` command remains available.
 

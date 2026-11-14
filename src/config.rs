@@ -174,7 +174,7 @@ impl Config {
         let backup = match env::var("BACKUP_BUCKET") {
             Ok(bucket) if !bucket.is_empty() => {
                 let interval_secs: u64 = parsed("BACKUP_INTERVAL_SECS", 86400)?;
-                let retention_days: u32 = parsed("BACKUP_RETENTION_DAYS", 30)?;
+                let retention_days: u32 = parsed("BACKUP_RETENTION_DAYS", 10)?;
                 if interval_secs == 0 || retention_days == 0 {
                     bail!("Backup interval and retention must be positive");
                 }
