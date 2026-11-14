@@ -19,8 +19,8 @@ import time
 import urllib.request
 
 from modern import EventSub, Providers, beatmap, check, timestamp
-from smoke import (Browser, Service, authorize_bot, eventually, install_signal_handlers,
-                   run_captured, settings)
+from smoke import (Browser, Service, authorize_bot, connect, eventually,
+                   install_signal_handlers, run_captured, settings)
 
 
 class Proof:
@@ -52,7 +52,7 @@ class Proof:
     def seed(self, count, grant_count=5):
         result = run_captured(self.service.command("check"), env=self.service.env)
         check(result.returncode == 0, f"Fresh SQLite check failed: {result.stdout}")
-        with sqlite3.connect(self.service.database) as connection:
+        with connect(self.service.database) as connection:
             for uid in range(101, 101 + count):
                 login = self.login(uid)
                 target = 10000 + uid

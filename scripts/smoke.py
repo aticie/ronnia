@@ -119,8 +119,25 @@ def cli_json(output):
     raise AssertionError(f"No terminal CLI JSON value:\n{output}")
 
 
+@contextlib.contextmanager
+def connect(path, *, readonly=False):
+    """A SQLite connection that commits and closes deterministically.
+
+    `with sqlite3.connect(...)` commits but never closes, and a leaked connection
+    keeps this process attached to an old WAL index after the service restarts, so
+    later reads can miss rows the service has already committed.
+    """
+    target = f"file:{path}?mode=ro" if readonly else str(path)
+    connection = sqlite3.connect(target, uri=readonly, timeout=5)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def database_rows(path):
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1) as conn:
+    with connect(path, readonly=True) as conn:
         return tuple(conn.iterdump())
 
 
@@ -148,7 +165,7 @@ def insert_history(connection, map_id, age_days=0, mods=None):
 
 def seed_catalog(database):
     """Insert the historical request/beatmap fixture used by leaderboard and backfill checks."""
-    with sqlite3.connect(database) as connection:
+    with connect(database) as connection:
         for map_id, age, mods in ((9001, 0, "+HD"), (9002, 8, None), (9003, 40, None)):
             insert_history(connection, map_id, age, mods)
         for map_id in (9001, 9002, 9003):
@@ -161,7 +178,7 @@ def seed_fixture(service):
     """Populate a fresh SQLite database with the account, settings, and history fixture."""
     result = run_captured(service.command("check"), env=service.env)
     check(result.returncode == 0, f"Fresh SQLite check failed:\n{result.stdout}")
-    with sqlite3.connect(service.database) as connection:
+    with connect(service.database) as connection:
         connection.execute(
             "INSERT INTO users(osu_id,osu_username,osu_avatar_url,twitch_id,twitch_username,"
             "twitch_avatar_url,is_live,settings_json,raw_json) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -296,7 +313,7 @@ class Service:
         return True
 
     def scalar(self, sql, params=()):
-        with sqlite3.connect(f"file:{self.database}?mode=ro", uri=True, timeout=1) as conn:
+        with connect(self.database, readonly=True) as conn:
             row = conn.execute(sql, params).fetchone()
             return row[0] if row else None
 
@@ -410,13 +427,17 @@ def authorize_bot(service, login="smokebot", replace=False, activate=True, expec
 
 
 def auth_row(service):
-    with sqlite3.connect(f"file:{service.database}?mode=ro", uri=True, timeout=1) as conn:
+    with connect(service.database, readonly=True) as conn:
         row = conn.execute("SELECT user_id,login,ciphertext,expires_at,scopes_json,validated_at,revision "
                            "FROM twitch_bot_auth WHERE singleton=1").fetchone()
         return row
 
 
 def assert_encrypted_grant(service):
+    def validated(row):
+        return row is not None and row[5] > 0
+    # A refresh clears the stamp until the follow-up validation commits.
+    eventually(lambda: validated(auth_row(service)), "stored bot grant validation stamp")
     row = auth_row(service)
     check(row is not None, "authorize-bot did not persist a bot grant")
     user_id, login, ciphertext, expires_at, scopes_json, validated_at, revision = row
@@ -586,7 +607,7 @@ def exercise_grant_grace(service, browser):
     service.stop()
     service.env["MIGRATION_GRANT_GRACE_SECS"] = "2"
     # Reuse the fixture account with no consent at startup, as during cutover.
-    with sqlite3.connect(service.database) as conn:
+    with connect(service.database) as conn:
         conn.execute("DELETE FROM twitch_channel_grants WHERE twitch_id=101")
     providers.live = {}
     startup_streams = providers.count_path("/twitch/helix/streams")
@@ -1137,9 +1158,9 @@ def exercise_debug_and_maintenance(service, browser):
     result = run_captured([*command, "check"], env=service.env)
     check(result.returncode == 0, f"Backfill database check failed:\n{result.stdout}")
     seed_catalog(database)
-    with sqlite3.connect(database) as conn:
+    with connect(database) as conn:
         insert_history(conn, 1300)
-    with sqlite3.connect(database) as conn:
+    with connect(database, readonly=True) as conn:
         check(conn.execute("SELECT count(*) FROM statistics WHERE requested_beatmap_id=1300").fetchone()[0] == 1,
               "Missing metadata fixture did not contain real history")
         check(conn.execute("SELECT count(*) FROM beatmaps WHERE id=1300").fetchone()[0] == 0,
@@ -1149,7 +1170,7 @@ def exercise_debug_and_maintenance(service, browser):
     check(backfilled.returncode == 0, f"CLI backfill failed:\n{backfilled.stdout}")
     check(service.providers.count_path("/osu/api/v2/beatmaps/1300") == before + 1,
           "Backfill did not query missing map through configured provider")
-    with sqlite3.connect(database) as conn:
+    with connect(database, readonly=True) as conn:
         row = conn.execute("SELECT raw_json FROM beatmaps WHERE id=1300").fetchone()
         check(row and json.loads(row[0])["synthetic_marker"] == "generated-not-user-data",
               "Backfill did not persist real provider metadata")

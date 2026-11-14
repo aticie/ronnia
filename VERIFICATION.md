@@ -21,6 +21,8 @@ Verified the fixes following review of PR #57, based on `migration/rust-port` at
 
 Regression coverage includes the Unicode mod panic, real duplicate-delivery and interrupted-send paths, legacy pending reports across Rust startup, cancellation/backpressure during refresh persistence, stale grant-revocation CAS, disabled-subscription cleanup at full capacity, unspecified pagination sizes, authoritative broadcaster consent, and revocation overflow at 2,500 grants. OAuth mocks validate provider-specific credentials and callback URIs; the grace timer is exercised with controlled Tokio time rather than a one-second wall-clock race.
 
+The smoke and scale harnesses now commit and close every SQLite connection. Leaving them open (`with sqlite3.connect(...)` commits without closing) kept the harness process attached to a pre-restart WAL index, so its later reads intermittently missed rows the service had committed; repeated CI failures at startup snapshot checks traced to this, not to the service. The grant-metadata check now waits for the post-refresh validation stamp instead of sampling the transient `validated_at=0` state.
+
 Schema v5 upgrades preserve existing grants and deliveries. Real Twitch/osu! interoperability, production throughput, and hard process-kill recovery during a provider token exchange remain outside this local proof.
 
 ## Single-replica bounded scale (2026-11-05)
