@@ -11,8 +11,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../../migrations/002_modern_twitch.sql")),
     (3, include_str!("../../migrations/003_coexistence.sql")),
     (4, include_str!("../../migrations/004_legacy_live.sql")),
+    (
+        5,
+        include_str!("../../migrations/005_channel_grant_revision.sql"),
+    ),
 ];
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub(super) fn connect(path: &Path) -> Result<Connection> {
     if let Some(parent) = path

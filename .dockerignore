@@ -2,6 +2,7 @@
 !.env.example
 !Cargo.toml
 !Cargo.lock
+!LICENSE
 !railpack.json
 !src/
 !src/**

@@ -19,6 +19,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"
 url = "2"
+httpdate = "1"
+percent-encoding = "2"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -39,6 +41,7 @@ flate2 = "1"
 tempfile = "3"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

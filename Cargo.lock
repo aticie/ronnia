@@ -2734,6 +2734,8 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
+ "httpdate",
+ "percent-encoding",
  "rand 0.9.5",
  "regex",
  "reqwest 0.12.28",

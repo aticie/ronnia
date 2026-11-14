@@ -54,6 +54,7 @@ struct Mock {
     device_expires_in: i64,
     refresh_script: VecDeque<RefreshMode>,
     validate_script: VecDeque<ValidateMode>,
+    refresh_http_pause: Option<(CancellationToken, CancellationToken)>,
     user_id: String,
     login: String,
 }
@@ -102,7 +103,23 @@ async fn mock_token(
     State(handle): State<MockHandle>,
     Form(form): Form<BTreeMap<String, String>>,
 ) -> Response {
-    let mut mock = handle.0.lock().unwrap();
+    let (response, pause) = {
+        let mut mock = handle.0.lock().unwrap();
+        let pause = if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
+            mock.refresh_http_pause.take()
+        } else {
+            None
+        };
+        (mock_token_response(&mut mock, form), pause)
+    };
+    if let Some((issued, respond)) = pause {
+        issued.cancel();
+        respond.cancelled().await;
+    }
+    response
+}
+
+fn mock_token_response(mock: &mut Mock, form: BTreeMap<String, String>) -> Response {
     mock.token_calls += 1;
     match form.get("grant_type").map(String::as_str) {
         Some(DEVICE_GRANT_TYPE) => {
@@ -414,8 +431,20 @@ async fn device_grant_waits_for_pending_and_persists_only_ciphertext() {
     assert_eq!(grant.login, LOGIN);
     assert!(grant.validated_at > 0);
     assert!(grant.expires_at > Utc::now().timestamp());
+    let scopes: Vec<String> = fixture
+        .store
+        .call(|connection| {
+            let json: String = connection.query_row(
+                "SELECT scopes_json FROM twitch_bot_auth WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(serde_json::from_str(&json)?)
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        grant.scopes,
+        scopes,
         BOT_SCOPES
             .iter()
             .map(|scope| scope.to_string())
@@ -849,4 +878,176 @@ async fn rejected_access_token_refreshes_only_after_a_401() {
     let grant = auth.load().await.unwrap().unwrap();
     let credentials = crypto::decrypt(&KEY, USER, &grant.ciphertext).unwrap();
     assert_eq!(credentials.access_token, "rotated-access-1");
+}
+
+async fn pause_refresh_persistence(auth: &TwitchAuth) -> (CancellationToken, CancellationToken) {
+    let received = CancellationToken::new();
+    let resume = CancellationToken::new();
+    *auth.before_refresh_persist.lock().await = Some((received.clone(), resume.clone()));
+    (received, resume)
+}
+
+/// Hold the writer and fill its bounded mailbox before the refresh can enqueue.
+async fn block_sqlite_mailbox(
+    store: &Store,
+) -> (
+    std::sync::mpsc::Sender<()>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let writer = store.clone();
+    let blocker = tokio::spawn(async move {
+        writer
+            .call(move |_| {
+                let _ = entered.send(());
+                let _ = wait.recv();
+                Ok(())
+            })
+            .await
+    });
+    blocked.await.unwrap();
+    // Store's mailbox has 128 slots. Polling once enqueues each job while its
+    // response remains blocked; dropping the waiter does not remove that job.
+    for _ in 0..128 {
+        let job = store.call(|_| Ok(()));
+        tokio::pin!(job);
+        assert!(futures_util::poll!(&mut job).is_pending());
+    }
+    (release, blocker)
+}
+
+#[tokio::test]
+async fn dropped_readiness_persists_successful_refresh_through_full_mailbox() {
+    let fixture = Fixture::new().await;
+    let now = Utc::now().timestamp();
+    fixture
+        .seed(KEY, USER, LOGIN, "old-access", "old-refresh", now - 1, now)
+        .await;
+    let auth = fixture.auth();
+    let (received, resume) = pause_refresh_persistence(&auth).await;
+    let caller = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.ready_bot(&CancellationToken::new()).await })
+    };
+    received.cancelled().await;
+    let (release, blocker) = block_sqlite_mailbox(&fixture.store).await;
+    // Task abort drops the same future that an outer timeout or select drops.
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    resume.cancel();
+
+    let drain = auth.finish_refresh();
+    tokio::pin!(drain);
+    assert!(futures_util::poll!(&mut drain).is_pending());
+    let shutdown = CancellationToken::new();
+    let next = auth.bot_access_token(&shutdown);
+    tokio::pin!(next);
+    assert!(futures_util::poll!(&mut next).is_pending());
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    drain.await;
+    assert_eq!(next.await.unwrap(), "rotated-access-1");
+    let grant = auth.load().await.unwrap().unwrap();
+    let credentials = auth.decrypt(&grant).unwrap();
+    assert_eq!(credentials.refresh_token, "rotated-refresh-1");
+    assert_eq!(
+        grant.validated_at, 0,
+        "cancelled readiness did not validate"
+    );
+    assert_eq!(
+        fixture.counts().refresh,
+        1,
+        "next caller must not rotate again"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_during_refresh_http_finishes_rotation_before_drain() {
+    let fixture = Fixture::new().await;
+    let now = Utc::now().timestamp();
+    fixture
+        .seed(KEY, USER, LOGIN, "old-access", "old-refresh", now - 1, now)
+        .await;
+    let issued = CancellationToken::new();
+    let respond = CancellationToken::new();
+    fixture.mock.0.lock().unwrap().refresh_http_pause = Some((issued.clone(), respond.clone()));
+    let auth = fixture.auth();
+    let shutdown = CancellationToken::new();
+    let caller = {
+        let auth = auth.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { auth.bot_access_token(&shutdown).await })
+    };
+    issued.cancelled().await;
+    shutdown.cancel();
+    assert!(caller.await.unwrap().is_err());
+    let drain = auth.finish_refresh();
+    tokio::pin!(drain);
+    assert!(futures_util::poll!(&mut drain).is_pending());
+    respond.cancel();
+    drain.await;
+
+    assert_eq!(
+        auth.bot_access_token(&CancellationToken::new())
+            .await
+            .unwrap(),
+        "rotated-access-1"
+    );
+    let grant = auth.load().await.unwrap().unwrap();
+    assert_eq!(
+        auth.decrypt(&grant).unwrap().refresh_token,
+        "rotated-refresh-1"
+    );
+    assert_eq!(fixture.counts().refresh, 1);
+}
+
+#[tokio::test]
+async fn detached_refresh_cas_preserves_concurrent_reauthorization() {
+    let fixture = Fixture::new().await;
+    let now = Utc::now().timestamp();
+    fixture
+        .seed(KEY, USER, LOGIN, "old-access", "old-refresh", now - 1, now)
+        .await;
+    let auth = fixture.auth();
+    let (received, resume) = pause_refresh_persistence(&auth).await;
+    let caller = {
+        let auth = auth.clone();
+        tokio::spawn(async move { auth.bot_access_token(&CancellationToken::new()).await })
+    };
+    received.cancelled().await;
+    auth.store_grant(
+        USER,
+        LOGIN,
+        &BOT_SCOPES.map(str::to_owned),
+        now + 14400,
+        &Credentials {
+            access_token: "reauthorized-access".into(),
+            refresh_token: "reauthorized-refresh".into(),
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    resume.cancel();
+    auth.finish_refresh().await;
+
+    let grant = auth.load().await.unwrap().unwrap();
+    let credentials = auth.decrypt(&grant).unwrap();
+    assert_eq!(credentials.access_token, "reauthorized-access");
+    assert_eq!(credentials.refresh_token, "reauthorized-refresh");
+    assert_eq!(
+        grant.revision, 2,
+        "stale refresh CAS must not advance the row"
+    );
+    assert!(grant.validated_at > 0);
+    assert_eq!(
+        auth.bot_access_token(&CancellationToken::new())
+            .await
+            .unwrap(),
+        "reauthorized-access"
+    );
+    assert_eq!(fixture.counts().refresh, 1);
 }

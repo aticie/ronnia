@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -118,8 +119,25 @@ def cli_json(output):
     raise AssertionError(f"No terminal CLI JSON value:\n{output}")
 
 
+@contextlib.contextmanager
+def connect(path, *, readonly=False):
+    """A SQLite connection that commits and closes deterministically.
+
+    `with sqlite3.connect(...)` commits but never closes, and a leaked connection
+    keeps this process attached to an old WAL index after the service restarts, so
+    later reads can miss rows the service has already committed.
+    """
+    target = f"file:{path}?mode=ro" if readonly else str(path)
+    connection = sqlite3.connect(target, uri=readonly, timeout=5)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def database_rows(path):
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1) as conn:
+    with connect(path, readonly=True) as conn:
         return tuple(conn.iterdump())
 
 
@@ -147,7 +165,7 @@ def insert_history(connection, map_id, age_days=0, mods=None):
 
 def seed_catalog(database):
     """Insert the historical request/beatmap fixture used by leaderboard and backfill checks."""
-    with sqlite3.connect(database) as connection:
+    with connect(database) as connection:
         for map_id, age, mods in ((9001, 0, "+HD"), (9002, 8, None), (9003, 40, None)):
             insert_history(connection, map_id, age, mods)
         for map_id in (9001, 9002, 9003):
@@ -160,7 +178,7 @@ def seed_fixture(service):
     """Populate a fresh SQLite database with the account, settings, and history fixture."""
     result = run_captured(service.command("check"), env=service.env)
     check(result.returncode == 0, f"Fresh SQLite check failed:\n{result.stdout}")
-    with sqlite3.connect(service.database) as connection:
+    with connect(service.database) as connection:
         connection.execute(
             "INSERT INTO users(osu_id,osu_username,osu_avatar_url,twitch_id,twitch_username,"
             "twitch_avatar_url,is_live,settings_json,raw_json) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -295,7 +313,7 @@ class Service:
         return True
 
     def scalar(self, sql, params=()):
-        with sqlite3.connect(f"file:{self.database}?mode=ro", uri=True, timeout=1) as conn:
+        with connect(self.database, readonly=True) as conn:
             row = conn.execute(sql, params).fetchone()
             return row[0] if row else None
 
@@ -409,13 +427,17 @@ def authorize_bot(service, login="smokebot", replace=False, activate=True, expec
 
 
 def auth_row(service):
-    with sqlite3.connect(f"file:{service.database}?mode=ro", uri=True, timeout=1) as conn:
+    with connect(service.database, readonly=True) as conn:
         row = conn.execute("SELECT user_id,login,ciphertext,expires_at,scopes_json,validated_at,revision "
                            "FROM twitch_bot_auth WHERE singleton=1").fetchone()
         return row
 
 
 def assert_encrypted_grant(service):
+    def validated(row):
+        return row is not None and row[5] > 0
+    # A refresh clears the stamp until the follow-up validation commits.
+    eventually(lambda: validated(auth_row(service)), "stored bot grant validation stamp")
     row = auth_row(service)
     check(row is not None, "authorize-bot did not persist a bot grant")
     user_id, login, ciphertext, expires_at, scopes_json, validated_at, revision = row
@@ -484,11 +506,19 @@ def exercise_api(service):
 
     # Reauthorizing the same identity is allowed and rotates the browser session.
     old_token = next(cookie.value for cookie in browser.cookies if cookie.name == "token")
+    old_hash = hashlib.sha256(old_token.encode()).hexdigest()
+    check(service.scalar("SELECT count(*) FROM sessions WHERE token_hash=?", (old_hash,)) == 1,
+          "Reauthorization precondition: old session hash missing")
     browser.oauth("twitch", 101)
     new_token = next(cookie.value for cookie in browser.cookies if cookie.name == "token")
     check(old_token != new_token, "Reauthorization did not rotate the browser session")
-    check(service.scalar("SELECT count(*) FROM sessions WHERE token_hash=?", (old_token,)) == 0,
+    check(service.scalar("SELECT count(*) FROM sessions WHERE token_hash=?", (old_hash,)) == 0,
           "Rotated session token remained valid")
+    stale = Browser(service.origin)
+    stale.cookies.set_cookie(http.cookiejar.Cookie(0, "token", old_token, None, False, "127.0.0.1", False,
+                                                   False, "/", True, False, None, True, None, None, {}))
+    check(stale.request("/user/settings")[0] == 401, "Rotated browser cookie still authorized")
+    check(browser.ok("/user/me")["twitchId"] == 101, "Replacement browser session is not authorized")
 
     # A Twitch token without verified channel:bot consent must never create a grant.
     service.providers.missing_user_scope = True
@@ -577,7 +607,7 @@ def exercise_grant_grace(service, browser):
     service.stop()
     service.env["MIGRATION_GRANT_GRACE_SECS"] = "2"
     # Reuse the fixture account with no consent at startup, as during cutover.
-    with sqlite3.connect(service.database) as conn:
+    with connect(service.database) as conn:
         conn.execute("DELETE FROM twitch_channel_grants WHERE twitch_id=101")
     providers.live = {}
     startup_streams = providers.count_path("/twitch/helix/streams")
@@ -877,16 +907,22 @@ def exercise_transport(service, browser):
     # Session reconnect: keep processing the old connection until the new welcome.
     old = eventsub.handoff()
     eventually(lambda: eventsub.handoff_opened.is_set(), "client opened the reconnect URL")
+    candidate = eventsub.handoff_candidate
+    check(candidate is not None and candidate > old, "Reconnect did not open a new candidate socket")
     before = len(providers.posts)
     eventsub.inject("smoke-handoff-old", "https://osu.ppy.sh/beatmaps/1001",
                     author="handoffviewer", number=old)
     eventually(lambda: len(providers.posts) == before + 1, "old connection still delivered during handoff")
     eventsub.delay_welcome.set()
-    eventually(lambda: any(client["welcomed"] for client in list(eventsub.clients.values())
-                           if client["session"] in eventsub.attaches and client["session"] != f"session-{old}"),
-               "new session welcomed and attached", timeout=15)
-    eventsub.inject("smoke-handoff-new", "https://osu.ppy.sh/beatmaps/1001", author="posthandoff")
-    eventually(lambda: len(providers.posts) == before + 2, "new connection delivered after handoff")
+    eventually(lambda: eventsub.clients[candidate]["alive"] and eventsub.clients[candidate]["welcomed"]
+               and eventsub.shard_number(0) == candidate,
+               "exact new live session welcomed and attached", timeout=15)
+    eventsub.inject("smoke-handoff-new", "https://osu.ppy.sh/beatmaps/1001",
+                    author="posthandoff", number=candidate)
+    eventually(lambda: len(providers.posts) == before + 2
+               and service.scalar("SELECT status FROM deliveries WHERE twitch_message_id=?",
+                                  ("smoke-handoff-new",)) == "sent",
+               "exact candidate reader delivered after handoff")
     eventually(lambda: not eventsub.clients[old]["alive"], "retired old socket was not closed", timeout=20)
     check(providers.subscription_creates[("channel.chat.message", "101")] == chats_before,
           "Handoff recreated a duplicate owned subscription")
@@ -1010,9 +1046,20 @@ def exercise_short_reconcile(service, browser):
 def exercise_revocation(service, browser):
     eventsub, providers = service.eventsub, service.providers
     check(service.scalar("SELECT count(*) FROM users WHERE twitch_id=101") == 1, "Precondition account missing")
+    check(service.scalar("SELECT status FROM twitch_channel_grants WHERE twitch_id=101") == "granted"
+          and browser.ok("/user/me")["isLive"] is True,
+          "Revocation precondition: primary channel is not granted and live")
+    authorizations_before = providers.count_path("/twitch/helix/authorization/users")
     eventsub.revoke()
-    eventually(lambda: providers.subscription("channel.chat.message") is None,
-               "revocation removed the chat subscription", timeout=12)
+    eventually(lambda: providers.count_path("/twitch/helix/authorization/users") > authorizations_before
+               and service.scalar("SELECT status FROM twitch_channel_grants WHERE twitch_id=101") == "revoked"
+               and providers.subscription("channel.chat.message") is None
+               and service.scalar("SELECT is_live FROM users WHERE twitch_id=101") == 0
+               and "streamer" not in browser.ok("/live/users?limit=100"),
+               "revocation durably revoked consent, removed its subscription and live eligibility", timeout=12)
+    user = browser.ok("/user/me")
+    check(user["twitchBotAuthorized"] is False and user["isLive"] is False,
+          "Revoked consent remained authorized or live in the account response")
     attempts = providers.chat_post_attempts
     time.sleep(1.5)
     check(providers.chat_post_attempts <= attempts + 3,
@@ -1048,7 +1095,6 @@ def exercise_cli_errors(service):
     row = auth_row(service)
     check(row[0] == "888" and row[1] == "otherbot" and row != before,
           "--replace did not rotate the stored bot identity")
-    providers.chat_revoked = False
     eventsub = service.eventsub
     eventsub.start()
     service.start()
@@ -1112,9 +1158,9 @@ def exercise_debug_and_maintenance(service, browser):
     result = run_captured([*command, "check"], env=service.env)
     check(result.returncode == 0, f"Backfill database check failed:\n{result.stdout}")
     seed_catalog(database)
-    with sqlite3.connect(database) as conn:
+    with connect(database) as conn:
         insert_history(conn, 1300)
-    with sqlite3.connect(database) as conn:
+    with connect(database, readonly=True) as conn:
         check(conn.execute("SELECT count(*) FROM statistics WHERE requested_beatmap_id=1300").fetchone()[0] == 1,
               "Missing metadata fixture did not contain real history")
         check(conn.execute("SELECT count(*) FROM beatmaps WHERE id=1300").fetchone()[0] == 0,
@@ -1124,7 +1170,7 @@ def exercise_debug_and_maintenance(service, browser):
     check(backfilled.returncode == 0, f"CLI backfill failed:\n{backfilled.stdout}")
     check(service.providers.count_path("/osu/api/v2/beatmaps/1300") == before + 1,
           "Backfill did not query missing map through configured provider")
-    with sqlite3.connect(database) as conn:
+    with connect(database, readonly=True) as conn:
         row = conn.execute("SELECT raw_json FROM beatmaps WHERE id=1300").fetchone()
         check(row and json.loads(row[0])["synthetic_marker"] == "generated-not-user-data",
               "Backfill did not persist real provider metadata")
