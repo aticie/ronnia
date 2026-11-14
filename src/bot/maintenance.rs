@@ -4,7 +4,12 @@
 //! HTTP work never runs on the foreground EventSub dispatcher.
 
 use super::{backoff::Backoff, conduit, transport::Topology};
-use crate::{config::Config, domain::StreamSnapshot, providers::Providers, storage::Store};
+use crate::{
+    config::Config,
+    domain::StreamSnapshot,
+    providers::Providers,
+    storage::{ChannelGrant, Store},
+};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Method;
 use rusqlite::OptionalExtension;
@@ -313,7 +318,7 @@ pub(super) struct Maintenance {
     pub(super) pending: Pending,
     known: BTreeSet<i64>,
     known_granted: BTreeSet<i64>,
-    pub(super) grants: Option<Vec<i64>>,
+    pub(super) grants: Option<Vec<ChannelGrant>>,
     channels: watch::Receiver<u64>,
     signals: watch::Receiver<Signal>,
     actions: mpsc::Receiver<Action>,
@@ -374,12 +379,42 @@ impl Maintenance {
         }
     }
 
+    /// Persist chat authorization outcomes. A ban only suppresses the chat
+    /// subscription; consent and stream-state subscriptions remain valid.
+    pub(super) async fn apply_chat_states(&self, summary: &conduit::Summary) -> Result<()> {
+        for broadcaster in &summary.chat_unauthorized {
+            if self.store.mark_twitch_chat_banned(*broadcaster).await? {
+                tracing::warn!(
+                    broadcaster = *broadcaster,
+                    "Twitch chat access is blocked; chat subscriptions paused for one hour while stream subscriptions remain active"
+                );
+            }
+        }
+        for broadcaster in &summary.chat_recovered {
+            let was_banned = self.grants.as_ref().is_some_and(|grants| {
+                grants
+                    .iter()
+                    .any(|grant| grant.twitch_id == *broadcaster && grant.chat_banned)
+            });
+            if !was_banned {
+                continue;
+            }
+            if self.store.clear_twitch_chat_ban(*broadcaster).await? {
+                tracing::info!(
+                    broadcaster = *broadcaster,
+                    "Twitch chat access restored; cleared the channel chat ban"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Commit neither membership baseline unless both authoritative reads succeed.
     /// One granted snapshot drives sizing, subscriptions and activation edges.
     pub(super) async fn refresh_membership(&mut self) -> Result<()> {
         let enabled: BTreeSet<i64> = self.store.enabled_twitch_ids().await?.into_iter().collect();
-        let grants = self.store.granted_twitch_ids().await?;
-        let granted: BTreeSet<i64> = grants.iter().copied().collect();
+        let grants = self.store.granted_twitch_channels().await?;
+        let granted: BTreeSet<i64> = grants.iter().map(|grant| grant.twitch_id).collect();
         let fresh: Vec<i64> = enabled
             .iter()
             .copied()
@@ -755,6 +790,10 @@ impl Maintenance {
                             .reconcile(&self.providers, &desired, attached, &shutdown)
                             .await
                     }
+                    Err(error) => Err(error),
+                };
+                let result = match result {
+                    Ok(summary) => self.apply_chat_states(&summary).await.map(|()| summary),
                     Err(error) => Err(error),
                 };
                 match result {

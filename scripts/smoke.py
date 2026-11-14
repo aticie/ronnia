@@ -465,9 +465,11 @@ def exercise_api(service):
     user = browser.ok("/user/me")
     check(user["osuId"] == 201 and user["twitchId"] == 101, "Existing fixture account login failed")
     check(set(user) == {"osuId", "osuUsername", "osuAvatarUrl", "twitchId", "twitchUsername",
-                        "twitchAvatarUrl", "excludedUsers", "isLive", "twitchBotAuthorized"},
+                        "twitchAvatarUrl", "excludedUsers", "isLive", "twitchBotAuthorized",
+                        "twitchBotBanned"},
           f"Public UserResponse fields changed: {sorted(user)}")
     check(user["twitchBotAuthorized"] is True, "Verified channel:bot consent not exposed")
+    check(user["twitchBotBanned"] is False, "Healthy chat access must not be reported as banned")
     check(service.scalar("SELECT status FROM twitch_channel_grants WHERE twitch_id=101") == "granted",
           "Twitch login did not persist verified channel:bot grant")
     metadata = browser.ok("/user/settings")
@@ -1117,6 +1119,7 @@ def exercise_debug_and_maintenance(service, browser):
         paths = document["paths"]
         check(all(path in paths for path in ("/user/me", "/health", "/ready")), "OpenAPI lost routes")
         check("twitchBotAuthorized" in json.dumps(document), "OpenAPI lost twitchBotAuthorized")
+        check("twitchBotBanned" in json.dumps(document), "OpenAPI lost twitchBotBanned")
     finally:
         debug.stop()
 

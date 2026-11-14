@@ -4,6 +4,16 @@ Current single-replica scale, Railpack, and grant-activation checks: 2026-11-05.
 
 The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
 
+## Chat-ban visibility and recovery (2026-11-14)
+
+Schema version 6 persists `chat_banned_at` and `chat_retry_at` on each Twitch channel grant. A `chat_user_banned` revocation or 403 chat-subscription response pauses only that channel's chat creation for one hour; consent, live eligibility, and the three state subscriptions remain intact. A later successful creation clears the persisted ban. `/user/me` exposes the state as `twitchBotBanned` independently of `twitchBotAuthorized`.
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` passed in the `rust:1-bookworm` container: **157 passed, 0 failed**. New regressions cover the schema upgrade, ban/clear transitions without grant revocation, chat-only desired-set filtering, 403 → no repeated creation POSTs → successful unban probe, provider error-body diagnostics, and the `/user/me` projection.
+
+The separate dashboard passed `npm run build` (`vue-tsc --noEmit` plus Vite). A real browser rendered `/settings` against a mocked authorized-and-banned `/api/user/me`; `[data-testid="twitch-bot-banned"]` displayed the amber warning and `/unban ronniabot` instruction. No production deployment, live unban, or provider-state mutation was performed.
+
+After merging the updated base, `cargo build --locked --release` and `python3 scripts/smoke.py --binary /target/release/ronnia` also passed: all 16 HTTP routes, both signup orders, encrypted device authorization, EventSub lifecycle, reconnect/revocation safety, DNS recovery, dry-run, and maintenance CLI checks. The smoke contract includes `twitchBotBanned` in `/user/me` and OpenAPI.
+
 ## Review fixes (2026-11-14)
 
 Verified the fixes following review of PR #57, based on `migration/rust-port` at `50c2e4a`. Rust checks ran with Rust 1.100.0 in an isolated `rust:1-bookworm`-derived toolchain after the host Rust installation became unavailable. No production provider credentials or deployment were used.

@@ -312,7 +312,18 @@ impl Runtime {
             broadcaster = owned.broadcaster,
             "Twitch revoked an EventSub subscription"
         );
-        if owned.kind == conduit::CHAT_TYPE.0
+        if owned.kind == conduit::CHAT_TYPE.0 && status == "chat_user_banned" {
+            if self
+                .store
+                .mark_twitch_chat_banned(owned.broadcaster)
+                .await?
+            {
+                tracing::warn!(
+                    broadcaster = owned.broadcaster,
+                    "chat ban persisted; the channel owner or a moderator must unban the bot"
+                );
+            }
+        } else if owned.kind == conduit::CHAT_TYPE.0
             && matches!(status, "authorization_revoked" | "user_removed")
         {
             let id = owned.broadcaster;

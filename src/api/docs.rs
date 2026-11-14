@@ -31,9 +31,15 @@ pub(super) struct UserResponse {
     is_live: bool,
     /// Whether this channel has verified, non-revoked channel:bot consent.
     twitch_bot_authorized: bool,
+    /// Whether Twitch revoked chat access because the bot is banned in chat.
+    twitch_bot_banned: bool,
 }
 impl UserResponse {
-    pub(super) fn new(user: crate::domain::User, twitch_bot_authorized: bool) -> Self {
+    pub(super) fn new(
+        user: crate::domain::User,
+        twitch_bot_authorized: bool,
+        twitch_bot_banned: bool,
+    ) -> Self {
         Self {
             osu_id: user.osu_id,
             osu_username: user.osu_username,
@@ -44,6 +50,7 @@ impl UserResponse {
             excluded_users: user.excluded_users,
             is_live: user.is_live,
             twitch_bot_authorized,
+            twitch_bot_banned,
         }
     }
 }
