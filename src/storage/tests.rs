@@ -548,7 +548,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let user = store.user_by_twitch(20).await.unwrap().unwrap();
     assert!(!user.is_live, "legacy live activity is not consent");
     assert_eq!(user.osu_username, "osu");
@@ -589,7 +589,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
     let future = directory.path().join("future.sqlite");
     {
         let connection = rusqlite::Connection::open(&future).unwrap();
-        connection.pragma_update(None, "user_version", 5).unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
     }
     assert!(Store::open(&future).await.is_err());
 }
@@ -663,6 +663,37 @@ async fn grant_activation_waits_for_active_at_but_public_consent_is_unchanged() 
     }).await.unwrap();
     assert!(store.granted_twitch_ids().await.unwrap().is_empty());
     exec(&store, "UPDATE twitch_channel_grants SET active_at=0").await;
+    assert_eq!(store.granted_twitch_ids().await.unwrap(), vec![20]);
+}
+
+#[tokio::test]
+async fn chat_ban_pauses_chat_without_revoking_the_channel_grant() {
+    let store = memory().await;
+    store.save_user(account(10, 20, "alpha")).await.unwrap();
+    grant(&store, 20).await;
+    store
+        .apply_stream_event(20, "alpha".into(), StreamEvent::Online, 1)
+        .await
+        .unwrap();
+    store
+        .apply_stream_event(20, "alpha".into(), StreamEvent::Category("21465".into()), 2)
+        .await
+        .unwrap();
+    assert!(store.user_by_twitch(20).await.unwrap().unwrap().is_live);
+
+    assert!(store.mark_twitch_chat_banned(20).await.unwrap());
+    assert!(
+        !store.mark_twitch_chat_banned(20).await.unwrap(),
+        "a repeated failure is not a new transition"
+    );
+    assert_eq!(store.granted_twitch_ids().await.unwrap(), vec![20]);
+    assert!(store.granted_twitch_channels().await.unwrap()[0].chat_blocked);
+    assert!(store.user_by_twitch(20).await.unwrap().unwrap().is_live);
+    assert!(!store.mark_twitch_chat_banned(999).await.unwrap());
+
+    assert!(store.clear_twitch_chat_ban(20).await.unwrap());
+    assert!(!store.clear_twitch_chat_ban(20).await.unwrap());
+    assert!(!store.granted_twitch_channels().await.unwrap()[0].chat_blocked);
     assert_eq!(store.granted_twitch_ids().await.unwrap(), vec![20]);
 }
 
@@ -996,7 +1027,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let active_at: i64 = scalar(
         &store,
         "SELECT active_at FROM twitch_channel_grants WHERE twitch_id=20",
@@ -1016,13 +1047,24 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         (active_at, source.as_str(), status.as_str()),
         (0, "new", "pending")
     );
+    let chat_retry_at: i64 = scalar(
+        &store,
+        "SELECT chat_retry_at FROM twitch_channel_grants WHERE twitch_id=20",
+    )
+    .await;
+    let chat_banned: bool = scalar(
+        &store,
+        "SELECT chat_banned_at IS NOT NULL FROM twitch_channel_grants WHERE twitch_id=20",
+    )
+    .await;
+    assert_eq!((chat_retry_at, chat_banned), (0, false));
     assert_eq!(store.granted_twitch_ids().await.unwrap(), vec![20]);
     let reopened = Store::open(&path).await.unwrap();
     let version: i64 = reopened
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
 }
 
 #[tokio::test]
@@ -1050,7 +1092,7 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .unwrap();
     let legacy_count: i64 = scalar(&store, "SELECT COUNT(*) FROM legacy_live").await;
     let user_count: i64 = scalar(&store, "SELECT COUNT(*) FROM users").await;
-    assert_eq!((version, legacy_count, user_count), (4, 0, 1));
+    assert_eq!((version, legacy_count, user_count), (5, 0, 1));
     assert_eq!(
         store
             .replace_legacy_live(vec![(20, "alpha".into())])
@@ -1068,6 +1110,6 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert_eq!(reopened.live_users(100, 0).await.unwrap(), vec!["alpha"]);
 }

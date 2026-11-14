@@ -20,6 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -144,7 +145,7 @@ fn found(user: Option<crate::domain::User>) -> ApiResult<Json<crate::domain::Use
         .ok_or_else(|| ApiError::not_found("Channel not found"))
 }
 
-#[utoipa::path(get, path = "/user/me", tag = "user", summary = "Get the signed-in user or pending signup", description = "Returns the public user profile without settings, a signup provider marker, or JSON null when no login is present. twitchBotAuthorized reports verified channel:bot consent; imported accounts must authorize through Twitch login before the bot can become active. An expired, deleted-account or legacy JWT session is rejected.", security((), ("session" = []), ("signup" = [])), responses((status = 200, description = "User, signup marker, or null", body = docs::MeResponse), (status = 401, description = "Invalid or expired session", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
+#[utoipa::path(get, path = "/user/me", tag = "user", summary = "Get the signed-in user or pending signup", description = "Returns the public user profile without settings, a signup provider marker, or JSON null when no login is present. twitchBotAuthorized reports verified channel:bot consent; twitchBotBanned separately reports a Twitch chat ban without implying revoked consent; imported accounts must authorize through Twitch login before the bot can become active. An expired, deleted-account or legacy JWT session is rejected.", security((), ("session" = []), ("signup" = [])), responses((status = 200, description = "User, signup marker, or null", body = docs::MeResponse), (status = 401, description = "Invalid or expired session", body = docs::ApiErrorBody), (status = 500, description = "Database unavailable", body = docs::ApiErrorBody)) )]
 async fn me(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -152,14 +153,16 @@ async fn me(
     if security::cookie(&headers, "token").is_some() {
         let user = security::authenticate(&state, &headers).await?;
         let twitch_id = user.twitch_id;
-        let authorized = state.store.call(move |db| {
+        let (authorized, chat_banned) = state.store.call(move |db| {
             Ok(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM twitch_channel_grants WHERE twitch_id=?1 AND status='granted')",
-                [twitch_id], |row| row.get::<_, bool>(0),
-            )?)
+                "SELECT status='granted',chat_banned_at IS NOT NULL FROM twitch_channel_grants WHERE twitch_id=?1",
+                [twitch_id], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+            ).optional()?.unwrap_or((false, false)))
         }).await?;
         return Ok(Json(docs::MeResponse::User(docs::UserResponse::new(
-            user, authorized,
+            user,
+            authorized,
+            chat_banned,
         ))));
     }
     if let Some(pending) = security::pending(&state, &headers).await? {

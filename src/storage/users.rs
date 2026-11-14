@@ -8,6 +8,16 @@ use serde_json::Value as Json;
 use super::{Store, sql};
 use crate::domain::{Settings, User};
 
+/// One active channel grant and whether chat creation is waiting for an unban probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelGrant {
+    pub twitch_id: i64,
+    /// Persisted ban shown by the API, including while an unban probe is due.
+    pub chat_banned: bool,
+    /// Whether creation is currently waiting for the next hourly probe.
+    pub chat_blocked: bool,
+}
+
 /// Columns every user read decodes, in `decode` order.
 const COLUMNS: &str = "osu_id,osu_username,osu_avatar_url,twitch_id,twitch_username,twitch_avatar_url,is_live,settings_json";
 /// Enabled accounts with no grant row at all: the legacy relay may still serve them.
@@ -110,7 +120,17 @@ impl Store {
     }
     /// Enabled channels with verified broadcaster consent, past the migration grace window.
     pub async fn granted_twitch_ids(&self) -> Result<Vec<i64>> {
-        self.call(|c| sql::column(c, "SELECT u.twitch_id FROM users u JOIN twitch_channel_grants g ON g.twitch_id=u.twitch_id WHERE json_extract(u.settings_json,'$.enable')=1 AND g.status='granted' AND g.active_at<=unixepoch() ORDER BY u.twitch_id", [])).await
+        Ok(self
+            .granted_twitch_channels()
+            .await?
+            .into_iter()
+            .map(|grant| grant.twitch_id)
+            .collect())
+    }
+    /// The same grant snapshot with chat-ban probes included. State subscriptions
+    /// remain desired while a channel's chat subscription waits for an unban.
+    pub async fn granted_twitch_channels(&self) -> Result<Vec<ChannelGrant>> {
+        self.call(|c| sql::all(c, "SELECT u.twitch_id,g.chat_banned_at IS NOT NULL,g.chat_banned_at IS NOT NULL AND g.chat_retry_at>unixepoch() FROM users u JOIN twitch_channel_grants g ON g.twitch_id=u.twitch_id WHERE json_extract(u.settings_json,'$.enable')=1 AND g.status='granted' AND g.active_at<=unixepoch() ORDER BY u.twitch_id", [], |row| Ok(ChannelGrant { twitch_id: row.get(0)?, chat_banned: row.get(1)?, chat_blocked: row.get(2)? }))).await
     }
     /// Enabled channels that never completed Twitch channel:bot consent.
     pub async fn legacy_channels(&self, after: i64, limit: i64) -> Result<Vec<User>> {

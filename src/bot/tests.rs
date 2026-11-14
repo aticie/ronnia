@@ -13,7 +13,7 @@ use crate::{
     domain::{StreamEvent, User},
     parser::{self, Beatmap, BeatmapKind},
     providers::Providers,
-    storage::Store,
+    storage::{ChannelGrant, Store},
 };
 use axum::{
     Router,
@@ -38,6 +38,14 @@ use tokio_tungstenite::{
         handshake::server::{Callback, ErrorResponse, Request, Response},
     },
 };
+
+fn channel_grant(twitch_id: i64) -> ChannelGrant {
+    ChannelGrant {
+        twitch_id,
+        chat_banned: false,
+        chat_blocked: false,
+    }
+}
 
 fn request_message() -> Message {
     Message {
@@ -398,6 +406,7 @@ async fn grant_and_go_live(store: &Store, twitch_id: i64, login: &str) {
 pub(super) struct Helix {
     conduit_posts: AtomicUsize,
     pub(super) creates: AtomicUsize,
+    chat_forbidden: AtomicBool,
     pub(super) deletes: AtomicUsize,
     pub(super) list_calls: AtomicUsize,
     pub(super) seeded: StdMutex<Option<Vec<Value>>>,
@@ -521,13 +530,24 @@ pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::Join
     async fn create_subscription(
         State(state): State<Arc<Helix>>,
         axum::Json(body): axum::Json<Value>,
-    ) -> axum::Json<Value> {
+    ) -> (axum::http::StatusCode, axum::Json<Value>) {
         assert_eq!(body["transport"]["method"], "conduit");
         assert_eq!(body["transport"]["conduit_id"], "conduit-1");
         assert!(body["condition"]["broadcaster_user_id"].is_string());
         let count = state.creates.fetch_add(1, Ordering::SeqCst) + 1;
-        axum::Json(
-            json!({"data":[{"id":format!("new-{count}")}],"total":1,"total_cost":1,"max_total_cost":10,"pagination":{}}),
+        if body["type"] == "channel.chat.message" && state.chat_forbidden.load(Ordering::SeqCst) {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                axum::Json(
+                    json!({"error":"Forbidden","status":403,"message":"subscription missing proper authorization"}),
+                ),
+            );
+        }
+        (
+            axum::http::StatusCode::OK,
+            axum::Json(
+                json!({"data":[{"id":format!("new-{count}")}],"total":1,"total_cost":1,"max_total_cost":10,"pagination":{}}),
+            ),
         )
     }
     async fn delete_subscription(
@@ -668,7 +688,7 @@ async fn subscription_reconcile_only_touches_owned_rows() {
     let mut subs = Subscriptions::new("conduit-1".into(), "bot".into());
     assert_eq!(subs.refresh_remote(&providers, &token).await.unwrap(), 3);
     assert!(subs.is_warm());
-    let desired = conduit::desired(&[1], "bot").unwrap();
+    let desired = conduit::desired(&[channel_grant(1)], "bot").unwrap();
     let summary = subs
         .reconcile(&providers, &desired, true, &token)
         .await
@@ -692,13 +712,118 @@ async fn subscription_reconcile_only_touches_owned_rows() {
 }
 
 #[tokio::test]
+async fn chat_forbidden_pauses_only_chat_until_a_successful_unban_probe() {
+    let (state, address, server) = helix_server().await;
+    *state.seeded.lock().unwrap() = Some(Vec::new());
+    state.chat_forbidden.store(true, Ordering::SeqCst);
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    store
+        .call(|db| {
+            db.execute("INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(1,0,'granted')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (_signals, signals) = watch::channel(Signal::default());
+    let (_actions, actions) = maintenance::actions();
+    let (targets, _target_rx) = watch::channel(1);
+    let (_topology_tx, topology) = watch::channel(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    let mut instance = Maintenance::new(
+        config,
+        store.clone(),
+        providers.clone(),
+        "conduit-1".into(),
+        "bot".into(),
+        Channels {
+            membership: store.channel_changes(),
+            signals,
+            actions,
+            targets,
+            topology,
+        },
+    );
+    instance.refresh_membership().await.unwrap();
+    let desired = conduit::desired(instance.grants.as_ref().unwrap(), "bot").unwrap();
+    let summary = instance
+        .subs
+        .reconcile(&providers, &desired, true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(summary.created, 3, "state subscriptions still succeed");
+    assert_eq!(summary.deferred, 1);
+    assert_eq!(summary.chat_unauthorized, vec![1]);
+    assert!(summary.chat_recovered.is_empty());
+    instance.apply_chat_states(&summary).await.unwrap();
+
+    instance.refresh_membership().await.unwrap();
+    assert!(instance.grants.as_ref().unwrap()[0].chat_blocked);
+    let paused = conduit::desired(instance.grants.as_ref().unwrap(), "bot").unwrap();
+    assert_eq!(paused.len(), 3, "only chat waits for the unban probe");
+    let calls = state.creates.load(Ordering::SeqCst);
+    let summary = instance
+        .subs
+        .reconcile(&providers, &paused, true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!((summary.created, summary.kept, summary.deferred), (0, 3, 0));
+    assert_eq!(
+        state.creates.load(Ordering::SeqCst),
+        calls,
+        "no tight 403 retry loop"
+    );
+
+    // The channel owner unbans the bot. The next due probe recreates chat and
+    // clears the persisted warning without any account migration.
+    state.chat_forbidden.store(false, Ordering::SeqCst);
+    store
+        .call(|db| {
+            db.execute(
+                "UPDATE twitch_channel_grants SET chat_retry_at=0 WHERE twitch_id=1",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    instance.refresh_membership().await.unwrap();
+    assert!(instance.grants.as_ref().unwrap()[0].chat_banned);
+    assert!(!instance.grants.as_ref().unwrap()[0].chat_blocked);
+    let retry = conduit::desired(instance.grants.as_ref().unwrap(), "bot").unwrap();
+    let summary = instance
+        .subs
+        .reconcile(&providers, &retry, true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(summary.created, 1);
+    assert_eq!(summary.chat_recovered, vec![1]);
+    instance.apply_chat_states(&summary).await.unwrap();
+    instance.refresh_membership().await.unwrap();
+    assert!(!instance.grants.as_ref().unwrap()[0].chat_blocked);
+    let mut changes = store.channel_changes();
+    let revision = *changes.borrow_and_update();
+    instance.apply_chat_states(&summary).await.unwrap();
+    assert_eq!(
+        *changes.borrow_and_update(),
+        revision,
+        "an ordinary chat creation does not rewrite an already-clear ban"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn incomplete_topology_defers_creations_but_still_lists_and_removes_owned_rows() {
     let (state, address, server) = helix_server().await;
     let config = mock_config(address);
     let providers = Providers::new(config, CancellationToken::new()).unwrap();
     let token = CancellationToken::new();
     let mut subs = Subscriptions::new("conduit-1".into(), "bot".into());
-    let desired = conduit::desired(&[1], "bot").unwrap();
+    let desired = conduit::desired(&[channel_grant(1)], "bot").unwrap();
     assert!(!subs.is_warm());
     let summary = subs
         .reconcile(&providers, &desired, false, &token)
@@ -2291,7 +2416,7 @@ async fn pool_grows_the_owned_topology_one_shard_at_a_time_and_never_shrinks() {
 
 #[test]
 fn desired_contains_state_and_chat_for_every_granted_channel() {
-    let rows = conduit::desired(&[1, 2], "bot").unwrap();
+    let rows = conduit::desired(&[channel_grant(1), channel_grant(2)], "bot").unwrap();
     assert_eq!(
         rows.iter()
             .filter(|row| row.kind == "stream.online")
@@ -2321,14 +2446,42 @@ fn desired_contains_state_and_chat_for_every_granted_channel() {
 }
 
 #[test]
+fn desired_skips_only_chat_while_a_channel_ban_waits_for_retry() {
+    let blocked = ChannelGrant {
+        twitch_id: 1,
+        chat_banned: true,
+        chat_blocked: true,
+    };
+    let rows = conduit::desired(&[blocked, channel_grant(2)], "bot").unwrap();
+    assert_eq!(rows.len(), 7);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.broadcaster == 1 && row.kind != conduit::CHAT_TYPE.0)
+            .count(),
+        3
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| { row.broadcaster == 1 && row.kind == conduit::CHAT_TYPE.0 })
+    );
+    assert!(
+        rows.iter()
+            .any(|row| { row.broadcaster == 2 && row.kind == conduit::CHAT_TYPE.0 })
+    );
+}
+
+#[test]
 fn desired_rejects_over_capacity_without_a_partial_set() {
-    let grants: Vec<i64> = (1..=conduit::MAX_ACTIVE_GRANTS as i64).collect();
+    let grants: Vec<ChannelGrant> = (1..=conduit::MAX_ACTIVE_GRANTS as i64)
+        .map(channel_grant)
+        .collect();
     assert_eq!(
         conduit::desired(&grants, "bot").unwrap().len(),
         conduit::MAX_EVENTS_SUBSCRIPTIONS
     );
     let mut oversized = grants;
-    oversized.push(conduit::MAX_ACTIVE_GRANTS as i64 + 1);
+    oversized.push(channel_grant(conduit::MAX_ACTIVE_GRANTS as i64 + 1));
     let error = conduit::desired(&oversized, "bot").unwrap_err().to_string();
     assert!(error.contains("2500-grant"));
     assert!(error.contains("without partial reconciliation"));

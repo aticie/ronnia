@@ -4,6 +4,14 @@ Current single-replica scale, Railpack, and grant-activation checks: 2026-11-05.
 
 The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
 
+## Chat-ban visibility and recovery (2026-11-14)
+
+Schema version 5 persists `chat_banned_at` and `chat_retry_at` on each Twitch channel grant. A `chat_user_banned` revocation or 403 chat-subscription response pauses only that channel's chat creation for one hour; consent, live eligibility, and the three state subscriptions remain intact. A later successful creation clears the persisted ban. `/user/me` exposes the state as `twitchBotBanned` independently of `twitchBotAuthorized`.
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` passed in the `rust:1-bookworm` container: **136 passed, 0 failed**. New regressions cover the schema upgrade, ban/clear transitions without grant revocation, chat-only desired-set filtering, 403 → no repeated creation POSTs → successful unban probe, provider error-body diagnostics, and the `/user/me` projection.
+
+The separate dashboard passed `npm run build` (`vue-tsc --noEmit` plus Vite). A real browser rendered `/settings` against a mocked authorized-and-banned `/api/user/me`; `[data-testid="twitch-bot-banned"]` displayed the amber warning and `/unban ronniabot` instruction. No production deployment, live unban, or provider-state mutation was performed.
+
 ## Single-replica bounded scale (2026-11-05)
 
 Implemented in a fresh checkout of `aticie/ronnia` PR #57, `migration/rust-port`, starting at remote `8f6663995c92ce00f644a90e17595307be148b7f`. The legacy checkout, bridge PR #56, and frontend PR #24 were not changed. All provider traffic below used isolated local HTTP/RFC6455 fixtures, synthetic authorization, and temporary SQLite; no production credentials or Railway deployment were used.

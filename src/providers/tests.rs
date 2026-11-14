@@ -132,11 +132,16 @@ async fn missing_beatmaps_preserve_typed_404_without_retrying() {
         extract::State,
         routing::{get, post},
     };
-    async fn missing(State(state): State<Arc<MockState>>) -> axum::http::StatusCode {
+    async fn missing(
+        State(state): State<Arc<MockState>>,
+    ) -> (axum::http::StatusCode, axum::Json<Value>) {
         state
             .map_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        axum::http::StatusCode::NOT_FOUND
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(json!({"message":"no such beatmap"})),
+        )
     }
     let state = Arc::new(MockState::default());
     let router = Router::new()
@@ -172,6 +177,7 @@ async fn missing_beatmaps_preserve_typed_404_without_retrying() {
         assert!(!error.uncertain);
         assert!(error.message.contains("404 Not Found"));
         assert!(error.message.contains(endpoint));
+        assert!(error.message.contains("no such beatmap"));
     }
     assert_eq!(state.map_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(*state.scopes.lock().unwrap(), vec!["public"]);

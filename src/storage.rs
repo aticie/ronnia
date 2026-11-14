@@ -15,6 +15,7 @@ mod users;
 
 pub use actor::Store;
 pub use deliveries::{ClaimOutcome, DeliveryOutcome};
+pub use users::ChannelGrant;
 pub(crate) use users::refresh_eligibility;
 
 #[cfg(test)]

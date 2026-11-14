@@ -1,7 +1,7 @@
 //! Stream presence: revisioned snapshots, timestamped events, legacy relay
 //! presence, and the public live-channel union.
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 
 use super::{Store, sql, users};
@@ -111,6 +111,36 @@ impl Store {
             }
             Ok(updated)
         }).await
+    }
+    /// Pause chat subscription creation for one hour without revoking consent or
+    /// stream-state subscriptions. Returns true only for a newly observed ban.
+    pub async fn mark_twitch_chat_banned(&self, twitch_id: i64) -> Result<bool> {
+        self.write_notifying(move |tx| {
+            let was_banned = tx
+                .query_row(
+                    "SELECT chat_banned_at IS NOT NULL FROM twitch_channel_grants WHERE twitch_id=?1",
+                    [twitch_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?;
+            let updated = tx.execute(
+                "UPDATE twitch_channel_grants SET chat_banned_at=COALESCE(chat_banned_at,unixepoch()),chat_retry_at=unixepoch()+3600 WHERE twitch_id=?1 AND status='granted'",
+                [twitch_id],
+            )?;
+            Ok(updated == 1 && was_banned == Some(false))
+        })
+        .await
+    }
+    /// A successful chat subscription proves the channel owner or a moderator
+    /// removed the ban; future reconciliations keep chat enabled normally.
+    pub async fn clear_twitch_chat_ban(&self, twitch_id: i64) -> Result<bool> {
+        self.write_notifying(move |tx| {
+            Ok(tx.execute(
+                "UPDATE twitch_channel_grants SET chat_banned_at=NULL,chat_retry_at=0 WHERE twitch_id=?1 AND chat_banned_at IS NOT NULL",
+                [twitch_id],
+            )? == 1)
+        })
+        .await
     }
     pub async fn revoke_twitch_channel(&self, twitch_id: i64) -> Result<()> {
         self.write_notifying(move |tx| {

@@ -558,10 +558,20 @@ impl Providers {
                 continue;
             }
             if !status.is_success() {
+                let detail = body_json(response).await.ok().and_then(|value| {
+                    value["message"]
+                        .as_str()
+                        .filter(|message| !message.is_empty())
+                        .map(|message| message.chars().take(512).collect::<String>())
+                });
+                let message = match detail {
+                    Some(detail) => format!("provider HTTP {status} at {endpoint}: {detail}"),
+                    None => format!("provider HTTP {status} at {endpoint}"),
+                };
                 return Err(ChatError::new(
                     chat && (status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT),
                     Some(status.as_u16()),
-                    format!("provider HTTP {status} at {endpoint}"),
+                    message,
                 ));
             }
             if status == StatusCode::NO_CONTENT {

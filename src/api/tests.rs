@@ -332,8 +332,33 @@ impl Browser {
         assert_eq!(user.json["osuId"], osu_id);
         assert_eq!(user.json["twitchId"], twitch_id);
         assert_eq!(user.json["twitchBotAuthorized"], true);
+        assert_eq!(user.json["twitchBotBanned"], false);
         assert!(user.json.get("settings").is_none());
     }
+}
+
+#[tokio::test]
+async fn me_distinguishes_chat_ban_from_missing_channel_consent() {
+    let fixture = Fixture::new().await;
+    let mut browser = fixture.browser();
+    browser.signup("twitch", 10, 20).await;
+    assert!(
+        fixture
+            .state
+            .store
+            .mark_twitch_chat_banned(20)
+            .await
+            .unwrap()
+    );
+    let banned = browser.get("/user/me").await;
+    assert_eq!(banned.status, StatusCode::OK);
+    assert_eq!(banned.json["twitchBotAuthorized"], true);
+    assert_eq!(banned.json["twitchBotBanned"], true);
+
+    assert!(fixture.state.store.clear_twitch_chat_ban(20).await.unwrap());
+    let recovered = browser.get("/user/me").await;
+    assert_eq!(recovered.json["twitchBotAuthorized"], true);
+    assert_eq!(recovered.json["twitchBotBanned"], false);
 }
 
 #[tokio::test]
@@ -1425,8 +1450,9 @@ async fn debug_documentation_describes_real_routes_payloads_and_cookie_security(
     let properties = spec["components"]["schemas"]["UserResponse"]["properties"]
         .as_object()
         .unwrap();
-    assert_eq!(properties.len(), 9);
+    assert_eq!(properties.len(), 10);
     assert_eq!(properties["twitchBotAuthorized"]["type"], "boolean");
+    assert_eq!(properties["twitchBotBanned"]["type"], "boolean");
     assert!(properties.get("settings").is_none());
     for field in actual.as_object().unwrap().keys() {
         assert!(

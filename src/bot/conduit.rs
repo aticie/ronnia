@@ -4,7 +4,11 @@
 //! process persisted; no account is modified here.
 
 use super::backoff::Backoff;
-use crate::{config::Config, providers::Providers, storage::Store};
+use crate::{
+    config::Config,
+    providers::Providers,
+    storage::{ChannelGrant, Store},
+};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Method;
 use rusqlite::{OptionalExtension, params};
@@ -102,30 +106,34 @@ pub(super) struct Desired {
     pub(super) user: Option<String>,
 }
 
-/// Subscription set for one runtime identity. Both state and chat subscriptions
-/// cover every enabled+granted channel; stream state only gates request handling.
-pub(super) fn desired(grants: &[i64], bot_id: &str) -> Result<Vec<Desired>> {
+/// Subscription set for one runtime identity. State subscriptions cover every
+/// enabled+granted channel; a chat-banned channel is probed only after its
+/// persisted retry deadline. Stream state only gates request handling.
+pub(super) fn desired(grants: &[ChannelGrant], bot_id: &str) -> Result<Vec<Desired>> {
     ensure!(
         grants.len() <= MAX_ACTIVE_GRANTS,
         "EventSub degraded capacity: {} active grants exceed the {MAX_ACTIVE_GRANTS}-grant / {MAX_EVENTS_SUBSCRIPTIONS}-subscription audit safety bound; retaining existing subscriptions without partial reconciliation",
         grants.len()
     );
     let mut desired = Vec::with_capacity(grants.len() * (STATE_TYPES.len() + 1));
-    for id in grants {
+    for grant in grants {
+        let id = grant.twitch_id;
         for (kind, version) in STATE_TYPES {
             desired.push(Desired {
                 kind,
                 version,
-                broadcaster: *id,
+                broadcaster: id,
                 user: None,
             });
         }
-        desired.push(Desired {
-            kind: CHAT_TYPE.0,
-            version: CHAT_TYPE.1,
-            broadcaster: *id,
-            user: Some(bot_id.to_owned()),
-        });
+        if !grant.chat_blocked {
+            desired.push(Desired {
+                kind: CHAT_TYPE.0,
+                version: CHAT_TYPE.1,
+                broadcaster: id,
+                user: Some(bot_id.to_owned()),
+            });
+        }
     }
     Ok(desired)
 }
@@ -154,6 +162,10 @@ pub(super) struct Summary {
     pub(super) removed: usize,
     pub(super) kept: usize,
     pub(super) deferred: usize,
+    /// Chat creations rejected because the channel does not authorize the bot.
+    pub(super) chat_unauthorized: Vec<i64>,
+    /// Successful chat creations, used to clear a previously persisted ban.
+    pub(super) chat_recovered: Vec<i64>,
 }
 
 impl Subscriptions {
@@ -390,6 +402,9 @@ impl Subscriptions {
                     present.insert(key);
                     summary.created += 1;
                     created += 1;
+                    if *kind == CHAT_TYPE.0 {
+                        summary.chat_recovered.push(*broadcaster);
+                    }
                     self.blocked.remove(&block_key);
                     tracing::info!(kind = %kind, broadcaster = *broadcaster, "created EventSub subscription");
                 }
@@ -400,6 +415,13 @@ impl Subscriptions {
                         "EventSub subscription already exists remotely; re-listing"
                     );
                     return Ok(None);
+                }
+                Err(error) if *kind == CHAT_TYPE.0 && error.status == Some(403) => {
+                    // Maintenance persists the ban and schedules the next hourly
+                    // probe; the grant and state subscriptions stay untouched.
+                    summary.deferred += 1;
+                    summary.chat_unauthorized.push(*broadcaster);
+                    self.blocked.remove(&block_key);
                 }
                 Err(error) => {
                     summary.deferred += 1;
