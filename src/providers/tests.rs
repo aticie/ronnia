@@ -11,6 +11,7 @@ struct MockState {
     scopes: std::sync::Mutex<Vec<String>>,
     map_calls: std::sync::atomic::AtomicUsize,
     chat_calls: std::sync::atomic::AtomicUsize,
+    request_targets: std::sync::Mutex<Vec<String>>,
 }
 async fn mock_token(
     axum::extract::State(state): axum::extract::State<Arc<MockState>>,
@@ -175,5 +176,97 @@ async fn missing_beatmaps_preserve_typed_404_without_retrying() {
     }
     assert_eq!(state.map_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(*state.scopes.lock().unwrap(), vec!["public"]);
+    server.abort();
+}
+
+#[test]
+fn retry_after_accepts_http_dates_and_retains_bounds_and_fallbacks() {
+    fn response(retry: Option<&str>, reset: Option<&str>) -> Response {
+        let mut builder = axum::http::Response::builder();
+        if let Some(retry) = retry {
+            builder = builder.header(reqwest::header::RETRY_AFTER, retry);
+        }
+        if let Some(reset) = reset {
+            builder = builder.header("Ratelimit-Reset", reset);
+        }
+        builder.body("").unwrap().into()
+    }
+
+    let future =
+        httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_secs(4_102_444_800));
+    assert_eq!(
+        retry_after(&response(Some(&future), Some("1")), 3),
+        Duration::from_secs(60)
+    );
+    for past in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994",
+    ] {
+        assert_eq!(
+            retry_after(&response(Some(past), None), 5),
+            Duration::from_secs(1)
+        );
+    }
+    for (retry, reset, attempt, seconds) in [
+        (Some("12"), Some("1"), 3, 12),
+        (Some("0"), None, 0, 1),
+        (Some("999"), None, 0, 60),
+        (Some("invalid"), Some("4102444800"), 0, 60),
+        (Some("invalid"), None, 3, 8),
+        (None, None, 100, 32),
+    ] {
+        assert_eq!(
+            retry_after(&response(retry, reset), attempt),
+            Duration::from_secs(seconds)
+        );
+    }
+}
+
+#[tokio::test]
+async fn username_path_encoding_preserves_the_actual_request_target() {
+    use axum::{
+        Router,
+        extract::{OriginalUri, State},
+        routing::post,
+    };
+    async fn user(
+        State(state): State<Arc<MockState>>,
+        OriginalUri(uri): OriginalUri,
+    ) -> axum::Json<Value> {
+        state.request_targets.lock().unwrap().push(uri.to_string());
+        axum::Json(json!({"id":7}))
+    }
+    let state = Arc::new(MockState::default());
+    let router = Router::new()
+        .route("/oauth/token", post(mock_token))
+        .fallback(user)
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut config = Config::from_env().unwrap();
+    config.osu_client_id = "test".into();
+    config.osu_client_secret = "test".into();
+    config.osu_api_base = format!("http://{address}/api/v2");
+    config.osu_oauth_base = format!("http://{address}/oauth");
+    let providers = Providers::new(Arc::new(config), CancellationToken::new()).unwrap();
+    let user = providers
+        .get_user_info(
+            "name with+plus/slash?query#hash%percent&._~-é",
+            Some("osu"),
+            Some("username"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(user["id"], 7);
+    assert_eq!(
+        *state.request_targets.lock().unwrap(),
+        vec![
+            "/api/v2/users/name%20with%2Bplus%2Fslash%3Fquery%23hash%25percent%26._~-%C3%A9/osu?key=username"
+        ]
+    );
     server.abort();
 }

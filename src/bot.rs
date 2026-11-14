@@ -46,14 +46,17 @@ const FEEDBACK_PACE: Duration = Duration::from_millis(1500);
 /// The bot worker never takes the API down. Transport failures are logged and
 /// retried with capped jitter; a missing grant leaves the process waiting while
 /// the HTTP API keeps serving.
-pub async fn run(config: Arc<Config>, store: Store, shutdown: CancellationToken) -> Result<()> {
+pub async fn run(
+    config: Arc<Config>,
+    store: Store,
+    auth: TwitchAuth,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let providers = Providers::new(config.clone(), shutdown.clone())?;
-    let auth = TwitchAuth::new(config.clone(), store.clone())?;
     let clock = delivery::Clock::new();
     store
         .call(|db| {
-            db.execute("UPDATE deliveries SET status='uncertain',error='process stopped during send; not replayed' WHERE status='sending'", [])?;
-            db.execute("UPDATE deliveries SET status='failed',error='process stopped before send; safe to submit a new request' WHERE status='pending'", [])?;
+            db.execute("UPDATE deliveries SET status='failed',error='process stopped before send; safe to submit a new request' WHERE source='new' AND status='pending'", [])?;
             Ok(())
         })
         .await?;
@@ -84,7 +87,7 @@ pub async fn run(config: Arc<Config>, store: Store, shutdown: CancellationToken)
             config,
             store,
             providers,
-            auth,
+            auth.clone(),
             identity_tx,
             RequestIngress {
                 requests: requests_tx,
@@ -93,6 +96,9 @@ pub async fn run(config: Arc<Config>, store: Store, shutdown: CancellationToken)
             shutdown,
         ),
     );
+    // A cancelled caller may leave a single-use token rotation persisting behind
+    // SQLite mailbox backpressure. Do not stop the runtime before that write lands.
+    auth.finish_refresh().await;
     Ok(())
 }
 

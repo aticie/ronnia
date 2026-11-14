@@ -135,6 +135,7 @@ class EventSub:
         self.delay_welcome = threading.Event()
         self.delay_welcome.set()
         self.handoff_opened = threading.Event()
+        self.handoff_candidate = None
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -163,6 +164,8 @@ class EventSub:
                                              "alive": True, "lock": threading.Lock(), "welcomed": False,
                                              "welcome_at": None, "path": self.path}
                 if "handoff=1" in self.path:
+                    with owner.lock:
+                        owner.handoff_candidate = number
                     owner.handoff_opened.set()
                     try:
                         while not owner.delay_welcome.wait(.1):
@@ -322,15 +325,21 @@ class EventSub:
 
     def revoke(self):
         subscription = self.subscription("channel.chat.message")
-        subscription["status"] = "authorization_revoked"
-        self.providers.chat_revoked = True
-        self.envelope(max(self.attached()), "revocation", {"subscription": subscription}, subscription)
+        check(subscription is not None, "Chat subscription missing before revocation")
+        number = self.shard_number(self.route(101))
+        check(number is not None, "Chat shard missing before revocation")
         with self.providers.lock:
-            self.providers.subscriptions.pop(subscription["id"], None)
+            self.providers.subscriptions[subscription["id"]]["status"] = "authorization_revoked"
+            uid = int(subscription["condition"]["broadcaster_user_id"])
+            self.providers.user_authorizations[uid] = [
+                scope for scope in self.providers.user_authorizations.get(uid, []) if scope != "channel:bot"]
+        subscription["status"] = "authorization_revoked"
+        self.envelope(number, "revocation", {"subscription": subscription}, subscription)
 
     def handoff(self, shard_id=0, reconnect_url=None):
         self.delay_welcome.clear()
         self.handoff_opened.clear()
+        self.handoff_candidate = None
         old = self.shard_number(shard_id)
         check(old is not None, f"Shard {shard_id} is not attached")
         self.envelope(old, "session_reconnect", {"session": {"id": self.clients[old]["session"],
@@ -390,7 +399,7 @@ class Providers:
         self.bot_user_id = "999"
         self.bot_expires_in = 30
         self.refreshes = 0
-        self.chat_revoked = False
+        self.user_authorizations = {}
         self.stream_entered = threading.Event()
         self.stream_release = threading.Event()
         self.stream_release.set()
@@ -507,6 +516,10 @@ class Providers:
                     owner.tokens[key] += 1
                     code = body.get("code")
                     token = "user-" + str(code) if code else f"app-{key}-{owner.tokens[key]}"
+                    if provider == "twitch" and code:
+                        with owner.lock:
+                            owner.user_authorizations[int(code)] = (
+                                [] if owner.invalid_scopes or owner.missing_user_scope else ["channel:bot"])
                     return self.send_json(200, {"access_token": token, "expires_in": 3600,
                                                "refresh_token": "synthetic-refresh", "token_type": "bearer"})
                 if path == "/twitch/oauth/validate":
@@ -525,7 +538,20 @@ class Providers:
                     identity = int(auth.removeprefix("user-"))
                     return self.send_json(200, {"client_id": "synthetic-twitch", "login": "streamer" if identity == 101 else f"streamer{identity}",
                         "user_id": str(identity), "expires_in": 3600,
-                        "scopes": [] if owner.invalid_scopes or owner.missing_user_scope else ["channel:bot"]})
+                        "scopes": owner.user_authorizations.get(identity, [])})
+                if path == "/twitch/helix/authorization/users":
+                    check(method == "GET", "Authorization lookup must use GET")
+                    check(auth.startswith("app-twitch:"), "Authorization lookup lacks app bearer")
+                    check(self.headers.get("Client-Id") == "synthetic-twitch",
+                          "Authorization lookup has wrong Client-Id")
+                    ids = query.get("user_id", [])
+                    check(1 <= len(ids) <= 10 and all(uid.isdigit() for uid in ids),
+                          "Authorization lookup must request 1..10 user IDs")
+                    with owner.lock:
+                        rows = [{"user_id": uid, "has_authorized": int(uid) in owner.user_authorizations,
+                                 "scopes": list(owner.user_authorizations.get(int(uid), []))}
+                                for uid in ids]
+                    return self.send_json(200, {"data": rows})
                 if path == "/twitch/helix/users":
                     identity = int(auth.removeprefix("user-"))
                     login = "streamer" if identity == 101 else f"streamer{identity}"
@@ -604,8 +630,19 @@ class Providers:
                             owner.subscription_entered.set()
                             check(owner.subscription_release.wait(45), "Subscription stall was not released")
                         if method == "GET":
-                            return self.send_json(200, {"data": list(owner.subscriptions.values()), "pagination": {},
-                                                       "total": len(owner.subscriptions), "total_cost": 0, "max_total_cost": 10000})
+                            if "conduit_id" in query:
+                                check(not ({"first", "type", "status", "user_id"} & query.keys()),
+                                      "Conduit subscription listing combined incompatible filters")
+                            with owner.lock:
+                                rows = [dict(row) for row in owner.subscriptions.values()
+                                        if "conduit_id" not in body or
+                                        (row["transport"].get("method") == "conduit"
+                                         and row["transport"].get("conduit_id") == body["conduit_id"])]
+                            offset = int(body.get("after", "0"))
+                            page = rows[offset:offset + 100]
+                            pagination = {"cursor": str(offset + 100)} if offset + 100 < len(rows) else {}
+                            return self.send_json(200, {"data": page, "pagination": pagination,
+                                                       "total": len(rows), "total_cost": 0, "max_total_cost": 10000})
                         if method == "DELETE":
                             owner.subscriptions.pop(body["id"], None)
                             self.send_response(204)
@@ -621,7 +658,8 @@ class Providers:
                             if body["type"] == "channel.chat.message":
                                 check(condition.get("user_id") == owner.bot_user_id, "Chat subscription missing bot user_id")
                                 owner.chat_post_attempts += 1
-                                if owner.chat_revoked:
+                                if "channel:bot" not in owner.user_authorizations.get(
+                                        int(condition["broadcaster_user_id"]), []):
                                     return self.send_json(403, {"error": "Forbidden", "status": 403,
                                                                 "message": "authorization revoked"})
                             else:

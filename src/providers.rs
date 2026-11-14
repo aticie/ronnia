@@ -7,6 +7,7 @@ use crate::{
     twitch_auth::TwitchAuth,
 };
 use anyhow::{Context, Result, bail};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -17,6 +18,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const USER_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 pub struct LiveStream {
     pub id: i64,
@@ -675,7 +681,7 @@ impl Providers {
         game_mode: Option<&str>,
         key: Option<&str>,
     ) -> Result<Value> {
-        let encoded: String = url::form_urlencoded::byte_serialize(user_id.as_bytes()).collect();
+        let encoded = utf8_percent_encode(user_id, USER_PATH_ENCODE_SET);
         let mut endpoint = format!("users/{encoded}");
         if let Some(mode) = game_mode {
             if !matches!(mode, "osu" | "taiko" | "fruits" | "mania") {
@@ -852,7 +858,19 @@ fn retry_after(response: &Response, attempt: u32) -> Duration {
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.parse::<u64>().ok())
+        .and_then(|value| {
+            value.parse::<u64>().ok().or_else(|| {
+                httpdate::parse_http_date(value).ok().map(|date| {
+                    let delay = date
+                        .duration_since(std::time::SystemTime::now())
+                        .unwrap_or_default();
+                    // Do not retry before the server's whole-second deadline.
+                    delay
+                        .as_secs()
+                        .saturating_add(u64::from(delay.subsec_nanos() != 0))
+                })
+            })
+        })
         .or_else(|| {
             response
                 .headers()

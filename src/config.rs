@@ -1,7 +1,12 @@
 //! Runtime configuration parsed from the environment, validated once at startup
 //! with keyed diagnostics.
 
-use std::{env, net::IpAddr, path::PathBuf, str::FromStr};
+use std::{
+    env,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, bail};
 use url::Url;
@@ -121,7 +126,7 @@ fn within<T: PartialOrd + Copy + std::fmt::Display>(
     }
 }
 
-fn origin(name: &str, value: &str) -> Result<()> {
+fn origin(name: &str, value: &str) -> Result<String> {
     let url = Url::parse(value).with_context(|| format!("Invalid {name}"))?;
     let clean = matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
@@ -133,12 +138,23 @@ fn origin(name: &str, value: &str) -> Result<()> {
     if !clean {
         bail!("{name} must be an HTTP(S) origin without path, query, fragment or credentials");
     }
+    Ok(url.origin().ascii_serialization())
+}
+
+fn validate_database_path(path: &Path) -> Result<()> {
+    if path.as_os_str().to_string_lossy().trim().is_empty() {
+        bail!("DATABASE_PATH must not be empty or whitespace");
+    }
     Ok(())
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let api_origin = value("API_ORIGIN", "http://localhost:8080");
+        let api_origin = origin("API_ORIGIN", &value("API_ORIGIN", "http://localhost:8080"))?;
+        let public_origin = origin(
+            "PUBLIC_ORIGIN",
+            &value("PUBLIC_ORIGIN", "http://localhost:3000"),
+        )?;
         let twitch_token_key = match env::var("TWITCH_TOKEN_KEY") {
             Ok(value) if !value.is_empty() => {
                 let bytes = hex::decode(value)
@@ -164,10 +180,10 @@ impl Config {
             database_path: value("DATABASE_PATH", "ronnia.sqlite3").into(),
             bind: parsed("BIND_IP", IpAddr::from([0, 0, 0, 0]))?,
             bind_port: parsed("BIND_PORT", 8080)?,
-            public_origin: value("PUBLIC_ORIGIN", "http://localhost:3000"),
+            public_origin,
             cookie_secure: parsed("COOKIE_SECURE", api_origin.starts_with("https://"))?,
             debug_mode: parsed("DEBUG_MODE", false)?,
-            twitch_client_id: value("TWITCH_CLIENT_ID", ""),
+            twitch_client_id: value("TWITCH_CLIENT_ID", "").trim().to_owned(),
             twitch_client_secret: value("TWITCH_CLIENT_SECRET", ""),
             twitch_redirect_uri: value(
                 "TWITCH_REDIRECT_URI",
@@ -222,8 +238,7 @@ impl Config {
         {
             bail!("Intervals and expiration durations must be positive");
         }
-        origin("PUBLIC_ORIGIN", &result.public_origin)?;
-        origin("API_ORIGIN", &result.api_origin)?;
+        validate_database_path(&result.database_path)?;
         if result.api_origin.starts_with("https://") && !result.cookie_secure {
             bail!("COOKIE_SECURE must be true for an HTTPS API_ORIGIN");
         }
@@ -231,18 +246,18 @@ impl Config {
     }
 
     pub fn validate_serve(&self) -> Result<()> {
-        if !self.bot_enabled {
-            return Ok(());
-        }
         for (key, val) in [
             ("TWITCH_CLIENT_ID", &self.twitch_client_id),
             ("TWITCH_CLIENT_SECRET", &self.twitch_client_secret),
             ("OSU_CLIENT_ID", &self.osu_client_id),
             ("OSU_CLIENT_SECRET", &self.osu_client_secret),
         ] {
-            if val.is_empty() {
-                bail!("{key} is required when the bot is enabled");
+            if val.trim().is_empty() {
+                bail!("{key} is required to serve the OAuth API");
             }
+        }
+        if !self.bot_enabled {
+            return Ok(());
         }
         if self.twitch_token_key.is_none() {
             bail!(
@@ -267,3 +282,6 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

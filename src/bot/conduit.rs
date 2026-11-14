@@ -23,7 +23,7 @@ pub const STATE_TYPES: [(&str, &str); 3] = [
     ("channel.update", "2"),
 ];
 pub const CHAT_TYPE: (&str, &str) = ("channel.chat.message", "1");
-const MAX_LIST_PAGES: usize = 100;
+const MAX_CONDUIT_LIST_PAGES: usize = 100;
 const CREATE_PACE: Duration = Duration::from_millis(200);
 const MAX_CREATIONS_PER_PASS: usize = 200;
 pub(super) const MAX_EVENTS_SUBSCRIPTIONS: usize = 10_000;
@@ -145,6 +145,7 @@ pub(super) struct Subscriptions {
     bot_id: String,
     remote: BTreeMap<String, Remote>,
     warm: bool,
+    audit_removed: usize,
     blocked: BTreeMap<String, Backoff>,
 }
 
@@ -163,6 +164,7 @@ impl Subscriptions {
             bot_id,
             remote: BTreeMap::new(),
             warm: false,
+            audit_removed: 0,
             blocked: BTreeMap::new(),
         }
     }
@@ -179,7 +181,41 @@ impl Subscriptions {
         providers: &Providers,
         shutdown: &CancellationToken,
     ) -> Result<usize> {
-        let mut query = vec![("first".to_owned(), "100".to_owned())];
+        self.refresh_remote_bounded(providers, shutdown, MAX_EVENTS_SUBSCRIPTIONS)
+            .await
+    }
+
+    pub(super) async fn refresh_remote_bounded(
+        &mut self,
+        providers: &Providers,
+        shutdown: &CancellationToken,
+        capacity: usize,
+    ) -> Result<usize> {
+        for _ in 0..2 {
+            if let Some(count) = self
+                .refresh_remote_pass(providers, shutdown, capacity)
+                .await?
+            {
+                return Ok(count);
+            }
+        }
+        bail!("disabled subscription cleanup made progress; complete audit must retry")
+    }
+
+    async fn refresh_remote_pass(
+        &mut self,
+        providers: &Providers,
+        shutdown: &CancellationToken,
+        capacity: usize,
+    ) -> Result<Option<usize>> {
+        ensure!(capacity > 0, "subscription audit capacity must be positive");
+        // One lookahead page permits stale-row cleanup even when every enabled
+        // subscription occupies its own page at the active capacity boundary.
+        let page_bound = capacity.saturating_add(1);
+        let mut removed = 0usize;
+        // Twitch supports conduit_id as the sole filter. Do not let another
+        // application's transports consume our bounded audit page allowance.
+        let mut query = vec![("conduit_id".to_owned(), self.conduit.clone())];
         let mut seen_cursors: BTreeSet<String> = BTreeSet::new();
         let mut rows = BTreeMap::new();
         let mut pages = 0usize;
@@ -198,19 +234,44 @@ impl Subscriptions {
                     .as_str()
                     .filter(|id| !id.is_empty())
                     .context("subscription omitted id")?;
-                let Some(row) = owned(row, &self.conduit, None) else {
+                let Some(owned) = owned(row, &self.conduit, None) else {
                     continue;
                 };
+                if row["status"]
+                    .as_str()
+                    .context("owned subscription omitted status")?
+                    != "enabled"
+                {
+                    ensure!(
+                        removed < capacity,
+                        "disabled subscription cleanup exceeded the safety bound"
+                    );
+                    let query = vec![("id".to_owned(), id.to_owned())];
+                    match providers
+                        .twitch_request(Method::DELETE, "eventsub/subscriptions", &query, None)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) if error.status == Some(404) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    removed += 1;
+                    self.audit_removed = self.audit_removed.saturating_add(1);
+                    // Safe even if pagination later fails: only positively
+                    // owned disabled rows are touched, never a partial active
+                    // cache or a foreign transport.
+                    continue;
+                }
                 rows.insert(
                     id.to_owned(),
                     Remote {
-                        kind: row.kind.to_owned(),
-                        broadcaster: row.broadcaster,
-                        user: row.user.map(str::to_owned),
+                        kind: owned.kind.to_owned(),
+                        broadcaster: owned.broadcaster,
+                        user: owned.user.map(str::to_owned),
                     },
                 );
                 ensure!(
-                    rows.len() <= MAX_EVENTS_SUBSCRIPTIONS,
+                    rows.len() <= capacity,
                     "owned subscription list exceeds the safety bound"
                 );
             }
@@ -220,7 +281,7 @@ impl Subscriptions {
                 .filter(|cursor| !cursor.is_empty())
                 .map(str::to_owned);
             match next {
-                Some(cursor) if pages < MAX_LIST_PAGES => {
+                Some(cursor) if pages < page_bound => {
                     ensure!(
                         seen_cursors.insert(cursor.clone()),
                         "subscription pagination repeated a cursor"
@@ -232,9 +293,14 @@ impl Subscriptions {
                 None => break,
             }
         }
+        if removed > 0 {
+            // Deletion can invalidate index-based pagination. Never publish a
+            // potentially skipped enabled row; re-list after making safe progress.
+            return Ok(None);
+        }
         self.remote = rows;
         self.warm = true;
-        Ok(self.remote.len())
+        Ok(Some(self.remote.len()))
     }
 
     /// Bring the remote subscription set to `desired`, deleting only entries
@@ -273,7 +339,10 @@ impl Subscriptions {
         allow_create: bool,
         shutdown: &CancellationToken,
     ) -> Result<Option<Summary>> {
-        let mut summary = Summary::default();
+        let mut summary = Summary {
+            removed: std::mem::take(&mut self.audit_removed),
+            ..Summary::default()
+        };
         let desired_map: BTreeMap<(&str, i64), &Desired> = desired
             .iter()
             .map(|row| ((row.kind, row.broadcaster), row))
@@ -537,7 +606,7 @@ async fn list_conduits(providers: &Providers) -> Result<BTreeMap<String, u32>> {
             .map(str::to_owned);
         let Some(next) = next else { break };
         ensure!(
-            pages < MAX_LIST_PAGES,
+            pages < MAX_CONDUIT_LIST_PAGES,
             "conduit pagination exceeded the page bound"
         );
         ensure!(

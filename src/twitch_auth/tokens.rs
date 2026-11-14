@@ -14,6 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use reqwest::StatusCode;
 use serde_json::Value;
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 /// Rotated tokens plus their expiry. Refresh tokens are single use, so the caller must
@@ -42,30 +43,53 @@ pub(super) enum RefreshError {
 }
 
 impl TwitchAuth {
-    /// Rotate and persist the stored tokens, turning a definitive revocation into an
-    /// error. `Ok(None)` means another writer advanced the row; the caller must reload.
+    /// Transfer the single-flight gate to a durable refresh owner. Dropping this
+    /// caller (timeout, shutdown, or task abort) never cancels an exchange whose
+    /// single-use token may already have been consumed. The bounded HTTP request
+    /// and revision-CAS persistence finish before the gate can be released.
     pub(super) async fn rotate(
         &self,
         grant: &StoredGrant,
         current: Credentials,
+        single_flight: OwnedMutexGuard<()>,
         shutdown: &CancellationToken,
-    ) -> Result<Option<(Credentials, i64)>> {
-        match self.refresh_tokens(&current, shutdown).await {
-            Ok(rotated) => Ok(self
-                .persist_refresh(
-                    grant.revision,
-                    &grant.user_id,
-                    &grant.scopes,
-                    rotated.expires_at,
-                    &rotated.credentials,
-                )
-                .await?
-                .map(|revision| (rotated.credentials, revision))),
-            Err(RefreshError::Invalid(error)) => {
-                self.revoke(grant.revision, error).await?;
-                Ok(None)
-            }
-            Err(RefreshError::Transient(error)) => Err(error),
+    ) -> Result<(OwnedMutexGuard<()>, Option<(Credentials, i64)>)> {
+        if shutdown.is_cancelled() {
+            bail!("refreshing Twitch bot token cancelled");
+        }
+        let auth = self.clone();
+        let revision = grant.revision;
+        let user_id = grant.user_id.clone();
+        let mut rotation = tokio::spawn(async move {
+            let result = match auth.refresh_tokens(&current).await {
+                Ok(rotated) => {
+                    // Stop at the success/persistence boundary in regression tests.
+                    #[cfg(test)]
+                    if let Some((received, resume)) =
+                        { auth.before_refresh_persist.lock().await.take() }
+                    {
+                        received.cancel();
+                        resume.cancelled().await;
+                    }
+                    auth.persist_refresh(
+                        revision,
+                        &user_id,
+                        rotated.expires_at,
+                        &rotated.credentials,
+                    )
+                    .await
+                    .map(|revision| revision.map(|revision| (rotated.credentials, revision)))
+                }
+                Err(RefreshError::Invalid(error)) => {
+                    auth.revoke(revision, error).await.map(|()| None)
+                }
+                Err(RefreshError::Transient(error)) => Err(error),
+            };
+            result.map(|result| (single_flight, result))
+        });
+        tokio::select! {
+            result = &mut rotation => result.context("Twitch bot refresh task failed")?,
+            _ = shutdown.cancelled() => bail!("refreshing Twitch bot token cancelled"),
         }
     }
 
@@ -82,7 +106,6 @@ impl TwitchAuth {
     async fn refresh_tokens(
         &self,
         current: &Credentials,
-        shutdown: &CancellationToken,
     ) -> std::result::Result<TokenGrant, RefreshError> {
         let mut form = vec![
             ("grant_type", "refresh_token"),
@@ -90,12 +113,12 @@ impl TwitchAuth {
         ];
         form.extend(self.client_form());
         let response = self
-            .send(
-                self.client.post(self.endpoint("/token")).form(&form),
-                shutdown,
-                "refreshing Twitch bot token",
-            )
+            .client
+            .post(self.endpoint("/token"))
+            .form(&form)
+            .send()
             .await
+            .context("refreshing Twitch bot token failed")
             .map_err(RefreshError::Transient)?;
         let status = response.status();
         let body = read_body(response).await.map_err(RefreshError::Transient)?;

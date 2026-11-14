@@ -249,10 +249,14 @@ class Proof:
         check(self.pm_count("durable_overlap") == self.stats("durable_overlap") == 1, "Overlap duplicate delivered twice")
         old = self.ws.handoff(0)
         eventually(self.ws.handoff_opened.is_set, "make-before-break candidate opened", 10)
+        candidate = self.ws.handoff_candidate
+        check(candidate is not None and candidate > old, "Handoff did not open a new candidate socket")
         self.delivered("handoff_old_live", uid=102, number=old)
         self.delivered("handoff_peer_live", uid=103)
         self.ws.delay_welcome.set()
-        eventually(lambda: self.ws.shard_number(0) not in (old, None), "handoff candidate attached", 15)
+        eventually(lambda: self.ws.clients[candidate]["alive"] and self.ws.clients[candidate]["welcomed"]
+                   and self.ws.shard_number(0) == candidate, "exact live handoff candidate attached", 15)
+        self.delivered("handoff_new_live", uid=102, number=candidate)
         eventually(lambda: not self.ws.clients[old]["alive"], "retired handoff socket joined/closed", 10)
         check(self.ws.shard_number(1) == healthy, "Handoff restarted an unrelated peer")
         # Foreign-origin reconnect URLs must never receive a connection.

@@ -10,8 +10,8 @@ use super::{
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{OptionalExtension, params, params_from_iter, types::Value};
 
-/// Raw `twitch_bot_auth` columns, before the scopes JSON is parsed.
-type RawGrant = (String, String, Vec<u8>, i64, String, i64, i64);
+/// Stored identity, encrypted tokens, and lifecycle revision.
+type RawGrant = (String, String, Vec<u8>, i64, i64, i64);
 
 /// A row of `twitch_bot_auth`. Ciphertext is opaque to consumers; no tokens are exposed.
 pub(super) struct StoredGrant {
@@ -19,7 +19,6 @@ pub(super) struct StoredGrant {
     pub(super) login: String,
     pub(super) ciphertext: Vec<u8>,
     pub(super) expires_at: i64,
-    pub(super) scopes: Vec<String>,
     pub(super) validated_at: i64,
     pub(super) revision: i64,
 }
@@ -31,7 +30,7 @@ impl TwitchAuth {
             .call(|connection| {
                 Ok(connection
                     .query_row(
-                        "SELECT user_id,login,ciphertext,expires_at,scopes_json,validated_at,revision \
+                        "SELECT user_id,login,ciphertext,expires_at,validated_at,revision \
                          FROM twitch_bot_auth WHERE singleton=1",
                         [],
                         |row| {
@@ -42,28 +41,22 @@ impl TwitchAuth {
                                 row.get(3)?,
                                 row.get(4)?,
                                 row.get(5)?,
-                                row.get(6)?,
                             ))
                         },
                     )
                     .optional()?)
             })
             .await?;
-        row.map(
-            |(user_id, login, ciphertext, expires_at, scopes_json, validated_at, revision)| {
-                Ok(StoredGrant {
-                    user_id,
-                    login,
-                    ciphertext,
-                    expires_at,
-                    scopes: serde_json::from_str(&scopes_json)
-                        .context("stored Twitch bot scopes are invalid")?,
-                    validated_at,
-                    revision,
-                })
+        Ok(row.map(
+            |(user_id, login, ciphertext, expires_at, validated_at, revision)| StoredGrant {
+                user_id,
+                login,
+                ciphertext,
+                expires_at,
+                validated_at,
+                revision,
             },
-        )
-        .transpose()
+        ))
     }
 
     /// Decrypt the stored tokens; the user id is the associated data, so a moved or
@@ -88,21 +81,18 @@ impl TwitchAuth {
         &self,
         revision: i64,
         user_id: &str,
-        scopes: &[String],
         expires_at: i64,
         credentials: &Credentials,
     ) -> Result<Option<i64>> {
         let ciphertext = crypto::encrypt(&self.key, user_id, credentials)?;
-        let scopes_json = serde_json::to_string(scopes)?;
         let changed = self
             .swap(
                 "UPDATE twitch_bot_auth \
-                 SET ciphertext=?1,expires_at=?2,scopes_json=?3,validated_at=0,revision=revision+1 \
-                 WHERE singleton=1 AND revision=?4 AND validated_at<>?5",
+                 SET ciphertext=?1,expires_at=?2,validated_at=0,revision=revision+1 \
+                 WHERE singleton=1 AND revision=?3 AND validated_at<>?4",
                 vec![
                     ciphertext.into(),
                     expires_at.into(),
-                    scopes_json.into(),
                     revision.into(),
                     UNUSABLE.into(),
                 ],

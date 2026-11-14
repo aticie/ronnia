@@ -30,7 +30,7 @@ target/release/ronnia generate-token-key
 # authorize the bot account by opening the printed Twitch URL:
 target/release/ronnia --database ./ronnia.sqlite3 authorize-bot --login YOUR_BOT_LOGIN
 
-# API-only local startup, without bot or provider credentials:
+# API-only local startup, with website OAuth credentials but no bot grant/key:
 DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve --api-only
 
 # Full service (API + EventSub bot):
@@ -43,16 +43,16 @@ DATABASE_PATH=./ronnia.sqlite3 target/release/ronnia serve
 
 | Variable | Default / meaning |
 |---|---|
-| `DATABASE_PATH` | `ronnia.sqlite3`; override with global `--database PATH` |
+| `DATABASE_PATH` | `ronnia.sqlite3`; override with global `--database PATH`; empty/whitespace paths are rejected |
 | `BIND_IP` | `0.0.0.0`; listener IPv4 or IPv6 address |
 | `BIND_PORT` | `8080`; listener port and Compose published port |
 | `WEB_PORT` | `3000`; dashboard port in the separate `ronnia-web` Compose project, not a backend setting |
 | `PUBLIC_ORIGIN` | `http://localhost:3000`; exact allowed website origin |
-| `API_ORIGIN` | `http://localhost:8080`; public API origin, also allowed for same-origin requests |
+| `API_ORIGIN` | `http://localhost:8080`; public API origin, also allowed for same-origin requests; origins are normalized before deriving callbacks and cookie security |
 | `COOKIE_SECURE` | True for HTTPS API origin, otherwise false; cannot disable for HTTPS |
-| `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` | Twitch app/website credentials |
+| `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` | Twitch app/website credentials; required for both full and API-only service |
 | `TWITCH_REDIRECT_URI` | `${API_ORIGIN}/oauth2/twitch-redirect` |
-| `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` | osu! app credentials; relay requires delegated chat permission |
+| `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` | osu! app credentials; required for both full and API-only service; relay requires delegated chat permission |
 | `OSU_REDIRECT_URI` | `${API_ORIGIN}/oauth2/osu-redirect` |
 | `TWITCH_TOKEN_KEY` | 64 hex characters from `generate-token-key`; required when the bot is enabled. Losing it makes stored bot credentials unrecoverable |
 | `TWITCH_EVENTSUB_URL` | `wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30`; `ws://` is accepted only for isolated local tests |
@@ -97,6 +97,8 @@ docker compose logs -f ronnia
 Compose starts only `ronnia` (`serve` with `BOT_ENABLED=true`: account API, Twitch/EventSub bot, and embedded SQLite). No separate MongoDB or bot container is required. The bot authorization command prints a Twitch URL and code; complete it in a browser as the bot account. This is separate from registering your streamer through the dashboard. The API stays available while the bot waits, and the bot picks up its completed grant without a restart. Authorization performed locally against `./ronnia.sqlite3` is not automatically copied into Compose's named volume; run the container command above or explicitly migrate the database.
 
 The image runs as UID/GID 10001 and stores SQLite in the persistent `ronnia-data` volume at `/data/ronnia.sqlite3`. Compose pins this path so an unrelated `DATABASE_PATH` in `.env` cannot bypass the volume. Compose reads `BIND_PORT` from the project `.env` and uses it for both the container listener and published host port (default 8080). It keeps the host binding on `127.0.0.1` and forces the listener IP inside the container to `0.0.0.0` so Docker forwarding works even when local runs use a loopback `BIND_IP`. Put a TLS reverse proxy in front. Supply the real public origins and HTTPS callback URLs independently of the bind address. Keep `/data` persistent; do not use `docker compose down --volumes` on a deployment whose data you need. The build context excludes `.env`, data, and exports.
+
+The runtime image includes the system CA bundle for HTTPS/Sentry and the Apache-2.0 license at `/usr/share/doc/ronnia/LICENSE`.
 
 For example, `.env` can contain `BIND_IP=0.0.0.0` and `BIND_PORT=4343`; Compose will publish `127.0.0.1:4343` to port 4343 in the container. Direct CLI runs still require exporting the `.env` variables (`set -a; source ./.env; set +a` in Bash/Zsh, for a trusted shell-compatible file). The old combined `BIND` setting is replaced by these two variables.
 
@@ -189,7 +191,11 @@ Restore a backup with the service stopped into a fresh database path, then run `
 
 Request history has no automatic retention cutoff, preserving current behavior. Metadata freshness expires after 24 hours for request lookups, but stored metadata remains available to historical leaderboards. Expired temporary authentication state and cooldown state are cleaned up. Uncertain deliveries remain available for operator inspection.
 
-Chat subscriptions remain active while a channel is offline. Conduit shard growth is tuned with `EVENTSUB_CHANNELS_PER_SHARD` and bounded by `EVENTSUB_MAX_SHARDS`; these are operator controls, not Twitch subscription limits or throughput guarantees. The direct-WebSocket 300-subscription limit does not establish a 75-channel Conduit ceiling. Existing subscription-list safety bounds are 100 pages and 10,000 owned subscriptions (four per channel, up to 2,500 active grants); exceeding that capacity leaves existing subscriptions serving while reconciliation reports degraded capacity rather than partially registering a larger set. Shards do not automatically shrink when channels leave. Provider pacing is unchanged, and a single hot broadcaster cannot be divided across shards.
+Chat subscriptions remain active while a channel is offline. Conduit shard growth is tuned with `EVENTSUB_CHANNELS_PER_SHARD` and bounded by `EVENTSUB_MAX_SHARDS`; these are operator controls, not Twitch subscription limits or throughput guarantees. The direct-WebSocket 300-subscription limit does not establish a 75-channel Conduit ceiling. Audits are scoped to the owned conduit; each pass is bounded by 10,000 enabled subscriptions, 10,000 disabled-row removals, and 10,001 pages without assuming a provider page size. Cleanup makes progress even at full active capacity, and any pass that deletes rows is re-listed before publishing a new cache (at most two passes per audit). Failed or over-bound audits preserve the previous active cache and report degraded capacity rather than partially registering a larger set. Four subscriptions per channel allow up to 2,500 active grants. Shards do not automatically shrink when channels leave. Provider pacing is unchanged, and a single hot broadcaster cannot be divided across shards.
+
+Schema version 5 adds a revision counter to streamer grants. Upgrades preserve existing grants and deliveries; a revocation queued before a newer dashboard authorization cannot overwrite that authorization. Revocation attribution checks the broadcaster's current `channel:bot` consent through Twitch's [Get Authorization By User](https://dev.twitch.tv/docs/api/reference/users/#get-authorization-by-user), rather than inferring broadcaster consent from a bot-wide token failure. Back up the database before upgrading; older binaries refuse a database with a newer schema.
+
+Bot-token rotation retains its single-flight gate until refreshed credentials are durably stored, even if its caller is cancelled. Graceful shutdown waits for this credential write beyond the ordinary 30-second worker deadline. A hard process kill during an upstream exchange cannot provide the same guarantee.
 
 Persisted remote topology is authoritative: all existing shards are attached even if the configured automatic-growth cap is lower, with growth frozen and a warning. An owned conduit reporting more than 64 shards is left untouched; the API stays ready while the bot reports degraded service. Manually reduce that owned conduit to at most 64 shards before recovery. Startup/recovery opens at most four sockets concurrently. Subscription creation waits for complete attachment; existing events, state corrections, and obsolete owned-subscription deletion do not. Twitch routes each broadcaster to a shard; see the [Conduit documentation](https://dev.twitch.tv/docs/eventsub/handling-conduit-events/).
 

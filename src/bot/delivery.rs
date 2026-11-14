@@ -65,11 +65,7 @@ pub(super) fn queue_echo(echoes: &mpsc::Sender<Echo>, message: &Message, text: S
     }
 }
 
-pub(super) fn policy(
-    user: &User,
-    message: &Message,
-    stars: f64,
-) -> std::result::Result<(), String> {
+pub(super) fn policy(user: &User, message: &Message) -> std::result::Result<(), String> {
     if user.settings.test {
         return Ok(());
     }
@@ -88,6 +84,17 @@ pub(super) fn policy(
         .any(|login| login.eq_ignore_ascii_case(&message.author))
     {
         return Err("Requester is excluded.".into());
+    }
+    Ok(())
+}
+
+pub(super) fn difficulty_policy(
+    user: &User,
+    message: &Message,
+    stars: f64,
+) -> std::result::Result<(), String> {
+    if user.settings.test {
+        return Ok(());
     }
     let [low, high] = user.settings.sr;
     if stars < low || (high != -1.0 && stars > high) {
@@ -135,6 +142,10 @@ pub(super) async fn process_one(
             message_id = %message.id,
             "request ignored: channel is offline or not streaming osu!"
         );
+        return Ok(());
+    }
+    if let Err(reason) = policy(&user, message) {
+        tracing::info!(channel = %message.channel, requester = %message.author, reason, "request rejected");
         return Ok(());
     }
     let map = match beatmap.kind {
@@ -187,7 +198,7 @@ pub(super) async fn process_one(
         .as_f64()
         .filter(|n| n.is_finite())
         .context("invalid beatmap difficulty_rating")?;
-    if let Err(reason) = policy(&user, message, stars) {
+    if let Err(reason) = difficulty_policy(&user, message, stars) {
         if !config.dry_run && reason.starts_with('@') {
             queue_echo(echoes, message, reason.clone());
         }

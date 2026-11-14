@@ -4,6 +4,25 @@ Current single-replica scale, Railpack, and grant-activation checks: 2026-11-05.
 
 The repository-split section records current root-layout and separate-Compose checks. Later sections retain historical integrated-source results and do not independently verify the split. No section claims production Twitch/osu! certification. Provider behavior was exercised against protocol-faithful local simulators; real authenticated provider accounts were not used.
 
+## Review fixes (2026-11-14)
+
+Verified the fixes following review of PR #57, based on `migration/rust-port` at `50c2e4a`. Rust checks ran with Rust 1.100.0 in an isolated `rust:1-bookworm`-derived toolchain after the host Rust installation became unavailable. No production provider credentials or deployment were used.
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --locked --all-targets -- -D warnings` | Pass |
+| `cargo test --locked` | 152 passed |
+| `cargo build --locked --release` | Pass |
+| `scripts/smoke.py --binary <release-binary>` | Pass, including exact handoff-reader delivery, old-session rejection, and durable broadcaster-consent revocation |
+| `scripts/scale.py --binary <release-binary> --channels 8 --requests 6` | Pass, local lifecycle/load compatibility |
+| Production Docker image | Pass: UID 10001, nonempty CA bundle, packaged license, readiness with a synthetic `SENTRY_DSN`, clean shutdown |
+| Isolated CLI scenarios | Pass: key generation despite invalid service config; empty environment/CLI database paths rejected; API-only OAuth credentials required; normalized origin/callback/client ID and Secure cookie |
+
+Regression coverage includes the Unicode mod panic, real duplicate-delivery and interrupted-send paths, legacy pending reports across Rust startup, cancellation/backpressure during refresh persistence, stale grant-revocation CAS, disabled-subscription cleanup at full capacity, unspecified pagination sizes, authoritative broadcaster consent, and revocation overflow at 2,500 grants. OAuth mocks validate provider-specific credentials and callback URIs; the grace timer is exercised with controlled Tokio time rather than a one-second wall-clock race.
+
+Schema v5 upgrades preserve existing grants and deliveries. Real Twitch/osu! interoperability, production throughput, and hard process-kill recovery during a provider token exchange remain outside this local proof.
+
 ## Single-replica bounded scale (2026-11-05)
 
 Implemented in a fresh checkout of `aticie/ronnia` PR #57, `migration/rust-port`, starting at remote `8f6663995c92ce00f644a90e17595307be148b7f`. The legacy checkout, bridge PR #56, and frontend PR #24 were not changed. All provider traffic below used isolated local HTTP/RFC6455 fixtures, synthetic authorization, and temporary SQLite; no production credentials or Railway deployment were used.
