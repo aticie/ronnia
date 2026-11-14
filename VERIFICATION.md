@@ -12,6 +12,8 @@ Schema version 6 persists `chat_banned_at` and `chat_retry_at` on each Twitch ch
 
 The separate dashboard passed `npm run build` (`vue-tsc --noEmit` plus Vite). A real browser rendered `/settings` against a mocked authorized-and-banned `/api/user/me`; `[data-testid="twitch-bot-banned"]` displayed the amber warning and `/unban ronniabot` instruction. No production deployment, live unban, or provider-state mutation was performed.
 
+After merging the updated base, `cargo build --locked --release` and `python3 scripts/smoke.py --binary /target/release/ronnia` also passed: all 16 HTTP routes, both signup orders, encrypted device authorization, EventSub lifecycle, reconnect/revocation safety, DNS recovery, dry-run, and maintenance CLI checks. The smoke contract includes `twitchBotBanned` in `/user/me` and OpenAPI.
+
 ## Review fixes (2026-11-14)
 
 Verified the fixes following review of PR #57, based on `migration/rust-port` at `50c2e4a`. Rust checks ran with Rust 1.100.0 in an isolated `rust:1-bookworm`-derived toolchain after the host Rust installation became unavailable. No production provider credentials or deployment were used.
