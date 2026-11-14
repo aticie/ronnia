@@ -548,7 +548,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let user = store.user_by_twitch(20).await.unwrap().unwrap();
     assert!(!user.is_live, "legacy live activity is not consent");
     assert_eq!(user.osu_username, "osu");
@@ -589,13 +589,13 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
     let future = directory.path().join("future.sqlite");
     {
         let connection = rusqlite::Connection::open(&future).unwrap();
-        connection.pragma_update(None, "user_version", 5).unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
     }
     assert!(Store::open(&future).await.is_err());
 }
 
 #[tokio::test]
-async fn concurrent_snapshot_and_offline_event_converge_on_offline() {
+async fn captured_snapshot_cannot_resurrect_a_channel_after_a_newer_offline_event() {
     let store = memory().await;
     store.save_user(user()).await.unwrap();
     grant(&store, 2).await;
@@ -603,12 +603,11 @@ async fn concurrent_snapshot_and_offline_event_converge_on_offline() {
         store.snapshot_versions(vec![2]).await.unwrap(),
         vec![(2, 0)]
     );
-    let snapshot =
-        store.apply_stream_snapshot(vec![snapshot(2, 0, true, "21465", Some("CHANNEL"))]);
-    let event = store.apply_stream_event(2, "channel".into(), StreamEvent::Offline, 100);
-    let (snapshot, event) = tokio::join!(snapshot, event);
-    snapshot.unwrap();
-    event.unwrap();
+    assert!(event(&store, 2, StreamEvent::Offline, 100).await);
+    store
+        .apply_stream_snapshot(vec![snapshot(2, 0, true, "21465", Some("CHANNEL"))])
+        .await
+        .unwrap();
     let online: bool = store
         .call(|c| {
             Ok(c.query_row(
@@ -996,7 +995,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let active_at: i64 = scalar(
         &store,
         "SELECT active_at FROM twitch_channel_grants WHERE twitch_id=20",
@@ -1022,7 +1021,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
 }
 
 #[tokio::test]
@@ -1050,7 +1049,7 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .unwrap();
     let legacy_count: i64 = scalar(&store, "SELECT COUNT(*) FROM legacy_live").await;
     let user_count: i64 = scalar(&store, "SELECT COUNT(*) FROM users").await;
-    assert_eq!((version, legacy_count, user_count), (4, 0, 1));
+    assert_eq!((version, legacy_count, user_count), (5, 0, 1));
     assert_eq!(
         store
             .replace_legacy_live(vec![(20, "alpha".into())])
@@ -1068,6 +1067,6 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert_eq!(reopened.live_users(100, 0).await.unwrap(), vec!["alpha"]);
 }

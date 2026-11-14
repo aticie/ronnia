@@ -5,7 +5,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use ronnia::{api, bot, config::Config, storage::Store};
+use ronnia::{api, bot, config::Config, storage::Store, twitch_auth::TwitchAuth};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
@@ -61,6 +61,16 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Command::GenerateTokenKey)) {
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::rng().fill_bytes(&mut key);
+        println!("{}", hex::encode(key));
+        eprintln!(
+            "Store this as TWITCH_TOKEN_KEY in the service's secret environment. Discarding it makes stored bot credentials unrecoverable."
+        );
+        return Ok(());
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
     let _sentry = sentry_options()?.map(sentry::init);
     tracing_subscriber::registry()
@@ -133,16 +143,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         config.database_path = path;
     }
     let command = cli.command.unwrap_or(Command::Serve { api_only: false });
-    if matches!(command, Command::GenerateTokenKey) {
-        use rand::RngCore;
-        let mut key = [0u8; 32];
-        rand::rng().fill_bytes(&mut key);
-        println!("{}", hex::encode(key));
-        eprintln!(
-            "Store this as TWITCH_TOKEN_KEY in the service's secret environment. Discarding it makes stored bot credentials unrecoverable."
-        );
-        return Ok(());
-    }
     if matches!(command, Command::Serve { api_only: true }) {
         config.bot_enabled = false;
     }
@@ -182,7 +182,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&identity)?);
             Ok(())
         }
-        Command::GenerateTokenKey => unreachable!("handled before database initialization"),
+        Command::GenerateTokenKey => unreachable!("handled before runtime initialization"),
         Command::Check => {
             let (integrity, foreign_keys) = store
                 .call(|conn| {
@@ -261,6 +261,11 @@ async fn serve(config: Arc<Config>, store: Store) -> Result<()> {
     let address = listener.local_addr()?;
     let shutdown = CancellationToken::new();
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
+    let bot_auth = if config.bot_enabled {
+        Some(TwitchAuth::new(config.clone(), store.clone())?)
+    } else {
+        None
+    };
     let app = api::router(config.clone(), store.clone());
     let api_shutdown = shutdown.clone();
     tasks.spawn(async move {
@@ -269,9 +274,9 @@ async fn serve(config: Arc<Config>, store: Store) -> Result<()> {
             .await?;
         Ok(())
     });
-    if config.bot_enabled {
+    if let Some(auth) = &bot_auth {
         let bot_shutdown = shutdown.clone();
-        tasks.spawn(bot::run(config, store, bot_shutdown));
+        tasks.spawn(bot::run(config, store, auth.clone(), bot_shutdown));
     }
     tracing::info!(%address, "API listening");
     let result = tokio::select! {
@@ -295,6 +300,11 @@ async fn serve(config: Arc<Config>, store: Store) -> Result<()> {
         tracing::warn!("Shutdown deadline reached; cancelling remaining workers");
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+    }
+    // Credential rotation outlives cancellable workers: a successful exchange
+    // must reach SQLite even when the ordinary shutdown deadline was exceeded.
+    if let Some(auth) = bot_auth {
+        auth.finish_refresh().await;
     }
     result
 }

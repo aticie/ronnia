@@ -3,7 +3,9 @@
 
 use super::backoff::Backoff;
 use super::conduit::{self, Subscriptions};
-use super::delivery::{Clock, policy, prepare_message, process_one, sanitize_chat};
+use super::delivery::{
+    Clock, difficulty_policy, policy, prepare_message, process_one, sanitize_chat,
+};
 use super::dispatch::{Message, chat_message};
 use super::maintenance::{self, Action, Channels, Lookup, Maintenance, Pending, Signal};
 use super::requests::{RequestEnvelope, Scheduler};
@@ -18,6 +20,7 @@ use crate::{
 use axum::{
     Router,
     extract::{Form, Query, RawQuery, State},
+    response::IntoResponse,
     routing::{get, patch, post},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -104,6 +107,7 @@ fn notification_subscription_identity_is_validated_before_use() {
         "type": "channel.chat.message",
         "version": "1",
         "condition": {"broadcaster_user_id": "1", "user_id": "bot"},
+        "status": "authorization_revoked",
         "transport": {"method": "conduit", "conduit_id": conduit_id},
     });
     let owned = conduit::owned(&subscription, conduit_id, Some("bot")).expect("owned subscription");
@@ -152,24 +156,25 @@ fn tags_use_boolean_subscriber_and_badge_precedence() {
 fn inclusive_star_range_and_test_bypass() {
     let mut user: User = serde_json::from_value(serde_json::json!({"osuId":1,"osuUsername":"a","osuAvatarUrl":"","twitchId":1,"twitchUsername":"streamer","twitchAvatarUrl":"","excludedUsers":[],"isLive":true,"settings":{"sr":[4.0,5.0]}})).unwrap();
     let message = request_message();
-    assert!(policy(&user, &message, 4.0).is_ok());
-    assert!(policy(&user, &message, 5.0).is_ok());
-    assert!(policy(&user, &message, 5.1).is_err());
+    assert!(difficulty_policy(&user, &message, 4.0).is_ok());
+    assert!(difficulty_policy(&user, &message, 5.0).is_ok());
+    assert!(difficulty_policy(&user, &message, 5.1).is_err());
     user.settings.sr = [4.0, -1.0];
-    assert!(policy(&user, &message, 9.0).is_ok());
-    assert!(policy(&user, &message, 3.9).is_err());
+    assert!(difficulty_policy(&user, &message, 9.0).is_ok());
+    assert!(difficulty_policy(&user, &message, 3.9).is_err());
     user.settings.sub_only = true;
-    assert!(policy(&user, &message, 5.0).is_err());
+    assert!(policy(&user, &message).is_err());
     user.settings.sub_only = false;
     user.excluded_users = vec!["VIEWER".into()];
-    assert!(policy(&user, &message, 5.0).is_err());
+    assert!(policy(&user, &message).is_err());
     user.excluded_users.clear();
     let mut broadcaster = message.clone();
     broadcaster.author = "StReAmEr".into();
-    assert!(policy(&user, &broadcaster, 5.0).is_err());
+    assert!(policy(&user, &broadcaster).is_err());
     user.settings.test = true;
     user.excluded_users = vec!["VIEWER".into()];
-    assert!(policy(&user, &message, 0.0).is_ok());
+    assert!(policy(&user, &message).is_ok());
+    assert!(difficulty_policy(&user, &message, 0.0).is_ok());
 }
 
 #[test]
@@ -186,21 +191,6 @@ fn cooldown_clock_advances_monotonically_with_fractional_seconds() {
     let first = clock.now();
     assert!((1000.5..1001.0).contains(&first));
     assert!(clock.now() >= first);
-}
-
-#[tokio::test]
-async fn delivery_uniqueness_and_crash_state_are_durable() {
-    let store = Store::open(":memory:").await.unwrap();
-    store
-        .call(|db| {
-            db.execute("INSERT INTO deliveries(twitch_message_id,target_osu_id,message,status,created_at) VALUES('duplicate',1,'hello','sending',0)", [])?;
-            assert_eq!(db.execute("INSERT INTO deliveries(twitch_message_id,target_osu_id,message,status,created_at) VALUES('duplicate',1,'hello','pending',0) ON CONFLICT(twitch_message_id) DO NOTHING", [])?, 0);
-            db.execute("UPDATE deliveries SET status='uncertain' WHERE status='sending'", [])?;
-            assert_eq!(db.query_row("SELECT status FROM deliveries WHERE twitch_message_id='duplicate'", [], |row| row.get::<_, String>(0))?, "uncertain");
-            Ok(())
-        })
-        .await
-        .unwrap();
 }
 
 fn welcome_json(session: &str, keepalive: u64) -> String {
@@ -400,10 +390,18 @@ pub(super) struct Helix {
     pub(super) creates: AtomicUsize,
     pub(super) deletes: AtomicUsize,
     pub(super) list_calls: AtomicUsize,
+    list_page_size: AtomicUsize,
     pub(super) seeded: StdMutex<Option<Vec<Value>>>,
     deleted: StdMutex<Vec<String>>,
     shard_ok: AtomicBool,
     wrong_shard: AtomicBool,
+    validate_mode: AtomicU8,
+    validate_calls: AtomicUsize,
+    consent_mode: AtomicU8,
+    consent_calls: AtomicUsize,
+    consent_queries: StdMutex<Vec<Vec<String>>>,
+    hold_consent: AtomicBool,
+    release_consent: tokio::sync::Notify,
     shard_count: AtomicUsize,
     resizes: StdMutex<Vec<u32>>,
     attachments: StdMutex<Vec<(u32, String)>>,
@@ -419,6 +417,7 @@ pub(super) struct Helix {
 pub(super) fn mock_config(address: SocketAddr) -> Arc<Config> {
     let mut config = Config::from_env().unwrap();
     config.twitch_client_id = "client".into();
+    config.twitch_token_key = Some([42; 32]);
     config.twitch_client_secret = "secret".into();
     config.twitch_api_base = format!("http://{address}/helix");
     config.twitch_oauth_base = format!("http://{address}/oauth");
@@ -427,9 +426,84 @@ pub(super) fn mock_config(address: SocketAddr) -> Arc<Config> {
 }
 
 pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::JoinHandle<()>) {
-    async fn token(Form(body): Form<HashMap<String, String>>) -> axum::Json<Value> {
-        assert_eq!(body["grant_type"], "client_credentials");
-        axum::Json(json!({"access_token":"app-token","expires_in":3600}))
+    async fn token(Form(body): Form<HashMap<String, String>>) -> axum::response::Response {
+        match body["grant_type"].as_str() {
+            "client_credentials" => {
+                axum::Json(json!({"access_token":"app-token","expires_in":3600})).into_response()
+            }
+            "urn:ietf:params:oauth:grant-type:device_code" => axum::Json(json!({
+                "access_token":"bot-token","refresh_token":"refresh","expires_in":14400,
+                "scope":crate::twitch_auth::BOT_SCOPES,"token_type":"bearer"
+            }))
+            .into_response(),
+            "refresh_token" => (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"message":"Invalid refresh token"})),
+            )
+                .into_response(),
+            _ => panic!("unexpected grant type"),
+        }
+    }
+    async fn validate(State(state): State<Arc<Helix>>) -> axum::response::Response {
+        state.validate_calls.fetch_add(1, Ordering::SeqCst);
+        match state.validate_mode.load(Ordering::SeqCst) {
+            0 => axum::Json(json!({
+                "client_id":"client","login":"smokebot","user_id":"bot",
+                "scopes":crate::twitch_auth::BOT_SCOPES,"expires_in":14400
+            }))
+            .into_response(),
+            1 => (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"message":"invalid access token"})),
+            )
+                .into_response(),
+            _ => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+    async fn consent(
+        State(state): State<Arc<Helix>>,
+        RawQuery(query): RawQuery,
+        headers: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        assert_eq!(headers["authorization"], "Bearer app-token");
+        assert_eq!(headers["client-id"], "client");
+        let ids = url::form_urlencoded::parse(query.as_deref().unwrap_or_default().as_bytes())
+            .map(|(key, value)| {
+                assert_eq!(key, "user_id");
+                value.into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!((1..=10).contains(&ids.len()));
+        state.consent_queries.lock().unwrap().push(ids.clone());
+        state.consent_calls.fetch_add(1, Ordering::SeqCst);
+        if state.hold_consent.load(Ordering::SeqCst) {
+            state.release_consent.notified().await;
+        }
+        let mode = state.consent_mode.load(Ordering::SeqCst);
+        if mode == 3 {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        let mut rows = ids
+            .into_iter()
+            .map(|id| {
+                let mut row =
+                    json!({"user_id":id,"has_authorized":mode != 1,"scopes":["channel:bot"]});
+                match mode {
+                    2 => row["scopes"] = json!([]),
+                    4 => row["scopes"] = json!([1]),
+                    6 => row["user_id"] = json!("999999"),
+                    _ => {}
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        if mode == 5 {
+            rows.clear();
+        }
+        if mode == 7 {
+            rows.push(rows[0].clone());
+        }
+        axum::Json(json!({"data":rows})).into_response()
     }
     async fn conduits(State(state): State<Arc<Helix>>) -> axum::Json<Value> {
         axum::Json(
@@ -503,9 +577,34 @@ pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::Join
             )
         }
     }
-    async fn list_subscriptions(State(state): State<Arc<Helix>>) -> axum::Json<Value> {
+    async fn list_subscriptions(
+        State(state): State<Arc<Helix>>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> axum::Json<Value> {
+        assert_eq!(
+            query.get("conduit_id").map(String::as_str),
+            Some("conduit-1")
+        );
+        assert!(
+            !query.contains_key("first"),
+            "Twitch does not document a page-size parameter"
+        );
         state.list_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(rows) = state.seeded.lock().unwrap().clone() {
+            let page_size = state.list_page_size.load(Ordering::SeqCst);
+            if page_size > 0 {
+                let start = query
+                    .get("after")
+                    .map(|value| value.parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                let end = (start + page_size).min(rows.len());
+                let pagination = if end < rows.len() {
+                    json!({"cursor":end.to_string()})
+                } else {
+                    json!({})
+                };
+                return axum::Json(json!({"data":rows[start..end],"pagination":pagination}));
+            }
             return axum::Json(json!({"data": rows, "pagination": {}}));
         }
         axum::Json(json!({
@@ -540,6 +639,9 @@ pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::Join
             .lock()
             .unwrap()
             .push(query.get("id").cloned().unwrap_or_default());
+        if let Some(rows) = state.seeded.lock().unwrap().as_mut() {
+            rows.retain(|row| row["id"].as_str() != query.get("id").map(String::as_str));
+        }
         axum::http::StatusCode::NO_CONTENT
     }
     async fn streams(
@@ -570,6 +672,14 @@ pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::Join
     state.shard_count.store(1, Ordering::SeqCst);
     let router = Router::new()
         .route("/oauth/token", post(token))
+        .route("/oauth/validate", get(validate))
+        .route("/helix/authorization/users", get(consent))
+        .route("/oauth/device", post(|| async {
+            axum::Json(json!({
+                "device_code":"device","user_code":"CODE","verification_uri":"https://www.twitch.tv/activate",
+                "expires_in":60,"interval":1
+            }))
+        }))
         .route(
             "/helix/eventsub/conduits",
             get(conduits).post(create_conduit).patch(resize_conduit),
@@ -3558,4 +3668,726 @@ fn notification_guard_drops_redeliveries_and_stays_bounded() {
         seen.insert("m0"),
         "the oldest ids are evicted once the bound is reached"
     );
+}
+
+#[tokio::test]
+async fn disabled_owned_subscriptions_are_replaced_without_touching_foreign_rows() {
+    let (state, address, server) = helix_server().await;
+    let disabled = json!({
+        "id":"disabled","status":"authorization_revoked","type":"channel.chat.message","version":"1",
+        "condition":{"broadcaster_user_id":"1","user_id":"bot"},
+        "transport":{"method":"conduit","conduit_id":"conduit-1"}
+    });
+    let mut foreign = disabled.clone();
+    foreign["id"] = json!("foreign-disabled");
+    foreign["transport"]["conduit_id"] = json!("foreign");
+    *state.seeded.lock().unwrap() = Some(vec![disabled.clone(), foreign]);
+    assert!(
+        conduit::owned(&disabled, "conduit-1", Some("bot")).is_some(),
+        "disabled status is not part of subscription identity: revocations must parse"
+    );
+    let providers = Providers::new(mock_config(address), CancellationToken::new()).unwrap();
+    let mut subscriptions = Subscriptions::new("conduit-1".into(), "bot".into());
+    let desired = vec![conduit::Desired {
+        kind: conduit::CHAT_TYPE.0,
+        version: conduit::CHAT_TYPE.1,
+        broadcaster: 1,
+        user: Some("bot".into()),
+    }];
+    let summary = subscriptions
+        .reconcile(&providers, &desired, true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!((summary.kept, summary.removed, summary.created), (0, 1, 1));
+    assert_eq!(*state.deleted.lock().unwrap(), vec!["disabled"]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn chat_revocation_requires_authoritative_broadcaster_consent_loss() {
+    for mode in 0..=7 {
+        let (state, address, server) = helix_server().await;
+        let config = mock_config(address);
+        let store = Store::open(":memory:").await.unwrap();
+        seed_user(&store, 1, "streamer").await;
+        grant_and_go_live(&store, 1, "streamer").await;
+        state.consent_mode.store(mode, Ordering::SeqCst);
+        let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+        let (mut instance, _, actions) = maintenance_for_test(config, store.clone(), providers);
+        for _ in 0..32 {
+            actions
+                .try_send(Action::Revoked {
+                    id: 1,
+                    expected_revision: 1,
+                })
+                .unwrap();
+        }
+        instance.drain_actions();
+        assert_eq!(
+            state.consent_calls.load(Ordering::SeqCst),
+            0,
+            "foreground admission must never perform HTTP"
+        );
+        let result = instance.check_revocations(&CancellationToken::new()).await;
+        if mode != 3 {
+            assert_eq!(
+                state.consent_calls.load(Ordering::SeqCst),
+                1,
+                "one burst must coalesce into one authoritative lookup"
+            );
+        }
+        if matches!(mode, 3 | 4 | 6 | 7) {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+        if matches!(mode, 1 | 2) {
+            assert!(store.granted_twitch_ids().await.unwrap().is_empty());
+            assert!(!store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+        } else {
+            assert_eq!(
+                store.granted_twitch_ids().await.unwrap(),
+                vec![1],
+                "bot-wide revocation, unavailable or malformed consent must not revoke a broadcaster"
+            );
+            assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+        }
+        if mode >= 3 {
+            state.consent_mode.store(1, Ordering::SeqCst);
+            instance
+                .check_revocations(&CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(
+                store.granted_twitch_ids().await.unwrap().is_empty(),
+                "inconclusive lookups must retain the queued attribution for retry"
+            );
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn delivery_reservation_is_exercised_by_concurrent_real_requests() {
+    let (config, store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let mut user = store.user_by_twitch(1).await.unwrap().unwrap();
+    user.settings.test = true; // Do not let cooldown hide a broken uniqueness gate.
+    store.save_user(user).await.unwrap();
+    let (echoes, _rx) = mpsc::channel(4);
+    let message = request_message();
+    let beatmap = Beatmap {
+        id: 42,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    let clock = Clock::new();
+    let (first, second) = tokio::join!(
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock
+        ),
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock
+        ),
+    );
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM deliveries WHERE status='sent'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |r| r
+                    .get::<_, i64>(0))?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn interrupted_real_delivery_is_recovered_by_schema_and_never_replayed() {
+    let (config, fixture_store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delivery.sqlite");
+    let store = Store::open(&path).await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    store
+        .cache_put(fixture_store.cache_get(42).await.unwrap().unwrap())
+        .await
+        .unwrap();
+    store.call(|db| {
+        db.execute_batch("CREATE TRIGGER stop_bookkeeping BEFORE INSERT ON statistics BEGIN SELECT RAISE(ABORT, 'process interrupted before commit'); END")?;
+        Ok(())
+    }).await.unwrap();
+    let (echoes, _rx) = mpsc::channel(4);
+    let message = request_message();
+    let beatmap = Beatmap {
+        id: 42,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    assert!(
+        process_one(
+            &config,
+            &store,
+            &providers,
+            &echoes,
+            &message,
+            &beatmap,
+            Clock::new()
+        )
+        .await
+        .is_err()
+    );
+    drop(store);
+    let recovered = Store::open(&path).await.unwrap();
+    recovered
+        .call(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM deliveries WHERE twitch_message_id='evt-1'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "uncertain"
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    process_one(
+        &config,
+        &recovered,
+        &providers,
+        &echoes,
+        &message,
+        &beatmap,
+        Clock::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn bot_startup_preserves_pending_legacy_reports() {
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    assert_eq!(
+        store
+            .claim_legacy_delivery("legacy-pending".into(), 1, 1, "hello".into())
+            .await
+            .unwrap(),
+        crate::storage::ClaimOutcome::Claimed
+    );
+    store.call(|db| {
+        db.execute("INSERT INTO deliveries(twitch_message_id,target_osu_id,message,status,created_at,source) VALUES('new-pending',1,'hello','pending',0,'new')", [])?;
+        Ok(())
+    }).await.unwrap();
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let mut config = Config::from_env().unwrap();
+    config.twitch_client_id = "client".into();
+    config.twitch_token_key = Some([42; 32]);
+    let config = Arc::new(config);
+    let auth = TwitchAuth::new(config.clone(), store.clone()).unwrap();
+    super::run(config, store.clone(), auth, shutdown)
+        .await
+        .unwrap();
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM deliveries WHERE twitch_message_id='legacy-pending'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "pending"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM deliveries WHERE twitch_message_id='new-pending'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "failed"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let statistics = serde_json::from_value(json!({
+        "requesterChannelName":"viewer","requestedBeatmapId":42,
+        "requestedChannelName":"streamer","mods":"","timestamp":1
+    }))
+    .unwrap();
+    assert_eq!(
+        store
+            .complete_legacy_delivery("legacy-pending".into(), true, None, Some(statistics))
+            .await
+            .unwrap(),
+        crate::storage::DeliveryOutcome::Recorded
+    );
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM deliveries WHERE twitch_message_id='legacy-pending'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "sent"
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |r| r
+                    .get::<_, i64>(0))?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn metadata_independent_policy_rejects_before_404_fetch_or_echo() {
+    let (mut config, store, _providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let observed = fetches.clone();
+    let router = Router::new().route(
+        "/api/v2/beatmaps/{id}",
+        get(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.osu_api_base = format!("http://{}/api/v2", listener.local_addr().unwrap());
+    let metadata_server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let providers = Providers::new(Arc::new(config.clone()), CancellationToken::new()).unwrap();
+    let baseline = store.user_by_twitch(1).await.unwrap().unwrap();
+    let beatmap = Beatmap {
+        id: 404,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    let (echoes, mut rx) = mpsc::channel(4);
+    for restriction in 0..4 {
+        let mut settings = baseline.settings.clone();
+        let mut message = request_message();
+        match restriction {
+            0 => {}
+            1 => settings.sub_only = true,
+            2 => settings.points_only = true,
+            _ => message.author = "streamer".into(),
+        }
+        store.set_settings(1, settings).await.unwrap();
+        store
+            .set_excluded(1, "viewer".into(), restriction == 0)
+            .await
+            .unwrap();
+        process_one(
+            &config,
+            &store,
+            &providers,
+            &echoes,
+            &message,
+            &beatmap,
+            Clock::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            0,
+            "restriction {restriction}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "policy rejection must not produce a misleading not-found echo"
+        );
+    }
+    for test_mode in [false, true] {
+        let mut settings = baseline.settings.clone();
+        settings.test = test_mode;
+        if test_mode {
+            settings.sub_only = true;
+            settings.points_only = true;
+        }
+        store.set_settings(1, settings).await.unwrap();
+        store
+            .set_excluded(1, "viewer".into(), test_mode)
+            .await
+            .unwrap();
+        process_one(
+            &config,
+            &store,
+            &providers,
+            &echoes,
+            &request_message(),
+            &beatmap,
+            Clock::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.try_recv().unwrap().text, "@viewer Beatmap not found.");
+    }
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    metadata_server.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn conduit_audit_handles_unspecified_small_pages_beyond_one_hundred() {
+    let (state, address, server) = helix_server().await;
+    state.list_page_size.store(1, Ordering::SeqCst);
+    *state.seeded.lock().unwrap() = Some((1..=101).map(|id| json!({
+        "id":format!("owned-{id}"),"status":"enabled","type":"stream.online","version":"1",
+        "condition":{"broadcaster_user_id":id.to_string()},
+        "transport":{"method":"conduit","conduit_id":"conduit-1"}
+    })).collect());
+    let desired = (1..=101)
+        .map(|id| conduit::Desired {
+            kind: "stream.online",
+            version: "1",
+            broadcaster: id,
+            user: None,
+        })
+        .collect::<Vec<_>>();
+    let providers = Providers::new(mock_config(address), CancellationToken::new()).unwrap();
+    let mut subscriptions = Subscriptions::new("conduit-1".into(), "bot".into());
+    let summary = subscriptions
+        .reconcile(&providers, &desired, false, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(summary.kept, 101);
+    assert_eq!(state.list_calls.load(Ordering::SeqCst), 101);
+    assert_eq!(
+        (
+            state.creates.load(Ordering::SeqCst),
+            state.deletes.load(Ordering::SeqCst)
+        ),
+        (0, 0)
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_reauthorization_while_queued_or_validating_survives_revocation() {
+    for during_http in [false, true] {
+        let (state, address, server) = helix_server().await;
+        let config = mock_config(address);
+        let store = Store::open(":memory:").await.unwrap();
+        seed_user(&store, 1, "streamer").await;
+        grant_and_go_live(&store, 1, "streamer").await;
+        let shutdown = CancellationToken::new();
+        state.consent_mode.store(1, Ordering::SeqCst);
+        let (_, signals) = watch::channel(Signal::default());
+        let (action_tx, actions) = maintenance::actions();
+        let (targets, _) = watch::channel(1);
+        let (_, topology) = watch::channel(Topology {
+            remote_count: 1,
+            attached_count: 1,
+        });
+        let providers = Providers::new(config.clone(), shutdown.clone()).unwrap();
+        let mut instance = Maintenance::new(
+            config,
+            store.clone(),
+            providers,
+            "conduit-1".into(),
+            "bot".into(),
+            Channels {
+                membership: store.channel_changes(),
+                signals,
+                actions,
+                targets,
+                topology,
+            },
+        );
+        action_tx
+            .try_send(Action::Revoked {
+                id: 1,
+                expected_revision: 1,
+            })
+            .unwrap();
+        instance.drain_actions();
+        if !during_http {
+            store.call(|db| {
+            db.execute("UPDATE twitch_channel_grants SET revision=revision+1,status='granted' WHERE twitch_id=1", [])?;
+            Ok(())
+        }).await.unwrap();
+        }
+        let before = state.consent_calls.load(Ordering::SeqCst);
+        state.hold_consent.store(true, Ordering::SeqCst);
+        let check = tokio::spawn(async move { instance.check_revocations(&shutdown).await });
+        eventually(|| state.consent_calls.load(Ordering::SeqCst) > before).await;
+        // Even identical grant timestamps represent a new consent generation.
+        if during_http {
+            store.call(|db| {
+        db.execute("UPDATE twitch_channel_grants SET revision=revision+1,status='granted' WHERE twitch_id=1", [])?;
+        Ok(())
+    }).await.unwrap();
+        }
+        state.hold_consent.store(false, Ordering::SeqCst);
+        state.release_consent.notify_one();
+        check.await.unwrap().unwrap();
+        assert_eq!(store.granted_twitch_ids().await.unwrap(), vec![1]);
+        assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn bot_revocation_or_reauthorization_preserves_authorized_broadcaster() {
+    for restored in [false, true] {
+        let (state, address, server) = helix_server().await;
+        let config = mock_config(address);
+        let store = Store::open(":memory:").await.unwrap();
+        seed_user(&store, 1, "streamer").await;
+        grant_and_go_live(&store, 1, "streamer").await;
+        let shutdown = CancellationToken::new();
+        TwitchAuth::authorize_bot(
+            config.clone(),
+            store.clone(),
+            "smokebot",
+            false,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
+        state.validate_mode.store(1, Ordering::SeqCst);
+        if restored {
+            state.validate_mode.store(0, Ordering::SeqCst);
+            TwitchAuth::authorize_bot(
+                config.clone(),
+                store.clone(),
+                "smokebot",
+                false,
+                shutdown.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        let before = state.validate_calls.load(Ordering::SeqCst);
+        let providers = Providers::new(config.clone(), shutdown.clone()).unwrap();
+        let (mut instance, _, actions) = maintenance_for_test(config, store.clone(), providers);
+        actions
+            .try_send(Action::Revoked {
+                id: 1,
+                expected_revision: 1,
+            })
+            .unwrap();
+        instance.drain_actions();
+        instance.check_revocations(&shutdown).await.unwrap();
+        assert_eq!(
+            state.validate_calls.load(Ordering::SeqCst),
+            before,
+            "old revocation envelopes must be attributed using broadcaster consent, not current bot health"
+        );
+        assert_eq!(store.granted_twitch_ids().await.unwrap(), vec![1]);
+        assert!(store.user_by_twitch(1).await.unwrap().unwrap().is_live);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn authorization_batches_remain_bounded_and_omitted_users_do_not_starve_others() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let (mut instance, _, actions) = maintenance_for_test(config, store, providers);
+    for id in 1..=11 {
+        actions
+            .try_send(Action::Revoked {
+                id,
+                expected_revision: 1,
+            })
+            .unwrap();
+    }
+    instance.drain_actions();
+    state.consent_mode.store(5, Ordering::SeqCst);
+    instance
+        .check_revocations(&CancellationToken::new())
+        .await
+        .unwrap();
+    state.consent_mode.store(0, Ordering::SeqCst);
+    instance
+        .check_revocations(&CancellationToken::new())
+        .await
+        .unwrap();
+    let queries = state.consent_queries.lock().unwrap().clone();
+    assert_eq!(queries[0].len(), 10);
+    assert_eq!(queries[1].len(), 10);
+    assert!(
+        queries[1].contains(&"11".to_owned()),
+        "retained early users must not permanently starve later inbox entries"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn full_active_audit_capacity_still_removes_disabled_rows_without_partial_cache() {
+    let (state, address, server) = helix_server().await;
+    state.list_page_size.store(1, Ordering::SeqCst);
+    let first = json!({
+        "id":"active-1","status":"enabled","type":"stream.online","version":"1",
+        "condition":{"broadcaster_user_id":"1"},
+        "transport":{"method":"conduit","conduit_id":"conduit-1"}
+    });
+    let mut second = first.clone();
+    second["id"] = json!("active-2");
+    second["condition"]["broadcaster_user_id"] = json!("2");
+    let mut disabled = first.clone();
+    disabled["id"] = json!("disabled");
+    disabled["status"] = json!("authorization_revoked");
+    // Same production path as 10,000 enabled rows plus a disabled leftover.
+    // Deleting the middle row shifts the index cursor and requires a fresh list.
+    *state.seeded.lock().unwrap() = Some(vec![first, disabled, second]);
+    let providers = Providers::new(mock_config(address), CancellationToken::new()).unwrap();
+    let mut subscriptions = Subscriptions::new("conduit-1".into(), "bot".into());
+    assert_eq!(
+        subscriptions
+            .refresh_remote_bounded(&providers, &CancellationToken::new(), 2)
+            .await
+            .unwrap(),
+        2
+    );
+    let desired = (1..=2)
+        .map(|id| conduit::Desired {
+            kind: "stream.online",
+            version: "1",
+            broadcaster: id,
+            user: None,
+        })
+        .collect::<Vec<_>>();
+    let summary = subscriptions
+        .reconcile(&providers, &desired, true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!((summary.kept, summary.removed, summary.created), (2, 1, 0));
+    assert_eq!(*state.deleted.lock().unwrap(), vec!["disabled"]);
+    assert_eq!(
+        state.creates.load(Ordering::SeqCst),
+        0,
+        "cleanup pagination must never publish a partial enabled cache"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn revocation_action_overflow_rescans_every_supported_grant_without_losing_consent_updates() {
+    let (state, address, server) = helix_server().await;
+    let config = mock_config(address);
+    let store = Store::open(":memory:").await.unwrap();
+    store.call(|db| {
+        let transaction = db.transaction()?;
+        for id in 1..=conduit::MAX_ACTIVE_GRANTS as i64 {
+            transaction.execute(
+                "INSERT INTO users(osu_id,osu_username,twitch_id,twitch_username,settings_json) VALUES(?1,'osu',?1,?2,'{\"enable\":true}')",
+                rusqlite::params![id, format!("streamer{id}")],
+            )?;
+            transaction.execute(
+                "INSERT INTO twitch_channel_grants(twitch_id,granted_at,status) VALUES(?1,0,'granted')",
+                [id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }).await.unwrap();
+    let (signals, signal_rx) = watch::channel(Signal::default());
+    let before = *signal_rx.borrow();
+    let (actions, action_rx) = maintenance::actions();
+    for id in 1..=conduit::MAX_ACTIVE_GRANTS as i64 {
+        maintenance::enqueue(
+            &actions,
+            &signals,
+            Action::Revoked {
+                id,
+                expected_revision: 1,
+            },
+        );
+    }
+    assert_eq!(
+        action_rx.len(),
+        maintenance::TARGET_CAPACITY,
+        "the foreground action queue must remain bounded"
+    );
+    assert!(
+        signal_rx.borrow().consent_revision > before.consent_revision,
+        "overflow must preserve an authoritative full-consent-scan obligation"
+    );
+    assert_eq!(
+        signal_rx.borrow().snapshot_revision,
+        before.snapshot_revision
+    );
+    assert_eq!(state.consent_calls.load(Ordering::SeqCst), 0);
+    let (targets, _) = watch::channel(1);
+    let (_, topology) = watch::channel(Topology {
+        remote_count: 1,
+        attached_count: 1,
+    });
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let mut instance = Maintenance::new(
+        config,
+        store.clone(),
+        providers,
+        "conduit-1".into(),
+        "bot".into(),
+        Channels {
+            membership: store.channel_changes(),
+            signals: signal_rx,
+            actions: action_rx,
+            targets,
+            topology,
+        },
+    );
+    instance.drain_actions();
+    instance.require_consent_rescan();
+    instance.rescan_revocations().await.unwrap();
+    state.consent_mode.store(1, Ordering::SeqCst);
+    for _ in 0..conduit::MAX_ACTIVE_GRANTS.div_ceil(10) {
+        instance.rescan_revocations().await.unwrap();
+        instance
+            .check_revocations(&CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    assert!(
+        store.granted_twitch_ids().await.unwrap().is_empty(),
+        "even overflowed revocations must produce durable consent updates at full supported capacity"
+    );
+    assert!(
+        state
+            .consent_queries
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|ids| ids.len() <= 10)
+    );
+    server.abort();
 }

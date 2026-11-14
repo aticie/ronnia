@@ -43,6 +43,12 @@ const MAX_STATE_ATTEMPTS: usize = 4;
 /// evidence is retained until the operator reauthorizes (never delete by accident).
 const UNUSABLE: i64 = -1;
 
+#[cfg(test)]
+type RefreshPersistPause = (
+    tokio_util::sync::CancellationToken,
+    tokio_util::sync::CancellationToken,
+);
+
 #[derive(Clone, Debug, Serialize)]
 pub struct BotIdentity {
     pub user_id: String,
@@ -58,6 +64,8 @@ pub struct TwitchAuth {
     key: [u8; 32],
     refresh: Arc<Mutex<()>>,
     validated_this_process: Arc<AtomicBool>,
+    #[cfg(test)]
+    before_refresh_persist: Arc<Mutex<Option<RefreshPersistPause>>>,
 }
 
 impl TwitchAuth {
@@ -83,6 +91,8 @@ impl TwitchAuth {
             key,
             refresh: Arc::new(Mutex::new(())),
             validated_this_process: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            before_refresh_persist: Arc::new(Mutex::new(None)),
         })
     }
 }

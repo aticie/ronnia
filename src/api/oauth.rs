@@ -502,7 +502,7 @@ async fn complete_account(
             if let Some(granted_at) = grant {
                 let active_at = now + grant_grace as i64;
                 tx.execute(
-                    "INSERT INTO twitch_channel_grants(twitch_id,granted_at,active_at,status) VALUES(?1,?2,?3,'granted') ON CONFLICT(twitch_id) DO UPDATE SET granted_at=excluded.granted_at,active_at=excluded.active_at,status='granted'",
+                    "INSERT INTO twitch_channel_grants(twitch_id,granted_at,active_at,status) VALUES(?1,?2,?3,'granted') ON CONFLICT(twitch_id) DO UPDATE SET granted_at=excluded.granted_at,active_at=excluded.active_at,status='granted',revision=twitch_channel_grants.revision+1",
                     params![twitch_id, granted_at, active_at],
                 )?;
                 tx.execute("DELETE FROM legacy_live WHERE twitch_id=?1", [twitch_id])?;

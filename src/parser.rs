@@ -18,7 +18,7 @@ pub struct Beatmap {
 }
 
 static MODS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:EZ|HD|HR|DT|HT|NC|FL|SO|PF|SD)+\b").expect("static mod expression")
+    Regex::new(r"\b(?i-u:(?:EZ|HD|HR|DT|HT|NC|FL|SO|PF|SD)+)\b").expect("static mod expression")
 });
 const MOD_NAMES: [&str; 10] = ["EZ", "HD", "HR", "DT", "HT", "NC", "FL", "SO", "PF", "SD"];
 
@@ -42,7 +42,12 @@ pub fn parse_link(candidate: &str, content: &str) -> Option<Beatmap> {
     let link = candidate[start..]
         .split('+')
         .next()?
-        .trim_matches(|c: char| matches!(c, '<' | '>' | '(' | ')' | '[' | ']' | ',' | '.' | '!'));
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '<' | '>' | '(' | ')' | '[' | ']' | ',' | '.' | '!' | '"' | '\'' | ';'
+            )
+        });
     let url = Url::parse(link).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()

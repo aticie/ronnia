@@ -76,6 +76,25 @@ fn urls_have_real_host_and_numeric_boundaries() {
     assert_eq!(parse_message("<https://osu.ppy.sh/b/42>").unwrap().id, 42);
 }
 #[test]
+fn unicode_case_folding_does_not_recognize_mods() {
+    let parsed = parse_message("https://osu.ppy.sh/b/42 +ſO +ſD +HDſO +HD +sO").unwrap();
+    assert_eq!(parsed.mods, "+HDSO");
+}
+
+#[test]
+fn quoted_and_semicolon_terminated_links() {
+    for link in [
+        "\"https://osu.ppy.sh/b/42\";",
+        "'https://osu.ppy.sh/beatmapsets/1#osu/42';",
+        "https://old.ppy.sh/p/beatmap?b=42;",
+    ] {
+        let parsed = parse_message(&format!("{link} +HD")).unwrap();
+        assert_eq!(parsed.id, 42, "{link}");
+        assert_eq!(parsed.mods, "+HD", "{link}");
+    }
+}
+
+#[test]
 fn durations() {
     assert_eq!(readable_duration(0), "0:00");
     assert_eq!(readable_duration(61), "1:01");
