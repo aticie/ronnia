@@ -246,7 +246,8 @@ async fn callback(
         ));
     }
     if query.error.is_some() {
-        let mut target = Url::parse(&state.config.public_origin).expect("validated frontend origin");
+        let mut target =
+            Url::parse(&state.config.public_origin).expect("validated frontend origin");
         target.set_path("/login");
         target.set_query(Some("login_error=1"));
         let mut response = security::redirect(target.as_str());
