@@ -739,6 +739,47 @@ async fn oauth_nonce_is_browser_bound_expiring_and_single_use() {
 }
 
 #[tokio::test]
+async fn cancelled_oauth_returns_to_frontend_without_changing_authentication() {
+    let fixture = Fixture::new().await;
+    let mut owner = fixture.browser();
+    owner.signup("osu", 10, 20).await;
+    for provider in ["osu", "twitch"] {
+        for context in ["anonymous", "signup", "session"] {
+            let mut browser = fixture.browser();
+            if context == "signup" {
+                let first = if provider == "osu" { "twitch" } else { "osu" };
+                assert_eq!(browser.oauth(first, 30).await.status, StatusCode::SEE_OTHER);
+            } else if context == "session" {
+                browser.jar = owner.jar.clone();
+            }
+            let before = browser.get("/user/me").await.json;
+            let nonce = browser.start(provider).await;
+            let mut expected_cookies = browser.jar.clone();
+            expected_cookies.remove(&format!("oauth_state_{provider}"));
+            let path = format!(
+                "/oauth2/{provider}-redirect?error=access_denied&error_description=Cancelled&state={nonce}"
+            );
+
+            // A denial still needs the initiating browser's state cookie.
+            let mut attacker = fixture.browser();
+            assert_eq!(attacker.get(&path).await.status, StatusCode::BAD_REQUEST);
+            let reply = browser.get(&path).await;
+            assert_eq!(reply.status, StatusCode::SEE_OTHER);
+            assert_eq!(
+                reply.headers[header::LOCATION],
+                "http://website.test/login?login_error=1"
+            );
+            assert_eq!(browser.jar, expected_cookies);
+            assert_eq!(browser.get("/user/me").await.json, before);
+
+            // Restoring the cookie cannot replay a consumed cancellation.
+            browser.jar.insert(format!("oauth_state_{provider}"), nonce);
+            assert_eq!(browser.get(&path).await.status, StatusCode::BAD_REQUEST);
+        }
+    }
+}
+
+#[tokio::test]
 async fn provider_failures_do_not_crash_and_legacy_jwts_require_fresh_login() {
     let fixture = Fixture::new().await;
     let mut browser = fixture.browser();
