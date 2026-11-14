@@ -7,7 +7,7 @@ This is a clean Rust cutover, not a Python wrapper. The reference behavior is th
 | Python behavior / defect | Rust behavior |
 |---|---|
 | TwitchIO 2.x IRC with an operator-pasted user token; library-owned recovery and no outer DNS-recovery contract | Current EventSub Conduit over WebSocket with managed bot authorization; application-owned capped, jittered recovery for DNS/connect/TLS/EOF/keepalive/close failures until shutdown |
-| Sixth channel-join failure deletes a registered user (`twitch_bot.py:278–284`) | Subscription failures never delete accounts; channel permission revocation marks consent revoked and waits for reauthorization, while a chat ban pauses only chat with an hourly recovery probe |
+| Sixth channel-join failure deletes a registered user (`twitch_bot.py:278–284`) | Subscription failures never delete accounts; streamer consent is revoked only after an authoritative broadcaster-scope check with a revision guard preserving newer reauthorization, while a chat ban pauses only chat with an hourly recovery probe |
 | Manager sends IRC channel snapshots over fragile localhost TCP; EOF loops and empty snapshots | Designed-in EventSub subscriptions with no internal TCP transport; chat and state subscriptions cover every enabled, authorized channel regardless of stream state |
 | User test mode cannot exercise the pipeline while offline or outside osu! because no chat was subscribed | Chat remains subscribed while offline; `test` mode bypasses the live/osu-category gate and request filters, while `enable=false` remains the master switch |
 | Static `TMI_TOKEN` expires and cannot renew | Bot account uses the device-code browser flow; AES-256-GCM encrypted access/refresh credentials with external key, `/validate` checks, single-flight rotation, and revocation handling |
@@ -16,7 +16,7 @@ This is a clean Rust cutover, not a Python wrapper. The reference behavior is th
 | Helix 401 calls authentication that keeps the existing expired token, then recursively retries while holding permits (`clients/twitch.py:42–60`) | Single-flight token refresh; invalidate expired token, release resource permits, retry safely without recursive semaphore acquisition |
 | osu! API failures parsed as ordinary success JSON; HTTP pacing races across concurrent calls | Status-aware errors, request deadlines, coordinated pacing, separate app/public/delegated credentials, shared pools |
 | osu! PM, Twitch success echo, and statistics run concurrently; failures can falsely claim success | Persist delivery intent first; confirmed PM precedes success history/cooldown and acknowledgement |
-| No durable delivery identity/outcome | Twitch message-ID deduplication and explicit pending/sending/sent/failed/uncertain outcomes; interrupted sends become uncertain |
+| No durable delivery identity/outcome | Twitch message-ID deduplication and explicit pending/sending/sent/failed/uncertain outcomes; interrupted new-bot sends become uncertain, while legacy claims remain owned by the bridge across Rust restarts |
 | No explicit ambiguous-send policy | Do not replay ambiguous POSTs. Inspection via `deliveries`. Known failures require a new chat request. Possible omissions are preferred over duplicate PMs, as chosen in design |
 | IRC acknowledges nothing explicit; chat success can be assumed from a send call | Helix Send Chat Message response must report `is_sent`; drop reasons are failures and ambiguous outcomes are never acknowledged or replayed |
 | Twitch eligibility is eventually reconciled only on the next minute poll | Consent, enablement, live/category events, and hard failures trigger immediate reconciliation; batch snapshots are a repair mechanism, not the routine path |
@@ -30,7 +30,7 @@ There is no static Twitch IRC token and no TwitchIO dependency. Temporary DNS/ne
 |---|---|
 | Full parser crashes on legacy `?s=...` links because single-map parsing indexes a missing `b` result | Parse legacy map/set queries safely; malformed inputs do not crash processing |
 | Regex host dots are unescaped and URL/numeric boundaries are loose | Parse actual supported hosts and IDs while preserving valid URL families and surrounding chat punctuation |
-| Mod regex matches inside ordinary words | Recognized mod runs must have word boundaries; ordering/deduplication and display-only semantics remain |
+| Mod regex matches inside ordinary words | Recognized ASCII mod runs must have word boundaries; Unicode case-folding cannot reach ASCII byte decoding; ordering/deduplication and display-only semantics remain |
 | Cooldown model default 0, backend/default metadata 30 | One 30-second default; explicit stored values preserved |
 | A channel's cooldown duration prunes entries belonging to other channels; inconsistent lookup/update keys | Stable channel/requester key, individually expired cooldowns, monotonic elapsed time |
 | Cooldown can be consumed by a later policy rejection or failed PM | Only confirmed successful requests establish cooldown; test-mode requests do not alter ordinary cooldown state |

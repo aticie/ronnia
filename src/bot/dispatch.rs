@@ -22,6 +22,7 @@ use crate::{
     twitch_auth::{BotIdentity, TwitchAuth},
 };
 use anyhow::{Result, anyhow};
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -325,11 +326,22 @@ impl Runtime {
         } else if owned.kind == conduit::CHAT_TYPE.0
             && matches!(status, "authorization_revoked" | "user_removed")
         {
-            self.store.revoke_twitch_channel(owned.broadcaster).await?;
-            tracing::warn!(
-                broadcaster = owned.broadcaster,
-                "channel grant marked revoked; the broadcaster must reauthorize before chat resumes"
-            );
+            let id = owned.broadcaster;
+            // Capture consent before queueing: a reauthorization during either
+            // the debounce or the HTTP validation must defeat this revocation.
+            let revision = self.store.call(move |db| {
+                Ok(db.query_row(
+                    "SELECT revision FROM twitch_channel_grants WHERE twitch_id=?1 AND status='granted'",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                ).optional()?)
+            }).await?;
+            if let Some(expected_revision) = revision {
+                self.target(maintenance::Action::Revoked {
+                    id,
+                    expected_revision,
+                });
+            }
         }
         // The maintenance owner re-lists before reconciliation; no second
         // owner mutates its subscription cache from the event path.

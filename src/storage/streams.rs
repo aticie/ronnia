@@ -144,8 +144,24 @@ impl Store {
     }
     pub async fn revoke_twitch_channel(&self, twitch_id: i64) -> Result<()> {
         self.write_notifying(move |tx| {
-            tx.execute("UPDATE twitch_channel_grants SET status='revoked' WHERE twitch_id=?1 AND status='granted'", [twitch_id])?;
+            tx.execute("UPDATE twitch_channel_grants SET status='revoked',revision=revision+1 WHERE twitch_id=?1 AND status='granted'", [twitch_id])?;
             users::refresh_eligibility(tx, twitch_id)
+        }).await
+    }
+    pub(crate) async fn revoke_twitch_channel_if_current(
+        &self,
+        twitch_id: i64,
+        revision: i64,
+    ) -> Result<bool> {
+        self.write_notifying(move |tx| {
+            let changed = tx.execute(
+                "UPDATE twitch_channel_grants SET status='revoked',revision=revision+1 WHERE twitch_id=?1 AND revision=?2 AND status='granted'",
+                params![twitch_id, revision],
+            )? == 1;
+            if changed {
+                users::refresh_eligibility(tx, twitch_id)?;
+            }
+            Ok(changed)
         }).await
     }
     pub async fn live_users(&self, limit: i64, offset: i64) -> Result<Vec<String>> {

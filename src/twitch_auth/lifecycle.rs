@@ -1,8 +1,8 @@
 //! Bot readiness and access-token access.
 //!
-//! Every entry point holds the process-wide single-flight gate, so at most one caller
-//! talks to Twitch at a time. A lost revision compare-and-swap means another writer
-//! already advanced the row, which is retried by reloading rather than refreshing twice.
+//! Every entry point holds the single-flight gate. A refresh transfers ownership of
+//! that gate to its spawned refresh-and-persist task, so caller cancellation cannot
+//! lose a successful rotation or let a second caller reuse its single-use token.
 
 use super::{
     BotIdentity, MAX_STATE_ATTEMPTS, REFRESH_MARGIN_SECS, TwitchAuth, UNUSABLE,
@@ -12,16 +12,30 @@ use super::{
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use std::sync::atomic::Ordering;
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 impl TwitchAuth {
+    /// Wait for a detached refresh to finish its durable write before runtime shutdown.
+    pub async fn finish_refresh(&self) {
+        let _single_flight = self.refresh.lock().await;
+    }
+
+    async fn lock_refresh(&self, shutdown: &CancellationToken) -> Result<OwnedMutexGuard<()>> {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => bail!("Twitch bot authorization cancelled"),
+            guard = self.refresh.clone().lock_owned() => Ok(guard),
+        }
+    }
+
     /// Return the configured bot identity, validating hourly and refreshing proactively.
     ///
     /// `Ok(None)` means no bot has ever authorized. A persisted unusable/revoked grant is
     /// an error without network traffic, so supervisors back off instead of hot-looping.
     /// Transient provider failures are errors and leave stored evidence untouched.
     pub async fn ready_bot(&self, shutdown: &CancellationToken) -> Result<Option<BotIdentity>> {
-        let _single_flight = self.refresh.lock().await;
+        let mut single_flight = self.lock_refresh(shutdown).await?;
         for _ in 0..MAX_STATE_ATTEMPTS {
             let Some(grant) = self.load().await? else {
                 return Ok(None);
@@ -49,9 +63,11 @@ impl TwitchAuth {
             let mut revision = grant.revision;
             let mut rotated = false;
             if expiring {
-                let Some((next, next_revision)) =
-                    self.rotate(&grant, credentials, shutdown).await?
-                else {
+                let (guard, rotation) = self
+                    .rotate(&grant, credentials, single_flight, shutdown)
+                    .await?;
+                single_flight = guard;
+                let Some((next, next_revision)) = rotation else {
                     continue;
                 };
                 credentials = next;
@@ -77,9 +93,11 @@ impl TwitchAuth {
                     continue;
                 }
                 ValidationOutcome::Unauthorized => {
-                    let Some((next, next_revision)) =
-                        self.rotate(&grant, credentials, shutdown).await?
-                    else {
+                    let (guard, rotation) = self
+                        .rotate(&grant, credentials, single_flight, shutdown)
+                        .await?;
+                    single_flight = guard;
+                    let Some((next, next_revision)) = rotation else {
                         continue;
                     };
                     credentials = next;
@@ -155,14 +173,18 @@ impl TwitchAuth {
         shutdown: &CancellationToken,
         usable: impl Fn(&StoredGrant, &Credentials) -> bool,
     ) -> Result<String> {
-        let _single_flight = self.refresh.lock().await;
+        let mut single_flight = self.lock_refresh(shutdown).await?;
         for _ in 0..MAX_STATE_ATTEMPTS {
             let grant = self.usable_grant().await?;
             let credentials = self.decrypt(&grant)?;
             if usable(&grant, &credentials) {
                 return Ok(credentials.access_token);
             }
-            match self.rotate(&grant, credentials, shutdown).await? {
+            let (guard, rotated) = self
+                .rotate(&grant, credentials, single_flight, shutdown)
+                .await?;
+            single_flight = guard;
+            match rotated {
                 Some((rotated, _)) => return Ok(rotated.access_token),
                 None => continue,
             }

@@ -1,6 +1,6 @@
 //! The single SQLite writer: a bounded mailbox served by one dedicated thread,
 //! plus the revision watch that announces channel-list changes.
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use rusqlite::{Connection, Transaction};
 use std::{path::Path, thread};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -33,6 +33,16 @@ fn serve(path: &Path, mut receiver: mpsc::Receiver<Job>, ready: oneshot::Sender<
 
 impl Store {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+        ensure!(
+            !path.as_ref().as_os_str().is_empty()
+                && !path
+                    .as_ref()
+                    .as_os_str()
+                    .to_string_lossy()
+                    .trim()
+                    .is_empty(),
+            "database path must not be empty"
+        );
         let path = path.as_ref().to_path_buf();
         let (sender, receiver) = mpsc::channel::<Job>(128);
         let (ready, ready_rx) = oneshot::channel();

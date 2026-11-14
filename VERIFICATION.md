@@ -6,11 +6,32 @@ The repository-split section records current root-layout and separate-Compose ch
 
 ## Chat-ban visibility and recovery (2026-11-14)
 
-Schema version 5 persists `chat_banned_at` and `chat_retry_at` on each Twitch channel grant. A `chat_user_banned` revocation or 403 chat-subscription response pauses only that channel's chat creation for one hour; consent, live eligibility, and the three state subscriptions remain intact. A later successful creation clears the persisted ban. `/user/me` exposes the state as `twitchBotBanned` independently of `twitchBotAuthorized`.
+Schema version 6 persists `chat_banned_at` and `chat_retry_at` on each Twitch channel grant. A `chat_user_banned` revocation or 403 chat-subscription response pauses only that channel's chat creation for one hour; consent, live eligibility, and the three state subscriptions remain intact. A later successful creation clears the persisted ban. `/user/me` exposes the state as `twitchBotBanned` independently of `twitchBotAuthorized`.
 
-`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` passed in the `rust:1-bookworm` container: **136 passed, 0 failed**. New regressions cover the schema upgrade, ban/clear transitions without grant revocation, chat-only desired-set filtering, 403 → no repeated creation POSTs → successful unban probe, provider error-body diagnostics, and the `/user/me` projection.
+`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` passed in the `rust:1-bookworm` container: **157 passed, 0 failed**. New regressions cover the schema upgrade, ban/clear transitions without grant revocation, chat-only desired-set filtering, 403 → no repeated creation POSTs → successful unban probe, provider error-body diagnostics, and the `/user/me` projection.
 
 The separate dashboard passed `npm run build` (`vue-tsc --noEmit` plus Vite). A real browser rendered `/settings` against a mocked authorized-and-banned `/api/user/me`; `[data-testid="twitch-bot-banned"]` displayed the amber warning and `/unban ronniabot` instruction. No production deployment, live unban, or provider-state mutation was performed.
+
+## Review fixes (2026-11-14)
+
+Verified the fixes following review of PR #57, based on `migration/rust-port` at `50c2e4a`. Rust checks ran with Rust 1.100.0 in an isolated `rust:1-bookworm`-derived toolchain after the host Rust installation became unavailable. No production provider credentials or deployment were used.
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --locked --all-targets -- -D warnings` | Pass |
+| `cargo test --locked` | 152 passed |
+| `cargo build --locked --release` | Pass |
+| `scripts/smoke.py --binary <release-binary>` | Pass, including exact handoff-reader delivery, old-session rejection, and durable broadcaster-consent revocation |
+| `scripts/scale.py --binary <release-binary> --channels 8 --requests 6` | Pass, local lifecycle/load compatibility |
+| Production Docker image | Pass: UID 10001, nonempty CA bundle, packaged license, readiness with a synthetic `SENTRY_DSN`, clean shutdown |
+| Isolated CLI scenarios | Pass: key generation despite invalid service config; empty environment/CLI database paths rejected; API-only OAuth credentials required; normalized origin/callback/client ID and Secure cookie |
+
+Regression coverage includes the Unicode mod panic, real duplicate-delivery and interrupted-send paths, legacy pending reports across Rust startup, cancellation/backpressure during refresh persistence, stale grant-revocation CAS, disabled-subscription cleanup at full capacity, unspecified pagination sizes, authoritative broadcaster consent, and revocation overflow at 2,500 grants. OAuth mocks validate provider-specific credentials and callback URIs; the grace timer is exercised with controlled Tokio time rather than a one-second wall-clock race.
+
+The smoke and scale harnesses now commit and close every SQLite connection. Leaving them open (`with sqlite3.connect(...)` commits without closing) kept the harness process attached to a pre-restart WAL index, so its later reads intermittently missed rows the service had committed; repeated CI failures at startup snapshot checks traced to this, not to the service. The grant-metadata check now waits for the post-refresh validation stamp instead of sampling the transient `validated_at=0` state.
+
+Schema v5 upgrades preserve existing grants and deliveries. Real Twitch/osu! interoperability, production throughput, and hard process-kill recovery during a provider token exchange remain outside this local proof.
 
 ## Single-replica bounded scale (2026-11-05)
 

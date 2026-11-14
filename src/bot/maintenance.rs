@@ -10,10 +10,12 @@ use crate::{
     providers::Providers,
     storage::{ChannelGrant, Store},
 };
-use anyhow::Result;
+use anyhow::{Context, Result, bail, ensure};
+use reqwest::Method;
 use rusqlite::OptionalExtension;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    ops::Bound::{Excluded, Unbounded},
     sync::Arc,
     time::Duration,
 };
@@ -162,6 +164,7 @@ pub(super) struct Signal {
     pub(super) revision: u64,
     pub(super) audit_revision: u64,
     pub(super) snapshot_revision: u64,
+    pub(super) consent_revision: u64,
 }
 
 impl Default for Signal {
@@ -170,6 +173,7 @@ impl Default for Signal {
             revision: 1,
             audit_revision: 1,
             snapshot_revision: 1,
+            consent_revision: 0,
         }
     }
 }
@@ -190,20 +194,27 @@ pub(super) fn request(signals: &watch::Sender<Signal>, audit: bool, snapshot: bo
 pub(super) enum Action {
     Schedule { id: i64, expected_revision: i64 },
     Cancel { id: i64 },
+    Revoked { id: i64, expected_revision: i64 },
 }
 
 pub(super) fn actions() -> (mpsc::Sender<Action>, mpsc::Receiver<Action>) {
     mpsc::channel(TARGET_CAPACITY)
 }
 
-/// Failed bounded admission is coalesced into a full-snapshot obligation.
+/// Failed admission preserves the appropriate full-snapshot or consent-scan obligation.
 pub(super) fn enqueue(
     actions: &mpsc::Sender<Action>,
     signals: &watch::Sender<Signal>,
     action: Action,
 ) {
-    if actions.try_send(action).is_err() {
-        request(signals, false, true);
+    if let Err(error) = actions.try_send(action) {
+        if matches!(error.into_inner(), Action::Revoked { .. }) {
+            signals.send_modify(|signal| {
+                signal.consent_revision = signal.consent_revision.saturating_add(1);
+            });
+        } else {
+            request(signals, false, true);
+        }
     }
 }
 
@@ -297,6 +308,11 @@ pub(super) struct Maintenance {
     config: Arc<Config>,
     store: Store,
     providers: Providers,
+    revoked: BTreeMap<i64, i64>,
+    revocation_due: Option<Instant>,
+    revocation_retry: Backoff,
+    revocation_cursor: i64,
+    consent_scan_after: Option<i64>,
     bot_id: String,
     pub(super) subs: conduit::Subscriptions,
     pub(super) pending: Pending,
@@ -327,6 +343,11 @@ impl Maintenance {
             config,
             store,
             providers,
+            revoked: BTreeMap::new(),
+            revocation_due: None,
+            revocation_retry: Backoff::new(RETRY_BASE, RETRY_CAP),
+            revocation_cursor: 0,
+            consent_scan_after: None,
             subs: conduit::Subscriptions::new(conduit_id, bot_id.clone()),
             bot_id,
             pending: Pending::default(),
@@ -455,8 +476,126 @@ impl Maintenance {
                 Action::Cancel { id } => {
                     self.pending.due.remove(&id);
                 }
+                Action::Revoked {
+                    id,
+                    expected_revision,
+                } => self.queue_revocation(id, expected_revision),
             }
         }
+    }
+
+    fn queue_revocation(&mut self, id: i64, expected_revision: i64) {
+        if self.revoked.len() < conduit::MAX_ACTIVE_GRANTS || self.revoked.contains_key(&id) {
+            self.revoked
+                .entry(id)
+                .and_modify(|revision| *revision = (*revision).max(expected_revision))
+                .or_insert(expected_revision);
+            self.revocation_due.get_or_insert_with(|| {
+                (Instant::now() + TARGET_DEBOUNCE)
+                    .max(self.revocation_retry.until().unwrap_or_else(Instant::now))
+            });
+        } else {
+            self.consent_scan_after.get_or_insert(0);
+            tracing::warn!(
+                id,
+                "revocation inbox full; coalescing authoritative consent rescan"
+            );
+        }
+    }
+
+    pub(super) fn require_consent_rescan(&mut self) {
+        self.consent_scan_after = Some(0);
+    }
+
+    pub(super) async fn rescan_revocations(&mut self) -> Result<()> {
+        let Some(after) = self.consent_scan_after else {
+            return Ok(());
+        };
+        let available = conduit::MAX_ACTIVE_GRANTS.saturating_sub(self.revoked.len());
+        if available == 0 {
+            return Ok(());
+        }
+        let grants = self.store.call(move |db| {
+            let mut statement = db.prepare(
+                "SELECT twitch_id,revision FROM twitch_channel_grants WHERE status='granted' AND twitch_id>?1 ORDER BY twitch_id LIMIT ?2"
+            )?;
+            let grants = statement.query_map([after, available as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(grants)
+        }).await?;
+        // Scan the durable source in bounded pages, including disabled/grace
+        // accounts, instead of assuming all stored grants fit the active cap.
+        self.consent_scan_after = if grants.len() == available {
+            grants.last().map(|(id, _)| *id)
+        } else {
+            None
+        };
+        for (id, revision) in grants {
+            self.queue_revocation(id, revision);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn check_revocations(&mut self, shutdown: &CancellationToken) -> Result<()> {
+        self.revocation_due = None;
+        // Authorization/users accepts ten IDs. Rotate through the bounded inbox
+        // so an omitted/deleted user never starves later consent checks.
+        let batch: Vec<(i64, i64)> = self
+            .revoked
+            .range((Excluded(self.revocation_cursor), Unbounded))
+            .chain(self.revoked.range(..=self.revocation_cursor))
+            .take(10)
+            .map(|(id, revision)| (*id, *revision))
+            .collect();
+        let Some((last, _)) = batch.last() else {
+            return Ok(());
+        };
+        self.revocation_cursor = *last;
+        let result: Result<bool> = async {
+            let query = batch.iter().map(|(id, _)| ("user_id".to_owned(), id.to_string())).collect::<Vec<_>>();
+            let value = tokio::select! {
+                _ = shutdown.cancelled() => bail!("authorization lookup cancelled"),
+                result = self.providers.twitch_request(Method::GET, "authorization/users", &query, None) => result?,
+            };
+            let rows = value["data"].as_array().context("authorization lookup omitted data")?;
+            let mut authorized = BTreeMap::new();
+            for row in rows {
+                let id = row["user_id"].as_str().context("authorization row omitted user_id")?.parse::<i64>()?;
+                ensure!(batch.iter().any(|(requested, _)| *requested == id), "authorization lookup returned an unrequested user");
+                let granted = row["has_authorized"].as_bool().context("authorization row omitted has_authorized")?;
+                let scopes = row["scopes"].as_array().context("authorization row omitted scopes")?;
+                ensure!(scopes.iter().all(|scope| scope.is_string()), "authorization row contained malformed scopes");
+                let consent = granted && scopes.iter().any(|scope| scope.as_str() == Some("channel:bot"));
+                ensure!(authorized.insert(id, consent).is_none(), "authorization lookup repeated a user");
+            }
+            for (id, revision) in &batch {
+                let Some(consent) = authorized.get(id) else { continue };
+                // Only authoritative broadcaster consent, never bot token
+                // health, can remove a streamer's stored authorization.
+                if !consent && self.store.revoke_twitch_channel_if_current(*id, *revision).await? {
+                    tracing::warn!(broadcaster = *id, "channel grant marked revoked after checking broadcaster authorization");
+                }
+                self.revoked.remove(id);
+            }
+            Ok(authorized.len() == batch.len())
+        }.await;
+        if matches!(result, Ok(true)) {
+            self.revocation_retry.reset();
+        } else {
+            self.revocation_retry.fail();
+            tracing::warn!(
+                "broadcaster authorization lookup incomplete; retaining pending consent checks"
+            );
+        }
+        if !self.revoked.is_empty() {
+            self.revocation_due = Some(
+                self.revocation_retry
+                    .until()
+                    .unwrap_or_else(|| Instant::now() + TARGET_DEBOUNCE),
+            );
+        }
+        result.map(|_| ())
     }
 
     pub(super) async fn run_pending(&mut self) -> Result<()> {
@@ -528,6 +667,8 @@ impl Maintenance {
         let mut audit_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
         let mut reconcile_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
         let mut snapshot_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
+        let mut consent_scan_retry = Backoff::new(RETRY_BASE, RETRY_CAP);
+        let mut consent_ack = 0;
         let mut next_periodic =
             Instant::now() + Duration::from_secs(self.config.reconcile_interval_secs.max(1));
         let mut next_audit = Instant::now() + AUDIT_INTERVAL;
@@ -543,6 +684,10 @@ impl Maintenance {
             let channel_revision = *self.channels.borrow_and_update();
             let topology = *self.topology.borrow_and_update();
             let now = Instant::now();
+            if consent_ack < signal.consent_revision {
+                self.require_consent_rescan();
+                consent_ack = signal.consent_revision;
+            }
             if now >= next_periodic {
                 membership_pending = true;
                 reconcile_pending = true;
@@ -568,6 +713,27 @@ impl Maintenance {
                 self.snapshot_pending = true;
             }
 
+            if self.consent_scan_after.is_some()
+                && self.revoked.len() < conduit::MAX_ACTIVE_GRANTS
+                && consent_scan_retry.ready(now)
+            {
+                match self.rescan_revocations().await {
+                    Ok(()) => consent_scan_retry.reset(),
+                    Err(error) => {
+                        consent_scan_retry.fail();
+                        tracing::warn!(error = %error, "could not rescan broadcaster consent; retaining obligation");
+                    }
+                }
+                continue;
+            }
+            if self.revocation_due.is_some_and(|due| due <= now) {
+                if let Err(error) = self.check_revocations(&shutdown).await {
+                    tracing::warn!(error = %error, "could not apply channel revocation");
+                }
+                membership_pending = true;
+                reconcile_pending = true;
+                continue;
+            }
             // Only one operation is in flight. Each acknowledgement uses the
             // revision captured before that operation; newer watch values survive.
             if membership_pending && member_retry.ready(now) {
@@ -719,6 +885,15 @@ impl Maintenance {
             if let Some(until) = self.pending.next_deadline() {
                 deadline = deadline.min(until);
             }
+            if let Some(until) = self.revocation_due {
+                deadline = deadline.min(until);
+            }
+            if self.consent_scan_after.is_some()
+                && self.revoked.len() < conduit::MAX_ACTIVE_GRANTS
+                && let Some(until) = consent_scan_retry.until()
+            {
+                deadline = deadline.min(until);
+            }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = sleep_until(deadline) => {},
@@ -731,6 +906,7 @@ impl Maintenance {
                             if !self.pending.schedule(id, expected_revision) { self.snapshot_pending = true; }
                         }
                         Some(Action::Cancel { id }) => { self.pending.due.remove(&id); }
+                        Some(Action::Revoked { id, expected_revision }) => self.queue_revocation(id, expected_revision),
                         None => actions_open = false,
                     }
                 },

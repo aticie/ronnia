@@ -41,12 +41,26 @@ impl Fixture {
         migration_cutoff_at: Option<String>,
         internal_api_token: Option<String>,
     ) -> Self {
-        async fn token(Form(form): Form<BTreeMap<String, String>>) -> Response {
+        async fn token(
+            State(provider): State<&'static str>,
+            Form(form): Form<BTreeMap<String, String>>,
+        ) -> Response {
             assert_eq!(
                 form.get("grant_type").map(String::as_str),
                 Some("authorization_code")
             );
-            assert!(form.contains_key("redirect_uri"));
+            assert_eq!(
+                form.get("client_id"),
+                Some(&format!("test-{provider}-client"))
+            );
+            assert_eq!(
+                form.get("client_secret"),
+                Some(&format!("test-{provider}-secret"))
+            );
+            assert_eq!(
+                form.get("redirect_uri"),
+                Some(&format!("http://api.test/oauth2/{provider}-redirect"))
+            );
             let code = form.get("code").unwrap();
             if code == "fail" {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -73,7 +87,7 @@ impl Fixture {
                         id => id,
                     };
                     Json(json!({
-                        "client_id": if token == "wrong-client" { "other-client" } else { "test-client" },
+                        "client_id": if token == "wrong-client" { "other-client" } else { "test-twitch-client" },
                         "user_id": user_id,
                         "scopes": if token == "missing-scope" { vec!["user:read:email"] } else { vec!["channel:bot"] },
                     })).into_response()
@@ -92,7 +106,7 @@ impl Fixture {
                 token.parse().unwrap()
             };
             if twitch {
-                assert_eq!(&headers["Client-Id"], "test-client");
+                assert_eq!(&headers["Client-Id"], "test-twitch-client");
                 Json(
                     json!({"data":[{"id":id.to_string(),"login":format!("streamer{id}"),"profile_image_url":"https://images.test/twitch"}]}),
                 )
@@ -103,9 +117,17 @@ impl Fixture {
             }
         }
         let providers = Router::new()
-            .route("/twitch/oauth/token", post(token))
+            .merge(
+                Router::new()
+                    .route("/twitch/oauth/token", post(token))
+                    .with_state("twitch"),
+            )
             .route("/twitch/oauth/validate", get(validate))
-            .route("/osu/oauth/token", post(token))
+            .merge(
+                Router::new()
+                    .route("/osu/oauth/token", post(token))
+                    .with_state("osu"),
+            )
             .merge(
                 Router::new()
                     .route("/twitch/api/users", get(profile))
@@ -129,11 +151,11 @@ impl Fixture {
             api_origin: "http://api.test".into(),
             cookie_secure: false,
             debug_mode: false,
-            twitch_client_id: "test-client".into(),
-            twitch_client_secret: "test-secret".into(),
+            twitch_client_id: "test-twitch-client".into(),
+            twitch_client_secret: "test-twitch-secret".into(),
             twitch_redirect_uri: "http://api.test/oauth2/twitch-redirect".into(),
-            osu_client_id: "test-client".into(),
-            osu_client_secret: "test-secret".into(),
+            osu_client_id: "test-osu-client".into(),
+            osu_client_secret: "test-osu-secret".into(),
             osu_redirect_uri: "http://api.test/oauth2/osu-redirect".into(),
             twitch_eventsub_url: "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30"
                 .into(),
@@ -262,10 +284,14 @@ impl Browser {
             }
         }
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let json = if bytes.is_empty() {
-            Value::Null
+        let json = if headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+        {
+            serde_json::from_slice(&bytes).expect("valid JSON response body")
         } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            Value::Null
         };
         Reply {
             status,
@@ -282,6 +308,14 @@ impl Browser {
         let location = url::Url::parse(reply.headers[header::LOCATION].to_str().unwrap()).unwrap();
         assert_eq!(location.path(), format!("/{provider}/oauth/authorize"));
         let query = location.query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            query.get("client_id").map(|v| &**v),
+            Some(format!("test-{provider}-client").as_str())
+        );
+        assert_eq!(
+            query.get("redirect_uri").map(|v| &**v),
+            Some(format!("http://api.test/oauth2/{provider}-redirect").as_str())
+        );
         assert_eq!(
             query.get("scope").map(|v| &**v),
             Some(if provider == "twitch" {
@@ -603,12 +637,33 @@ async fn twitch_reauth_requires_the_same_identity_and_invalid_tokens_grant_nothi
     let mut owner = fixture.browser();
     owner.signup("osu", 10, 20).await;
     let old_token = owner.jar["token"].clone();
+    let previous_grant_revision: i64 = fixture
+        .state
+        .store
+        .call(|db| {
+            Ok(db.query_row(
+                "SELECT revision FROM twitch_channel_grants WHERE twitch_id=20",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
     // Reauthorizing the same Twitch identity rotates the session.
     assert_eq!(
         owner.oauth("twitch", 20).await.status,
         StatusCode::SEE_OTHER
     );
     assert_ne!(owner.jar["token"], old_token);
+    assert!(
+        !fixture
+            .state
+            .store
+            .revoke_twitch_channel_if_current(20, previous_grant_revision)
+            .await
+            .unwrap(),
+        "an in-flight revocation must not undo a newer browser reauthorization"
+    );
     // A different identity must not replace account ownership.
     assert_eq!(owner.oauth("twitch", 21).await.status, StatusCode::CONFLICT);
     assert_eq!(
@@ -676,7 +731,10 @@ async fn twitch_reauth_requires_the_same_identity_and_invalid_tokens_grant_nothi
 async fn public_routes_and_bounded_pagination_preserve_shapes() {
     let fixture = Fixture::new().await;
     let mut browser = fixture.browser();
-    assert_eq!(browser.get("/user/me").await.json, Value::Null);
+    let profile = browser.get("/user/me").await;
+    assert_eq!(profile.status, StatusCode::OK);
+    assert_eq!(profile.headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(profile.json, Value::Null);
     for path in ["/user/settings", "/user/exclude"] {
         assert_eq!(browser.get(path).await.status, StatusCode::UNAUTHORIZED);
     }
@@ -2100,7 +2158,7 @@ async fn legacy_claim_and_report_endpoints_are_exact_and_idempotent() {
 
 #[tokio::test]
 async fn new_grants_stay_private_to_the_new_bot_during_the_grace_window() {
-    let fixture = Fixture::with_grace(1).await;
+    let fixture = Fixture::with_grace(3600).await;
     let mut changes = fixture.state.store.channel_changes();
     changes.borrow_and_update();
     let mut browser = fixture.browser();
@@ -2110,7 +2168,7 @@ async fn new_grants_stay_private_to_the_new_bot_during_the_grace_window() {
         browser.get("/user/me").await.json["twitchBotAuthorized"],
         true
     );
-    let (active_at, now): (i64, i64) = fixture
+    let (active_at, issued_at): (i64, i64) = fixture
         .state
         .store
         .call(|db| {
@@ -2120,12 +2178,16 @@ async fn new_grants_stay_private_to_the_new_bot_during_the_grace_window() {
                     [],
                     |r| r.get(0),
                 )?,
-                db.query_row("SELECT unixepoch()", [], |r| r.get(0))?,
+                db.query_row("SELECT expires_at-86400 FROM sessions", [], |r| r.get(0))?,
             ))
         })
         .await
         .unwrap();
-    assert!(active_at > now, "grant must not be active during grace");
+    assert_eq!(
+        active_at - issued_at,
+        3600,
+        "grant uses the configured grace"
+    );
     assert!(
         fixture
             .state
@@ -2136,10 +2198,21 @@ async fn new_grants_stay_private_to_the_new_bot_during_the_grace_window() {
             .is_empty()
     );
     assert!(!changes.has_changed().unwrap());
-    tokio::time::timeout(std::time::Duration::from_secs(3), changes.changed())
+    // SQLite uses wall time, not Tokio's test clock. Expire the stored deadline
+    // explicitly, then advance the notification timer without a real-time race.
+    fixture
+        .state
+        .store
+        .call(|db| {
+            db.execute("UPDATE twitch_channel_grants SET active_at=unixepoch()", [])?;
+            Ok(())
+        })
         .await
-        .expect("delayed channel notification")
         .unwrap();
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    changes.changed().await.unwrap();
     assert_eq!(
         fixture.state.store.granted_twitch_ids().await.unwrap(),
         vec![20]
