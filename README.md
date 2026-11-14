@@ -82,6 +82,8 @@ Provider endpoint overrides exist for isolated integration runs: `TWITCH_API_BAS
 
 Register the exact website callback URLs with Twitch and osu!. Streamer Twitch signup requests `channel:bot`; reauthorization is required at cutover because accounts created before the switch have no current chat permission. The bot user authorization is separate and stored encrypted. App, osu! public, osu! delegated, and bot tokens refresh independently. Do not log configuration objects or credentials.
 
+Cancelling either provider's browser authorization returns HTTP 303 to `${PUBLIC_ORIGIN}/login?login_error=1`. The dashboard consumes that marker and shows **Login failed** once. Cancellation still requires the original browser-bound, single-use OAuth state; it clears only that provider's state cookie and preserves existing sessions or partial signup.
+
 ### Container
 
 ```sh
