@@ -2,6 +2,7 @@
 //! database and one lifecycle.
 
 pub mod api;
+pub mod backup;
 pub mod bot;
 pub mod config;
 pub mod domain;

@@ -2,7 +2,7 @@
   "$schema": "https://schema.railpack.com",
   "provider": "rust",
   "packages": {
-    "rust": "1.99.1"
+    "rust": "1.100.0"
   },
   "steps": {
     "build": {

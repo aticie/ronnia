@@ -156,6 +156,7 @@ impl Fixture {
             migration_cutoff_at,
             migration_grant_grace_secs: grant_grace,
             internal_api_token,
+            backup: None,
         });
         let store = Store::open(":memory:").await.unwrap();
         let http = reqwest::Client::builder()
