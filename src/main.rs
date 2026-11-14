@@ -5,7 +5,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use ronnia::{api, bot, config::Config, storage::Store, twitch_auth::TwitchAuth};
+use ronnia::{api, backup, bot, config::Config, storage::Store, twitch_auth::TwitchAuth};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
@@ -98,7 +98,9 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("Starting Tokio runtime")?;
-    runtime.block_on(async_main(cli))
+    let result = runtime.block_on(async_main(cli));
+    runtime.shutdown_background();
+    result
 }
 
 fn sentry_options() -> Result<Option<sentry::ClientOptions>> {
@@ -209,19 +211,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Command::Backup { destination } => {
             let display = destination.display().to_string();
-            if destination.exists() {
-                bail!("Backup destination already exists: {display}");
-            }
-            let path = destination
-                .to_str()
-                .context("Backup path must be valid UTF-8")?
-                .to_owned();
-            store
-                .call(move |conn| {
-                    conn.execute("VACUUM INTO ?1", [path])?;
-                    Ok(())
-                })
-                .await?;
+            backup::create_snapshot(&store, destination).await?;
             println!("Created consistent backup: {display}");
             Ok(())
         }
@@ -274,6 +264,9 @@ async fn serve(config: Arc<Config>, store: Store) -> Result<()> {
             .await?;
         Ok(())
     });
+    if let Some(backup_config) = config.backup.clone() {
+        tasks.spawn(backup::run(backup_config, store.clone(), shutdown.clone()));
+    }
     if let Some(auth) = &bot_auth {
         let bot_shutdown = shutdown.clone();
         tasks.spawn(bot::run(config, store, auth.clone(), bot_shutdown));

@@ -299,6 +299,7 @@ impl Fixture {
             migration_cutoff_at: None,
             migration_grant_grace_secs: 0,
             internal_api_token: None,
+            backup: None,
         });
         let dir = TempDir::new().unwrap();
         let store = Store::open(dir.path().join("auth.sqlite3")).await.unwrap();

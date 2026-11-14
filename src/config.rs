@@ -6,10 +6,20 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use url::Url;
+
+#[derive(Clone, Debug)]
+pub struct BackupConfig {
+    pub bucket: String,
+    pub prefix: String,
+    pub interval: Duration,
+    pub retention_days: u32,
+    pub force_path_style: bool,
+}
 
 /// Runtime configuration. Never log this value: it contains provider credentials.
 #[derive(Clone)]
@@ -47,6 +57,7 @@ pub struct Config {
     pub migration_cutoff_at: Option<String>,
     pub migration_grant_grace_secs: u64,
     pub internal_api_token: Option<String>,
+    pub backup: Option<BackupConfig>,
 }
 
 /// Every safe field is listed once; credentials are always redacted.
@@ -91,6 +102,7 @@ impl std::fmt::Debug for Config {
                 migration_active,
                 migration_cutoff_at,
                 migration_grant_grace_secs,
+                backup,
             ]
         )
     }
@@ -176,6 +188,28 @@ impl Config {
         let internal_api_token = env::var("INTERNAL_API_TOKEN")
             .ok()
             .filter(|value| !value.is_empty());
+        let backup = match env::var("BACKUP_BUCKET") {
+            Ok(bucket) if !bucket.is_empty() => {
+                let interval_secs: u64 = parsed("BACKUP_INTERVAL_SECS", 86400)?;
+                let retention_days: u32 = parsed("BACKUP_RETENTION_DAYS", 10)?;
+                if interval_secs == 0 || retention_days == 0 {
+                    bail!("Backup interval and retention must be positive");
+                }
+                let prefix = value("BACKUP_PREFIX", "ronnia");
+                let prefix = prefix.trim_matches('/').to_owned();
+                if prefix.is_empty() {
+                    bail!("BACKUP_PREFIX must not be empty");
+                }
+                Some(BackupConfig {
+                    bucket,
+                    prefix,
+                    interval: Duration::from_secs(interval_secs),
+                    retention_days,
+                    force_path_style: parsed("AWS_S3_FORCE_PATH_STYLE", false)?,
+                })
+            }
+            _ => None,
+        };
         let result = Self {
             database_path: value("DATABASE_PATH", "ronnia.sqlite3").into(),
             bind: parsed("BIND_IP", IpAddr::from([0, 0, 0, 0]))?,
@@ -218,6 +252,7 @@ impl Config {
             migration_cutoff_at,
             migration_grant_grace_secs: parsed("MIGRATION_GRANT_GRACE_SECS", 10)?,
             internal_api_token,
+            backup,
             api_origin,
         };
         if result.eventsub_channels_per_shard == 0 {

@@ -189,7 +189,15 @@ target/release/ronnia --database /path/ronnia.sqlite3 backfill
 target/release/ronnia --database /path/ronnia.sqlite3 deliveries --limit 50
 ```
 
-Restore a backup with the service stopped into a fresh database path, then run `check` before switching `DATABASE_PATH`. Do not copy only the live SQLite main file while WAL writers run; use `backup` or stop the service first. Never delete active WAL/SHM files. Backups contain account data; protect file/volume permissions and retention.
+### Automated SQLite backups
+
+Set `BACKUP_BUCKET` to enable scheduled service-side backups. The worker creates a consistent snapshot at startup and every `BACKUP_INTERVAL_SECS` (default `86400`), verifies SQLite integrity and foreign keys, compresses it with gzip, and uploads it to the configured S3-compatible bucket. `BACKUP_PREFIX` defaults to `ronnia`; objects are named `<prefix>/ronnia-<timestamp>.sqlite3.gz`. After each successful upload, snapshots older than `BACKUP_RETENTION_DAYS` (default `10`) under that prefix are deleted. Failures are logged and reported through Sentry without stopping the service.
+
+Configure the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, and `AWS_ENDPOINT_URL` variables for the bucket. The credentials need object read, write, list, and delete permissions only for the backup bucket. Leaving `BACKUP_BUCKET` empty disables scheduling; the manual `backup` command remains available.
+
+To restore, download and gunzip the selected snapshot into a fresh path while the service is stopped, run `check` against it, then switch `DATABASE_PATH`. Keep the previous database until the restored service passes its health and integrity checks.
+
+Restore a manual backup with the service stopped into a fresh database path, then run `check` before switching `DATABASE_PATH`. Do not copy only the live SQLite main file while WAL writers run; use `backup` or stop the service first. Never delete active WAL/SHM files. Backups contain account data; protect file/volume permissions and retention.
 
 Request history has no automatic retention cutoff, preserving current behavior. Metadata freshness expires after 24 hours for request lookups, but stored metadata remains available to historical leaderboards. Expired temporary authentication state and cooldown state are cleaned up. Uncertain deliveries remain available for operator inspection.
 
