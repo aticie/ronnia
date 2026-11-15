@@ -276,3 +276,154 @@ async fn username_path_encoding_preserves_the_actual_request_target() {
     );
     server.abort();
 }
+
+struct ForbiddenState {
+    tokens: Arc<MockState>,
+    failures: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    bodies: std::sync::Mutex<Vec<Value>>,
+    successes: std::sync::atomic::AtomicUsize,
+}
+
+async fn forbidden_response(
+    state: &ForbiddenState,
+) -> (
+    axum::http::StatusCode,
+    [(&'static str, &'static str); 1],
+    axum::Json<Value>,
+) {
+    let call = state
+        .calls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if call < state.failures {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            [("retry-after", "1")],
+            axum::Json(json!({"message":"temporarily forbidden"})),
+        )
+    } else {
+        state
+            .successes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (
+            axum::http::StatusCode::OK,
+            [("retry-after", "1")],
+            axum::Json(json!({"id":42,"beatmapset_id":7,"beatmapset":{"id":7}})),
+        )
+    }
+}
+
+async fn forbidden_scenario(chat: bool, failures: usize) {
+    use axum::{
+        Router,
+        extract::State,
+        routing::{get, post},
+    };
+    async fn token(
+        State(state): State<Arc<ForbiddenState>>,
+        body: axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        mock_token(State(state.tokens.clone()), body).await
+    }
+    async fn metadata(
+        State(state): State<Arc<ForbiddenState>>,
+    ) -> impl axum::response::IntoResponse {
+        forbidden_response(&state).await
+    }
+    async fn message(
+        State(state): State<Arc<ForbiddenState>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> impl axum::response::IntoResponse {
+        state.bodies.lock().unwrap().push(body);
+        forbidden_response(&state).await
+    }
+    let state = Arc::new(ForbiddenState {
+        tokens: Arc::new(MockState::default()),
+        failures,
+        calls: Default::default(),
+        bodies: Default::default(),
+        successes: Default::default(),
+    });
+    let router = Router::new()
+        .route("/oauth/token", post(token))
+        .route("/api/v2/beatmaps/42", get(metadata))
+        .route("/api/v2/chat/new", post(message))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut config = Config::from_env().unwrap();
+    config.osu_client_id = "test".into();
+    config.osu_client_secret = "test".into();
+    config.osu_api_base = format!("http://{address}/api/v2");
+    config.osu_oauth_base = format!("http://{address}/oauth");
+    let providers = Providers::new(Arc::new(config), CancellationToken::new()).unwrap();
+    let result = if chat {
+        providers.send_message(7, "hello", false).await
+    } else {
+        providers
+            .get_beatmap(&Beatmap {
+                id: 42,
+                kind: BeatmapKind::Map,
+                mods: String::new(),
+            })
+            .await
+            .map(|(map, _)| assert_eq!(map["id"], 42))
+            .map_err(|error| error.downcast::<ChatError>().unwrap())
+    };
+    let exhausted = failures >= 3;
+    if exhausted {
+        let error = result.unwrap_err();
+        assert_eq!(error.status, Some(403));
+        assert!(!error.uncertain);
+        assert!(error.message.contains("temporarily forbidden"));
+    } else {
+        result.unwrap();
+    }
+    let calls = if exhausted { 3 } else { failures + 1 };
+    assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), calls);
+    assert_eq!(
+        state.successes.load(std::sync::atomic::Ordering::SeqCst),
+        usize::from(!exhausted)
+    );
+    let bodies = state.bodies.lock().unwrap();
+    if chat {
+        assert_eq!(
+            *bodies,
+            vec![json!({"target_id":7,"message":"hello","is_action":false}); calls]
+        );
+    } else {
+        assert!(bodies.is_empty());
+    }
+    assert_eq!(
+        *state.tokens.scopes.lock().unwrap(),
+        vec![if chat {
+            "delegate chat.write"
+        } else {
+            "public"
+        }]
+    );
+    server.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_osu_forbidden_metadata_recovers() {
+    forbidden_scenario(false, 2).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_osu_forbidden_pm_recovers_without_duplicate_success() {
+    forbidden_scenario(true, 2).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn osu_forbidden_metadata_exhausts_three_attempts_with_known_status() {
+    forbidden_scenario(false, 3).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn osu_forbidden_pm_exhausts_three_attempts_with_known_status() {
+    forbidden_scenario(true, 3).await;
+}

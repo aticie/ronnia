@@ -2107,6 +2107,321 @@ async fn delivery_fixture(
     (config, store, providers, sends, server)
 }
 
+#[derive(Default)]
+struct LinkFallbackState {
+    lookups: AtomicUsize,
+    messages: StdMutex<Vec<Value>>,
+}
+
+async fn link_fallback_fixture(
+    metadata_status: axum::http::StatusCode,
+    pm_statuses: Vec<axum::http::StatusCode>,
+) -> (
+    Config,
+    Store,
+    Providers,
+    Arc<LinkFallbackState>,
+    tokio::task::JoinHandle<()>,
+) {
+    let state = Arc::new(LinkFallbackState::default());
+    let observed = state.clone();
+    let metadata = move || {
+        let observed = observed.clone();
+        async move {
+            observed.lookups.fetch_add(1, Ordering::SeqCst);
+            if metadata_status.is_success() {
+                axum::Json(json!({
+                    "id":42,"beatmapset_id":7,"version":"Hard","status":"ranked",
+                    "bpm":180,"difficulty_rating":5.0,"hit_length":125,
+                    "beatmapset":{"id":7,"artist":"Artist","title":"Title"}
+                }))
+                .into_response()
+            } else {
+                (metadata_status, [("Retry-After", "1")], "blocked").into_response()
+            }
+        }
+    };
+    let observed = state.clone();
+    let router = Router::new()
+        .route(
+            "/oauth/token",
+            post(|| async { axum::Json(json!({"access_token":"test","expires_in":3600})) }),
+        )
+        .route("/api/v2/beatmaps/{id}", get(metadata.clone()))
+        .route("/api/v2/beatmapsets/{id}", get(metadata))
+        .route(
+            "/api/v2/chat/new",
+            post(move |axum::Json(body): axum::Json<Value>| {
+                let observed = observed.clone();
+                let pm_statuses = pm_statuses.clone();
+                async move {
+                    let mut messages = observed.messages.lock().unwrap();
+                    let status = pm_statuses[messages.len().min(pm_statuses.len() - 1)];
+                    messages.push(body);
+                    if status.is_success() {
+                        axum::Json(json!({"message_id":1})).into_response()
+                    } else {
+                        (status, [("Retry-After", "1")], "blocked").into_response()
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut config = Config::from_env().unwrap();
+    config.dry_run = false;
+    config.osu_client_id = "test".into();
+    config.osu_client_secret = "test".into();
+    config.osu_oauth_base = format!("http://{address}/oauth");
+    config.osu_api_base = format!("http://{address}/api/v2");
+    let providers = Providers::new(Arc::new(config.clone()), CancellationToken::new()).unwrap();
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    (config, store, providers, state, server)
+}
+
+#[tokio::test]
+async fn metadata_forbidden_link_fallback_preserves_identity_mods_cooldown_and_deduplication() {
+    use axum::http::StatusCode;
+    for (kind, path) in [(BeatmapKind::Map, "b"), (BeatmapKind::Mapset, "s")] {
+        let (mut config, store, providers, state, server) =
+            link_fallback_fixture(StatusCode::FORBIDDEN, vec![StatusCode::OK]).await;
+        let mut settings = store.user_by_twitch(1).await.unwrap().unwrap().settings;
+        settings.sr = [9.0, 10.0];
+        settings.cooldown = 3600.0;
+        settings.echo = true;
+        store.set_settings(1, settings).await.unwrap();
+        let mut message = request_message();
+        message.vip = true;
+        message.points = true;
+        let beatmap = Beatmap {
+            id: 42,
+            kind,
+            mods: "+HDDT".into(),
+        };
+        let (echoes, mut rx) = mpsc::channel(4);
+        let clock = Clock::new();
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.lookups.load(Ordering::SeqCst), 3);
+        let body = state.messages.lock().unwrap()[0].clone();
+        assert_eq!(body["target_id"], 1);
+        assert_eq!(
+            body["message"],
+            format!(
+                "[VIP] viewer -> [https://osu.ppy.sh/{path}/42 Beatmap link] +HDDT + USED POINTS (metadata unavailable; difficulty unverified)"
+            )
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().text,
+            format!(
+                "https://osu.ppy.sh/{path}/42 - Request sent! (link only; metadata unavailable)"
+            )
+        );
+        let pm = body["message"].as_str().unwrap().to_owned();
+        store
+            .call(move |db| {
+                let (status, stored_pm): (String, String) = db.query_row(
+                    "SELECT status,message FROM deliveries WHERE twitch_message_id='evt-1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(status, "sent");
+                assert_eq!(stored_pm, pm);
+                let ids = db
+                    .prepare("SELECT requested_beatmap_id FROM statistics")?
+                    .query_map([], |row| row.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert_eq!(
+                    ids,
+                    if kind == BeatmapKind::Map {
+                        vec![42]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(db.query_row(
+                "SELECT count(*) FROM request_cooldowns WHERE channel_id=1 AND requester_id='77'",
+                [], |row| row.get::<_, i64>(0),
+            )?, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        message.id = "within-cooldown".into();
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.messages.lock().unwrap().len(), 1);
+        assert!(rx.try_recv().is_err());
+        config.dry_run = true;
+        message.author_id = "another-viewer".into();
+        message.id = "dry-link-fallback".into();
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.messages.lock().unwrap().len(), 1);
+        assert!(rx.try_recv().is_err());
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn forbidden_enriched_pm_uses_one_link_fallback_after_retries() {
+    use axum::http::StatusCode;
+    let (config, store, providers, state, server) = link_fallback_fixture(
+        StatusCode::OK,
+        vec![
+            StatusCode::FORBIDDEN,
+            StatusCode::FORBIDDEN,
+            StatusCode::FORBIDDEN,
+            StatusCode::OK,
+        ],
+    )
+    .await;
+    let beatmap = Beatmap {
+        id: 42,
+        kind: BeatmapKind::Map,
+        mods: "+HD".into(),
+    };
+    let message = request_message();
+    let (echoes, mut rx) = mpsc::channel(4);
+    let clock = Clock::new();
+    process_one(
+        &config, &store, &providers, &echoes, &message, &beatmap, clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.lookups.load(Ordering::SeqCst), 1);
+    let messages = state.messages.lock().unwrap().clone();
+    assert_eq!(messages.len(), 4);
+    for body in &messages[..3] {
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("Artist - Title [Hard]")
+        );
+    }
+    let fallback = messages[3]["message"].as_str().unwrap().to_owned();
+    assert!(fallback.contains("[https://osu.ppy.sh/b/42 Beatmap link]"));
+    assert!(fallback.contains("+HD"));
+    assert!(!fallback.contains("Artist"));
+    assert!(
+        rx.try_recv()
+            .unwrap()
+            .text
+            .ends_with("Request sent! (link only)")
+    );
+    assert!(rx.try_recv().is_err());
+    store
+        .call(move |db| {
+            let (status, stored_pm): (String, String) = db.query_row(
+                "SELECT status,message FROM deliveries WHERE twitch_message_id='evt-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(status, "sent");
+            assert_eq!(stored_pm, fallback);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    process_one(
+        &config, &store, &providers, &echoes, &message, &beatmap, clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.messages.lock().unwrap().len(), 4);
+    server.abort();
+}
+
+#[tokio::test]
+async fn link_fallback_failure_never_records_or_acknowledges_success() {
+    use axum::http::StatusCode;
+    for (metadata_status, pm_status, lookups, attempts, expected) in [
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN, 3, 3, "failed"),
+        (
+            StatusCode::FORBIDDEN,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            3,
+            1,
+            "uncertain",
+        ),
+        (StatusCode::OK, StatusCode::FORBIDDEN, 1, 6, "failed"),
+    ] {
+        let (config, store, providers, state, server) =
+            link_fallback_fixture(metadata_status, vec![pm_status]).await;
+        let (echoes, mut rx) = mpsc::channel(4);
+        let beatmap = Beatmap {
+            id: 42,
+            kind: BeatmapKind::Map,
+            mods: String::new(),
+        };
+        let clock = Clock::new();
+        let message = request_message();
+        let error = process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(&pm_status.as_u16().to_string()));
+        assert_eq!(state.lookups.load(Ordering::SeqCst), lookups);
+        assert_eq!(state.messages.lock().unwrap().len(), attempts);
+        assert!(rx.try_recv().is_err());
+        store
+            .call(move |db| {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT status FROM deliveries WHERE twitch_message_id='evt-1'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                    expected
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM request_cooldowns", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.messages.lock().unwrap().len(), attempts);
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn missing_beatmap_is_rejected_without_delivery_or_processing_error() {
     let (config, store, providers, sends, server) =
