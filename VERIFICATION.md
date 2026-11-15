@@ -281,6 +281,7 @@ The debug documentation surface was opened in a real headless Chromium against `
 - Regression scenarios preserved canonical map/set identity, requester badges, mods and points; missing metadata bypassed configured star limits as explicitly selected. Confirmed fallback sends retained cooldown/deduplication and persisted the actual sent text; unresolved set links did not invent per-map statistics.
 - Final failed/uncertain sends produced no success history, cooldown, or Twitch acknowledgement, and were not replayed. Existing 404 feedback, policy rejection, dry-run, metadata caching, atomic bookkeeping, restart safety, and Twitch channel-ban behavior also passed.
 - Verification used `ronnia-review-toolchain:latest` because Cargo is not installed on the host. No production osu!/Twitch requests, deployment, or production configuration changes were made.
+- The initial PR check failed `clippy::let_and_return` in the metadata fallback branch; the redundant binding was removed rather than suppressing the lint. The initial local check had covered focused tests and formatting, not the full CI sequence.
 
 ## Limits
 

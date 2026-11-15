@@ -160,49 +160,46 @@ pub(super) async fn process_one(
                 .clone();
             Some((map, set))
         }
-        None => {
-            let metadata = match providers.get_beatmap(beatmap).await {
-                Err(error)
-                    if error
-                        .downcast_ref::<ChatError>()
-                        .is_some_and(|error| error.status == Some(404)) =>
-                {
-                    if !config.dry_run {
-                        queue_echo(
-                            echoes,
-                            message,
-                            format!("@{} Beatmap not found.", message.author),
-                        );
-                    }
-                    tracing::info!(
-                        channel = %message.channel,
-                        requester = %message.author,
-                        beatmap_id = beatmap.id,
-                        "request rejected: beatmap not found"
+        None => match providers.get_beatmap(beatmap).await {
+            Err(error)
+                if error
+                    .downcast_ref::<ChatError>()
+                    .is_some_and(|error| error.status == Some(404)) =>
+            {
+                if !config.dry_run {
+                    queue_echo(
+                        echoes,
+                        message,
+                        format!("@{} Beatmap not found.", message.author),
                     );
-                    return Ok(());
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        channel = %message.channel,
-                        message_id = %message.id,
-                        error = %format_args!("{error:#}"),
-                        "osu metadata unavailable; attempting link-only delivery without a star check"
-                    );
-                    None
-                }
-                Ok((map, set)) => {
-                    match beatmap.kind {
-                        parser::BeatmapKind::Map => store.cache_put(map.clone()).await?,
-                        parser::BeatmapKind::Mapset => {
-                            store.cache_put_set(beatmap.id, map.clone()).await?
-                        }
+                tracing::info!(
+                    channel = %message.channel,
+                    requester = %message.author,
+                    beatmap_id = beatmap.id,
+                    "request rejected: beatmap not found"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel = %message.channel,
+                    message_id = %message.id,
+                    error = %format_args!("{error:#}"),
+                    "osu metadata unavailable; attempting link-only delivery without a star check"
+                );
+                None
+            }
+            Ok((map, set)) => {
+                match beatmap.kind {
+                    parser::BeatmapKind::Map => store.cache_put(map.clone()).await?,
+                    parser::BeatmapKind::Mapset => {
+                        store.cache_put_set(beatmap.id, map.clone()).await?
                     }
-                    Some((map, set))
                 }
-            };
-            metadata
-        }
+                Some((map, set))
+            }
+        },
     };
     if let Some((map, _)) = &metadata {
         let stars = map["difficulty_rating"]
