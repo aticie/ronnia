@@ -152,17 +152,16 @@ pub(super) async fn process_one(
         parser::BeatmapKind::Map => store.cache_get(beatmap.id).await?,
         parser::BeatmapKind::Mapset => store.cache_get_set(beatmap.id).await?,
     };
-    let (map, set) = match map {
+    let metadata = match map {
         Some(map) => {
             let set = map
                 .get("beatmapset")
                 .context("cached beatmap omitted beatmapset")?
                 .clone();
-            (map, set)
+            Some((map, set))
         }
         None => {
-            let (map, set) = match providers.get_beatmap(beatmap).await {
-                Ok(metadata) => metadata,
+            let metadata = match providers.get_beatmap(beatmap).await {
                 Err(error)
                     if error
                         .downcast_ref::<ChatError>()
@@ -184,26 +183,39 @@ pub(super) async fn process_one(
                     return Ok(());
                 }
                 Err(error) => {
-                    return Err(error).context("fetching osu! beatmap metadata");
+                    tracing::warn!(
+                        channel = %message.channel,
+                        message_id = %message.id,
+                        error = %format_args!("{error:#}"),
+                        "osu metadata unavailable; attempting link-only delivery without a star check"
+                    );
+                    None
+                }
+                Ok((map, set)) => {
+                    match beatmap.kind {
+                        parser::BeatmapKind::Map => store.cache_put(map.clone()).await?,
+                        parser::BeatmapKind::Mapset => {
+                            store.cache_put_set(beatmap.id, map.clone()).await?
+                        }
+                    }
+                    Some((map, set))
                 }
             };
-            match beatmap.kind {
-                parser::BeatmapKind::Map => store.cache_put(map.clone()).await?,
-                parser::BeatmapKind::Mapset => store.cache_put_set(beatmap.id, map.clone()).await?,
-            }
-            (map, set)
+            metadata
         }
     };
-    let stars = map["difficulty_rating"]
-        .as_f64()
-        .filter(|n| n.is_finite())
-        .context("invalid beatmap difficulty_rating")?;
-    if let Err(reason) = difficulty_policy(&user, message, stars) {
-        if !config.dry_run && reason.starts_with('@') {
-            queue_echo(echoes, message, reason.clone());
+    if let Some((map, _)) = &metadata {
+        let stars = map["difficulty_rating"]
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .context("invalid beatmap difficulty_rating")?;
+        if let Err(reason) = difficulty_policy(&user, message, stars) {
+            if !config.dry_run && reason.starts_with('@') {
+                queue_echo(echoes, message, reason.clone());
+            }
+            tracing::info!(channel = %message.channel, requester = %message.author, reason, "request rejected");
+            return Ok(());
         }
-        tracing::info!(channel = %message.channel, requester = %message.author, reason, "request rejected");
-        return Ok(());
     }
     let author_id = message.author_id.clone();
     let channel_id = user.twitch_id;
@@ -212,7 +224,11 @@ pub(super) async fn process_one(
         tracing::info!(channel = %message.channel, requester = %message.author, "request rejected: cooldown");
         return Ok(());
     }
-    let pm = prepare_message(message, &map, &set, &beatmap.mods)?;
+    let mut link_only = metadata.is_none();
+    let mut pm = match &metadata {
+        Some((map, set)) => prepare_message(message, map, set, &beatmap.mods)?,
+        None => prepare_link_message(message, beatmap, true),
+    };
     if config.dry_run {
         tracing::info!(channel = %message.channel, beatmap_id = beatmap.id, "dry run: request accepted without chat or statistics");
         return Ok(());
@@ -229,7 +245,33 @@ pub(super) async fn process_one(
     }
     let id = message.id.clone();
     store.call(move |db| { db.execute("UPDATE deliveries SET status='sending' WHERE twitch_message_id=?1 AND status='pending'", [id])?; Ok(()) }).await?;
-    if let Err(error) = providers.send_message(user.osu_id, &pm, false).await {
+    let mut outcome = providers.send_message(user.osu_id, &pm, false).await;
+    if outcome
+        .as_ref()
+        .is_err_and(|error| !link_only && !error.uncertain && error.status == Some(403))
+    {
+        record_outcome("ronnia.osu.deliveries", "failed");
+        tracing::warn!(
+            channel = %message.channel,
+            message_id = %message.id,
+            "osu metadata-rich PM rejected after retries; attempting link-only delivery"
+        );
+        pm = prepare_link_message(message, beatmap, false);
+        let id = message.id.clone();
+        let text = pm.clone();
+        store
+            .call(move |db| {
+                db.execute(
+                "UPDATE deliveries SET message=?1 WHERE twitch_message_id=?2 AND status='sending'",
+                params![text, id],
+            )?;
+                Ok(())
+            })
+            .await?;
+        link_only = true;
+        outcome = providers.send_message(user.osu_id, &pm, false).await;
+    }
+    if let Err(error) = outcome {
         let id = message.id.clone();
         let status = if error.uncertain {
             "uncertain"
@@ -256,7 +298,12 @@ pub(super) async fn process_one(
     let requester = message.author.clone();
     let channel = message.channel.clone();
     let author_id = message.author_id.clone();
-    let map_id = map["id"].as_i64().context("beatmap omitted id")?;
+    let map_id = match &metadata {
+        Some((map, _)) => Some(map["id"].as_i64().context("beatmap omitted id")?),
+        None if beatmap.kind == parser::BeatmapKind::Map => Some(beatmap.id),
+        // A set ID is not a map ID: keep the confirmed delivery, not invented statistics.
+        None => None,
+    };
     let mods = beatmap.mods.clone();
     let now = chrono::Utc::now().timestamp();
     let cooldown_now = clock.now();
@@ -264,19 +311,30 @@ pub(super) async fn process_one(
     store.call(move |db| {
         let tx = db.transaction()?;
         tx.execute("UPDATE deliveries SET status='sent',error=NULL WHERE twitch_message_id=?1", [&id])?;
-        tx.execute("INSERT INTO statistics(source_id,requester_channel_name,requested_beatmap_id,requested_channel_name,mods,timestamp) VALUES(?1,?2,?3,?4,?5,?6)", params![format!("twitch:{id}"), requester, map_id, channel, mods, now])?;
+        if let Some(map_id) = map_id {
+            tx.execute("INSERT INTO statistics(source_id,requester_channel_name,requested_beatmap_id,requested_channel_name,mods,timestamp) VALUES(?1,?2,?3,?4,?5,?6)", params![format!("twitch:{id}"), requester, map_id, channel, mods, now])?;
+        }
         if update_cooldown {
             tx.execute("INSERT INTO request_cooldowns(channel_id,requester_id,last_success) VALUES(?1,?2,?3) ON CONFLICT(channel_id,requester_id) DO UPDATE SET last_success=excluded.last_success", params![channel_id, author_id, cooldown_now])?;
         }
         tx.commit()?; Ok(())
     }).await?;
     if user.settings.echo {
-        queue_echo(
-            echoes,
-            message,
-            format!("{} - Request sent!", map_title(&map, &set)?),
-        );
+        let text = if link_only {
+            let note = if metadata.is_none() {
+                "link only; metadata unavailable"
+            } else {
+                "link only"
+            };
+            format!("{} - Request sent! ({note})", beatmap_link(beatmap))
+        } else {
+            let (map, set) = metadata.as_ref().context("missing delivery metadata")?;
+            format!("{} - Request sent!", map_title(map, set)?)
+        };
+        queue_echo(echoes, message, text);
     }
+    let map = metadata.as_ref().map(|(map, _)| map);
+    let set = metadata.as_ref().map(|(_, set)| set);
     tracing::info!(
         channel = %message.channel,
         channel_id = message.channel_id,
@@ -285,11 +343,14 @@ pub(super) async fn process_one(
         osu_username = %user.osu_username,
         osu_id = user.osu_id,
         map_id,
-        beatmapset_id = set["id"].as_i64(),
-        artist = set["artist"].as_str(),
-        title = set["title"].as_str(),
-        difficulty = map["version"].as_str(),
-        stars,
+        beatmapset_id = set.and_then(|set| set["id"].as_i64()).or_else(|| {
+            (beatmap.kind == parser::BeatmapKind::Mapset).then_some(beatmap.id)
+        }),
+        artist = set.and_then(|set| set["artist"].as_str()),
+        title = set.and_then(|set| set["title"].as_str()),
+        difficulty = map.and_then(|map| map["version"].as_str()),
+        stars = map.and_then(|map| map["difficulty_rating"].as_f64()),
+        link_only,
         mods = %beatmap.mods,
         message_id = %message.id,
         "osu request delivered and recorded"
@@ -311,14 +372,36 @@ fn map_title(map: &Value, set: &Value) -> Result<String> {
         field(map, "version")?
     ))
 }
+fn beatmap_link(beatmap: &parser::Beatmap) -> String {
+    let path = match beatmap.kind {
+        parser::BeatmapKind::Map => "b",
+        parser::BeatmapKind::Mapset => "s",
+    };
+    format!("https://osu.ppy.sh/{path}/{}", beatmap.id)
+}
 
-pub(super) fn prepare_message(
+fn prepare_link_message(
     message: &Message,
-    map: &Value,
-    set: &Value,
-    mods: &str,
-) -> Result<String> {
-    let badge = if message.moderator {
+    beatmap: &parser::Beatmap,
+    metadata_unavailable: bool,
+) -> String {
+    let badge = request_badge(message);
+    let points = if message.points { "+ USED POINTS" } else { "" };
+    let note = if metadata_unavailable {
+        "metadata unavailable; difficulty unverified"
+    } else {
+        "link only"
+    };
+    format!(
+        "{badge}{} -> [{} Beatmap link] {} {points} ({note})",
+        message.author,
+        beatmap_link(beatmap),
+        beatmap.mods,
+    )
+}
+
+fn request_badge(message: &Message) -> &'static str {
+    if message.moderator {
         "[MOD] "
     } else if message.subscriber {
         "[SUB] "
@@ -326,7 +409,16 @@ pub(super) fn prepare_message(
         "[VIP] "
     } else {
         ""
-    };
+    }
+}
+
+pub(super) fn prepare_message(
+    message: &Message,
+    map: &Value,
+    set: &Value,
+    mods: &str,
+) -> Result<String> {
+    let badge = request_badge(message);
     let status = field(map, "status")?;
     let status = status
         .chars()

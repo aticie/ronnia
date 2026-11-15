@@ -275,6 +275,13 @@ The debug documentation surface was opened in a real headless Chromium against `
 - Configuration scenarios exercised absent/`0`/`0.1`/`1` trace sampling, an empty DSN, nonfinite/malformed/out-of-range sampling, and a malformed DSN. Invalid telemetry configuration failed with the relevant setting name before database initialization, without a panic.
 - Two channels were exercised concurrently with one PM deliberately held and Railway logging reduced to `WARN`. The other channel continued, both feedback operations retained distinct request traces, and native metrics/errors still arrived independently of log verbosity.
 
+## osu! 403 retries and link-only fallback
+
+- Focused containerized Rust verification passed: 18 tests, 0 failures. This covered real local HTTP requests for transient 403 recovery, three-attempt exhaustion for metadata and PMs, link-only map/set delivery, and a final 403 on an enriched PM followed by one bounded link-only fallback.
+- Regression scenarios preserved canonical map/set identity, requester badges, mods and points; missing metadata bypassed configured star limits as explicitly selected. Confirmed fallback sends retained cooldown/deduplication and persisted the actual sent text; unresolved set links did not invent per-map statistics.
+- Final failed/uncertain sends produced no success history, cooldown, or Twitch acknowledgement, and were not replayed. Existing 404 feedback, policy rejection, dry-run, metadata caching, atomic bookkeeping, restart safety, and Twitch channel-ban behavior also passed.
+- Verification used `ronnia-review-toolchain:latest` because Cargo is not installed on the host. No production osu!/Twitch requests, deployment, or production configuration changes were made.
+
 ## Limits
 
 - No real Twitch or osu! account, chat message, OAuth consent, or EventSub production stream was used. The production EventSub endpoint was reached only for an unauthenticated TLS handshake/welcome.

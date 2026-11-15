@@ -527,16 +527,25 @@ impl Providers {
                 refreshed = true;
                 continue;
             }
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < 2 {
+            // An explicit osu! rejection is safe to replay even for private messages.
+            if (status == StatusCode::TOO_MANY_REQUESTS
+                || (!is_twitch && status == StatusCode::FORBIDDEN))
+                && retries < 2
+            {
                 let delay = retry_after(&response, retries);
-                record_provider_retry(provider, operation, "rate_limited", Some(delay));
+                let reason = if status == StatusCode::FORBIDDEN {
+                    "forbidden"
+                } else {
+                    "rate_limited"
+                };
+                record_provider_retry(provider, operation, reason, Some(delay));
                 tracing::warn!(
                     provider,
                     operation = endpoint,
                     method = %method,
                     attempt,
                     http_status = status.as_u16(),
-                    reason = "rate_limited",
+                    reason,
                     retry_delay_ms = delay.as_millis() as u64,
                     "provider HTTP retry scheduled"
                 );
