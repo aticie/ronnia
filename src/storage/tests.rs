@@ -102,6 +102,7 @@ fn snapshot(
         twitch_id,
         expected_revision,
         online,
+        stream_id: online.then(|| "stream-1".into()),
         category_id: category_id.into(),
         login: login.map(Into::into),
     }
@@ -349,7 +350,7 @@ async fn grants_and_independent_stream_families_drive_eligibility() {
 
     let mut changes = store.channel_changes();
     let observed = *changes.borrow();
-    assert!(event(&store, 2, StreamEvent::Online, 100).await);
+    assert!(event(&store, 2, StreamEvent::Online("stream-1".into()), 100).await);
     tokio::time::timeout(Duration::from_secs(1), changes.changed())
         .await
         .unwrap()
@@ -376,7 +377,7 @@ async fn grants_and_independent_stream_families_drive_eligibility() {
     );
     assert!(is_live(&store, 2).await);
 
-    assert!(event(&store, 2, StreamEvent::Online, 300).await);
+    assert!(event(&store, 2, StreamEvent::Online("stream-2".into()), 300).await);
     assert!(
         !is_live(&store, 2).await,
         "online clears the stale category"
@@ -424,7 +425,7 @@ async fn osu_lazer_counts_as_osu_but_other_categories_do_not() {
     let store = memory().await;
     store.save_user(user()).await.unwrap();
     grant(&store, 2).await;
-    assert!(event(&store, 2, StreamEvent::Online, 100).await);
+    assert!(event(&store, 2, StreamEvent::Online("stream-1".into()), 100).await);
     assert!(
         event(
             &store,
@@ -481,7 +482,7 @@ async fn stale_snapshots_cannot_overwrite_newer_events_or_unknown_rows() {
         !is_live(&store, 2).await,
         "capturing versions never implies live"
     );
-    assert!(event(&store, 2, StreamEvent::Online, 100).await);
+    assert!(event(&store, 2, StreamEvent::Online("stream-1".into()), 100).await);
     assert!(event(&store, 2, StreamEvent::Category("21465".into()), 200).await);
     assert!(is_live(&store, 2).await);
 
@@ -516,7 +517,12 @@ async fn stale_snapshots_cannot_overwrite_newer_events_or_unknown_rows() {
     assert!(!event(&store, 2, StreamEvent::Category("21465".into()), 50).await);
     assert!(
         !store
-            .apply_stream_event(999, "ghost".into(), StreamEvent::Online, 100)
+            .apply_stream_event(
+                999,
+                "ghost".into(),
+                StreamEvent::Online("stream-1".into()),
+                100
+            )
             .await
             .unwrap()
     );
@@ -548,7 +554,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let user = store.user_by_twitch(20).await.unwrap().unwrap();
     assert!(!user.is_live, "legacy live activity is not consent");
     assert_eq!(user.osu_username, "osu");
@@ -589,7 +595,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
     let future = directory.path().join("future.sqlite");
     {
         let connection = rusqlite::Connection::open(&future).unwrap();
-        connection.pragma_update(None, "user_version", 7).unwrap();
+        connection.pragma_update(None, "user_version", 8).unwrap();
     }
     assert!(Store::open(&future).await.is_err());
 }
@@ -642,7 +648,12 @@ async fn modern_singletons_are_enforced_and_grants_cascade_with_accounts() {
     }).await.unwrap();
     grant(&store, 2).await;
     store
-        .apply_stream_event(2, "channel".into(), StreamEvent::Online, 1)
+        .apply_stream_event(
+            2,
+            "channel".into(),
+            StreamEvent::Online("stream-1".into()),
+            1,
+        )
         .await
         .unwrap();
     store.delete_user(2).await.unwrap();
@@ -671,7 +682,12 @@ async fn chat_ban_pauses_chat_without_revoking_the_channel_grant() {
     store.save_user(account(10, 20, "alpha")).await.unwrap();
     grant(&store, 20).await;
     store
-        .apply_stream_event(20, "alpha".into(), StreamEvent::Online, 1)
+        .apply_stream_event(
+            20,
+            "alpha".into(),
+            StreamEvent::Online("stream-1".into()),
+            1,
+        )
         .await
         .unwrap();
     store
@@ -1026,7 +1042,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let active_at: i64 = scalar(
         &store,
         "SELECT active_at FROM twitch_channel_grants WHERE twitch_id=20",
@@ -1063,7 +1079,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 }
 
 #[tokio::test]
@@ -1091,7 +1107,7 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .unwrap();
     let legacy_count: i64 = scalar(&store, "SELECT COUNT(*) FROM legacy_live").await;
     let user_count: i64 = scalar(&store, "SELECT COUNT(*) FROM users").await;
-    assert_eq!((version, legacy_count, user_count), (6, 0, 1));
+    assert_eq!((version, legacy_count, user_count), (7, 0, 1));
     assert_eq!(
         store
             .replace_legacy_live(vec![(20, "alpha".into())])
@@ -1109,6 +1125,6 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert_eq!(reopened.live_users(100, 0).await.unwrap(), vec!["alpha"]);
 }

@@ -1,5 +1,5 @@
 //! Schema bootstrap: connection pragmas, forward-only migrations, the settings
-//! metadata catalog, and recovery of deliveries interrupted by a process stop.
+//! metadata catalog, and recovery of deliveries and warnings interrupted by a stop.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -16,8 +16,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/005_channel_grant_revision.sql"),
     ),
     (6, include_str!("../../migrations/006_chat_bans.sql")),
+    (
+        7,
+        include_str!("../../migrations/007_follower_warnings.sql"),
+    ),
 ];
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub(super) fn connect(path: &Path) -> Result<Connection> {
     if let Some(parent) = path
@@ -51,6 +55,7 @@ fn initialize(c: &mut Connection) -> Result<()> {
         tx.execute("INSERT INTO settings_metadata(name,value_json,description,type,raw_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(name) DO NOTHING", params![document["name"].as_str().unwrap(), document["value"].to_string(), document["description"].as_str().unwrap(), document["type"].as_str().unwrap(), document.to_string()])?;
     }
     tx.execute("UPDATE deliveries SET status='uncertain',error=COALESCE(error,'process stopped during delivery; not replayed') WHERE status='sending'", [])?;
+    tx.execute("UPDATE follower_warnings SET status='uncertain',error=COALESCE(error,'process stopped during follower warning; not replayed') WHERE status='sending'", [])?;
     tx.commit()?;
     Ok(())
 }

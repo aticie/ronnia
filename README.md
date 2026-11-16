@@ -233,6 +233,9 @@ For an authorized, non-banned channel, `GET /user/me` also reads Helix `GET /cha
 
 The dashboard shows an amber followers-only warning with VIP/moderator guidance and the minimum follow duration when applicable. This is channel configuration, not proof that the bot cannot speak: an existing qualifying follow or VIP/mod status may permit it. It never pauses chat subscriptions, suppresses sends, or changes osu! delivery results. Reloading the dashboard rechecks the current settings and clears the warning when followers-only mode is disabled.
 
+When Twitch actually rejects a chat confirmation with `followers_only_mode`, the Rust bot also sends the linked streamer an osu! PM explaining the restriction and the VIP/moderator or chat-setting remedies. A durable `follower_warnings` receipt is claimed before sending, at most once per channel and Twitch stream ID; repeated rejections, reconnects, process restarts, category changes, and an offline/online observation of the same stream do not repeat it. A different Twitch stream ID permits a new warning, including when the bot missed the offline transition while stopped. EventSub online events and revision-guarded Helix snapshots retain this identity.
+
+Warnings require an enabled, authorized channel with a known online stream, skip process dry-run, and share the normal osu! PM pacing. Definite failures and uncertain/interrupted attempts remain recorded and are not automatically replayed in that stream, preferring a possible omission to duplicate notices. Other Twitch drop reasons do not produce this warning. The warning does not change Twitch retries, request delivery history, or osu! request cooldowns.
 
 ### Connection and delivery guarantees
 

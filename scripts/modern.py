@@ -320,7 +320,7 @@ class EventSub:
             event.update(title="Synthetic stream", language="en", category_id=category,
                          category_name="osu!" if category == "21465" else "Other", content_classification_labels=[])
         if kind == "stream.online":
-            event.update(id="synthetic-stream", type="live", started_at=timestamp())
+            event.update(id=f"stream-{uid}", type="live", started_at=timestamp())
         self.notify(kind, event, uid=uid, at=at, number=number)
 
     def revoke(self):

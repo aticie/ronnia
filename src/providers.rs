@@ -26,6 +26,7 @@ const USER_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
 
 pub struct LiveStream {
     pub id: i64,
+    pub stream_id: String,
     pub login: String,
     pub category_id: String,
 }
@@ -69,6 +70,7 @@ struct Tokens {
 pub struct ChatError {
     pub uncertain: bool,
     pub status: Option<u16>,
+    pub drop_reason: Option<String>,
     pub message: String,
 }
 impl ChatError {
@@ -76,6 +78,7 @@ impl ChatError {
         Self {
             uncertain,
             status,
+            drop_reason: None,
             message: message.into(),
         }
     }
@@ -820,19 +823,25 @@ impl Providers {
         let result = value["data"].as_array().and_then(|data| data.first());
         match result.and_then(|row| row["is_sent"].as_bool()) {
             Some(true) => Ok(()),
-            Some(false) => Err(ChatError::new(
-                false,
-                Some(status.as_u16()),
-                format!(
-                    "Twitch dropped the chat message: {}: {}",
-                    result
-                        .and_then(|row| row["drop_reason"]["code"].as_str())
-                        .unwrap_or("unspecified"),
-                    result
-                        .and_then(|row| row["drop_reason"]["message"].as_str())
-                        .unwrap_or("no rejection message provided")
-                ),
-            )),
+            Some(false) => {
+                let mut error = ChatError::new(
+                    false,
+                    Some(status.as_u16()),
+                    format!(
+                        "Twitch dropped the chat message: {}: {}",
+                        result
+                            .and_then(|row| row["drop_reason"]["code"].as_str())
+                            .unwrap_or("unspecified"),
+                        result
+                            .and_then(|row| row["drop_reason"]["message"].as_str())
+                            .unwrap_or("no rejection message provided")
+                    ),
+                );
+                error.drop_reason = result
+                    .and_then(|row| row["drop_reason"]["code"].as_str())
+                    .map(str::to_owned);
+                Err(error)
+            }
             None => Err(ChatError::new(
                 true,
                 None,
@@ -886,9 +895,14 @@ impl Providers {
                 if !batch.contains(&id) || !valid_login(login) {
                     bail!("Helix returned unexpected user identity");
                 }
+                let stream_id = row["id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .context("Helix omitted stream identity")?;
                 let category_id = row["game_id"].as_str().context("Helix omitted game_id")?;
                 result.push(LiveStream {
                     id,
+                    stream_id: stream_id.to_owned(),
                     login: login.to_ascii_lowercase(),
                     category_id: category_id.to_owned(),
                 });

@@ -113,13 +113,14 @@ pub struct StreamSnapshot {
     pub twitch_id: i64,
     pub expected_revision: i64,
     pub online: bool,
+    pub stream_id: Option<String>,
     pub category_id: String,
     pub login: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub enum StreamEvent {
-    Online,
+    Online(String),
     Offline,
     Category(String),
 }

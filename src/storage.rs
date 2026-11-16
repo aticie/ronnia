@@ -7,6 +7,7 @@
 mod actor;
 mod cache;
 mod deliveries;
+mod follower_warnings;
 mod schema;
 mod sql;
 mod statistics;
@@ -15,6 +16,7 @@ mod users;
 
 pub use actor::Store;
 pub use deliveries::{ClaimOutcome, DeliveryOutcome};
+pub use follower_warnings::FollowerWarning;
 pub use users::ChannelGrant;
 pub(crate) use users::refresh_eligibility;
 

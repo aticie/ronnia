@@ -378,7 +378,12 @@ async fn grant_and_go_live(store: &Store, twitch_id: i64, login: &str) {
         .await
         .unwrap();
     store
-        .apply_stream_event(twitch_id, login.to_owned(), StreamEvent::Online, 1_000)
+        .apply_stream_event(
+            twitch_id,
+            login.to_owned(),
+            StreamEvent::Online("stream-1".into()),
+            1_000,
+        )
         .await
         .unwrap();
     store
@@ -681,7 +686,7 @@ pub(super) async fn helix_server() -> (Arc<Helix>, SocketAddr, tokio::task::Join
         };
         match category {
             Some(category) => axum::Json(
-                json!({"data":[{"user_id":"1","user_login":"streamer","game_id":category}],"pagination":{}}),
+                json!({"data":[{"id":"stream-1","user_id":"1","user_login":"streamer","game_id":category}],"pagination":{}}),
             ),
             None => axum::Json(json!({"data":[],"pagination":{}})),
         }
@@ -1359,7 +1364,12 @@ async fn test_mode_receipts_do_not_consume_production_cooldowns_and_dryrun_never
         .await
         .unwrap();
     store
-        .apply_stream_event(1, "streamer".into(), StreamEvent::Online, 4_000)
+        .apply_stream_event(
+            1,
+            "streamer".into(),
+            StreamEvent::Online("stream-2".into()),
+            4_000,
+        )
         .await
         .unwrap();
     store
@@ -3360,7 +3370,12 @@ async fn failed_online_lookup_retry_does_not_adopt_newer_offline_revision() {
     let store = Store::open(":memory:").await.unwrap();
     seed_user(&store, 1, "streamer").await;
     store
-        .apply_stream_event(1, "streamer".into(), StreamEvent::Online, 100)
+        .apply_stream_event(
+            1,
+            "streamer".into(),
+            StreamEvent::Online("stream-1".into()),
+            100,
+        )
         .await
         .unwrap();
     let online_revision = store.snapshot_versions(vec![1]).await.unwrap()[0].1;
@@ -4071,7 +4086,12 @@ async fn revision_guard_prevents_a_slow_snapshot_from_reactivating() {
         .await
         .unwrap();
     store
-        .apply_stream_event(1, "streamer".into(), StreamEvent::Online, 1_000)
+        .apply_stream_event(
+            1,
+            "streamer".into(),
+            StreamEvent::Online("stream-1".into()),
+            1_000,
+        )
         .await
         .unwrap();
     store
@@ -4102,6 +4122,7 @@ async fn revision_guard_prevents_a_slow_snapshot_from_reactivating() {
         &expected,
         vec![crate::providers::LiveStream {
             id: 1,
+            stream_id: "stream-1".into(),
             login: "streamer".into(),
             category_id: "21465".into(),
         }],
@@ -4858,4 +4879,154 @@ async fn revocation_action_overflow_rescans_every_supported_grant_without_losing
             .all(|ids| ids.len() <= 10)
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_stream() {
+    struct FeedbackState {
+        warnings: mpsc::UnboundedSender<Value>,
+    }
+    async fn twitch_feedback(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+        let code = if body["message"] == "duplicate" {
+            "msg_duplicate"
+        } else {
+            "followers_only_mode"
+        };
+        axum::Json(json!({"data":[{
+            "is_sent":false,
+            "drop_reason":{"code":code,"message":"chat restricted"}
+        }]}))
+    }
+    async fn osu_warning(
+        State(state): State<Arc<FeedbackState>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        state.warnings.send(body).unwrap();
+        axum::Json(json!({"message_id":1}))
+    }
+    async fn flush(
+        config: Arc<Config>,
+        store: Store,
+        providers: Providers,
+        auth: TwitchAuth,
+        texts: &[&str],
+    ) {
+        let (tx, rx) = mpsc::channel(8);
+        for text in texts {
+            tx.send(Echo {
+                channel_id: 1,
+                text: (*text).into(),
+                span: tracing::Span::none(),
+                queued_at: Instant::now(),
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        let (_identity, identities) = watch::channel(Some("bot".to_owned()));
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            send_feedback(
+                config,
+                store,
+                providers,
+                auth,
+                rx,
+                identities,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    let (_helix, address, auth_server) = helix_server().await;
+    let (warning_tx, mut warnings) = mpsc::unbounded_channel();
+    let router = Router::new()
+        .route("/helix/chat/messages", post(twitch_feedback))
+        .route("/osu/chat/new", post(osu_warning))
+        .route(
+            "/osu/oauth/token",
+            post(|| async { axum::Json(json!({"access_token":"osu-token","expires_in":3600})) }),
+        )
+        .with_state(Arc::new(FeedbackState {
+            warnings: warning_tx,
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let feedback_base = format!("http://{}", listener.local_addr().unwrap());
+    let feedback_server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut config = Config::from_env().unwrap();
+    config.twitch_client_id = "client".into();
+    config.twitch_client_secret = "secret".into();
+    config.twitch_token_key = Some([42; 32]);
+    config.twitch_oauth_base = format!("http://{address}/oauth");
+    config.twitch_api_base = format!("{feedback_base}/helix");
+    config.osu_client_id = "osu-client".into();
+    config.osu_client_secret = "osu-secret".into();
+    config.osu_oauth_base = format!("{feedback_base}/osu/oauth");
+    config.osu_api_base = format!("{feedback_base}/osu");
+    config.dry_run = false;
+    let config = Arc::new(config);
+    let store = Store::open(":memory:").await.unwrap();
+    seed_user(&store, 1, "streamer").await;
+    grant_and_go_live(&store, 1, "streamer").await;
+    TwitchAuth::authorize_bot(
+        config.clone(),
+        store.clone(),
+        "smokebot",
+        false,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let auth = TwitchAuth::new(config.clone(), store.clone()).unwrap();
+    let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    flush(
+        config.clone(),
+        store.clone(),
+        providers.clone(),
+        auth.clone(),
+        &["duplicate"],
+    )
+    .await;
+    assert!(
+        warnings.try_recv().is_err(),
+        "duplicate-message rejection must not warn about follower mode"
+    );
+    flush(
+        config.clone(),
+        store.clone(),
+        providers.clone(),
+        auth.clone(),
+        &["first", "repeat"],
+    )
+    .await;
+    let warning = warnings
+        .try_recv()
+        .expect("streamer must receive the follower-mode explanation");
+    assert_eq!(warning["target_id"], 1);
+    assert!(
+        warning["message"]
+            .as_str()
+            .unwrap()
+            .contains("VIP or moderator")
+    );
+    assert!(
+        warnings.try_recv().is_err(),
+        "repeated rejection in the same stream must stay quiet"
+    );
+    store
+        .apply_stream_event(
+            1,
+            "streamer".into(),
+            StreamEvent::Online("stream-2".into()),
+            3_000,
+        )
+        .await
+        .unwrap();
+    flush(config, store, providers, auth, &["next-stream"]).await;
+    assert_eq!(warnings.try_recv().unwrap()["target_id"], 1);
+    assert!(warnings.try_recv().is_err());
+    feedback_server.abort();
+    auth_server.abort();
 }

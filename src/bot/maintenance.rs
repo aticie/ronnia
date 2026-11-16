@@ -79,22 +79,26 @@ pub(super) async fn apply(
     expected: &BTreeMap<i64, i64>,
     live: Vec<crate::providers::LiveStream>,
 ) -> Result<Vec<i64>> {
-    let mut observed: BTreeMap<i64, (String, String)> = BTreeMap::new();
+    let mut observed: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
     for stream in live {
         if !expected.contains_key(&stream.id) {
             continue;
         }
-        observed.insert(stream.id, (stream.login, stream.category_id));
+        observed.insert(
+            stream.id,
+            (stream.login, stream.category_id, stream.stream_id),
+        );
     }
     let snapshots: Vec<StreamSnapshot> = ids
         .iter()
         .filter_map(|id| {
             let expected_revision = *expected.get(id)?;
             Some(match observed.get(id) {
-                Some((login, category_id)) => StreamSnapshot {
+                Some((login, category_id, stream_id)) => StreamSnapshot {
                     twitch_id: *id,
                     expected_revision,
                     online: true,
+                    stream_id: Some(stream_id.clone()),
                     category_id: category_id.clone(),
                     login: Some(login.clone()),
                 },
@@ -102,6 +106,7 @@ pub(super) async fn apply(
                     twitch_id: *id,
                     expected_revision,
                     online: false,
+                    stream_id: None,
                     category_id: String::new(),
                     login: None,
                 },
@@ -111,12 +116,16 @@ pub(super) async fn apply(
     if snapshots.is_empty() {
         return Ok(Vec::new());
     }
-    let desired: BTreeMap<i64, (bool, String)> = snapshots
+    let desired: BTreeMap<i64, (bool, String, Option<String>)> = snapshots
         .iter()
         .map(|snapshot| {
             (
                 snapshot.twitch_id,
-                (snapshot.online, snapshot.category_id.clone()),
+                (
+                    snapshot.online,
+                    snapshot.category_id.clone(),
+                    snapshot.stream_id.clone(),
+                ),
             )
         })
         .collect();
@@ -134,18 +143,25 @@ pub(super) async fn apply(
 
 /// Compact projection of the stored per-channel state, used only to detect a
 /// snapshot that was skipped by the revision guard.
-async fn raw_states(store: &Store, ids: &[i64]) -> Result<BTreeMap<i64, (bool, String)>> {
+async fn raw_states(
+    store: &Store,
+    ids: &[i64],
+) -> Result<BTreeMap<i64, (bool, String, Option<String>)>> {
     let ids = ids.to_vec();
     store
         .call(move |db| {
             let mut statement = db.prepare(
-                "SELECT online,category_id FROM channel_stream_state WHERE twitch_id=?1",
+                "SELECT online,category_id,stream_id FROM channel_stream_state WHERE twitch_id=?1",
             )?;
             let mut rows = BTreeMap::new();
             for id in ids {
                 if let Some(state) = statement
                     .query_row([id], |row| {
-                        Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?))
+                        Ok((
+                            row.get::<_, bool>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
                     })
                     .optional()?
                 {

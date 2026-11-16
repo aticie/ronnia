@@ -667,6 +667,7 @@ async fn imported_accounts_need_verified_consent_before_bot_eligibility() {
             twitch_id: 20,
             expected_revision: revision[0].1,
             online: true,
+            stream_id: Some("stream-1".into()),
             category_id: "21465".into(),
             login: None,
         }])
