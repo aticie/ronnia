@@ -5,7 +5,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use ronnia::{api, backup, bot, config::Config, storage::Store, twitch_auth::TwitchAuth};
+use ronnia::{
+    api, backup, bot, business_metrics, config::Config, storage::Store, twitch_auth::TwitchAuth,
+};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
@@ -266,6 +268,14 @@ async fn serve(config: Arc<Config>, store: Store) -> Result<()> {
     });
     if let Some(backup_config) = config.backup.clone() {
         tasks.spawn(backup::run(backup_config, store.clone(), shutdown.clone()));
+    }
+    let metrics_hub = sentry::Hub::current();
+    if metrics_hub.client().is_some() {
+        tasks.spawn(business_metrics::run(
+            store.clone(),
+            metrics_hub,
+            shutdown.clone(),
+        ));
     }
     if let Some(auth) = &bot_auth {
         let bot_shutdown = shutdown.clone();

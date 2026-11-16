@@ -4,6 +4,7 @@
 pub mod api;
 pub mod backup;
 pub mod bot;
+pub mod business_metrics;
 pub mod config;
 pub mod domain;
 pub mod parser;

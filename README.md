@@ -263,19 +263,20 @@ For detailed latency/retry investigation, use `RUST_LOG=info,ronnia=debug` rathe
 
 ### Sentry traces and metrics
 
-Railway remains the JSON-log destination. The existing Sentry integration captures error issues with source chains, INFO/WARN breadcrumbs, sampled request/provider traces, and native metrics. It does not add another collector, exporter, metrics endpoint, or telemetry service. Sentry initializes before Tokio and flushes after the runtime stops. Without `SENTRY_DSN`, no Sentry data is sent.
+Railway remains the JSON-log destination. The existing Sentry integration captures error issues with source chains, INFO/WARN breadcrumbs, sampled request/provider traces, and native metrics. No separate collector, metrics endpoint, or telemetry service is required. Sentry initializes before Tokio and flushes after the runtime stops. Without `SENTRY_DSN`, no Sentry data is sent and the periodic business-metric worker is not started.
 
 Root `request` transactions follow admission, channel-serial work, and any queued Twitch feedback; `provider.http` child spans cover token/pacing waits, retries, and response-body decoding. Each request worker and feedback operation uses an isolated Sentry hub, retaining the same trace without mixing concurrently processed requests. A worker panic keeps its request span alive until collection so the failure can be correlated. Transaction names are stable; request IDs are trace/log context, not metric attributes.
 
 `RUST_LOG`/`LOG_LEVEL` filter Railway JSON output only. Sentry's span, breadcrumb, and error filters are independent, so reducing log verbosity does not disable Sentry traces or error ingestion.
 
-Trace sampling defaults to 10%, independently of native metric/error capture. Metrics use bounded attributes only: provider, normalized operation family, HTTP method/status class, outcome, queue, and retry reason. No channel, requester, message, beatmap ID, URL, query, or error text is added as a metric dimension. The SDK batches native metric ingestion through the configured Sentry DSN.
+Trace sampling defaults to 10%, independently of native metric/error capture. Metrics use bounded attributes only: provider, normalized operation family, HTTP method/status class, outcome, queue, retry reason, bot, cohort, state, source, and activity window. No channel, requester, message, stream, beatmap ID, URL, query, or error text is added as a metric dimension. The SDK batches native metric ingestion through the configured Sentry DSN.
 
 | Native metric | Meaning |
 |---|---|
 | `ronnia.requests.processed` | Worker outcomes: `ok`, `error`, `panic`, `cancelled`; `ok` also includes policy skips, so this is not a delivery count |
 | `ronnia.osu.deliveries` | Actual PM send outcomes: `sent`, `failed`, `uncertain`; independent of subsequent local bookkeeping |
 | `ronnia.twitch.feedback` | Chat acknowledgement outcomes: `sent`, `failed`, `uncertain`, `skipped` |
+| `ronnia.follower_warnings` | Counter for actual osu! warning outcomes: `sent`, `failed`, `uncertain`; starts with instrumentation, not historical receipts; deduplicated skips do not increment it |
 | `ronnia.queue.dropped` | Request/feedback admission drops, grouped by `full` or `closed` |
 | `ronnia.request.queue_wait`, `ronnia.request.processing_time` | Millisecond distributions for queue delay and worker execution |
 | `ronnia.feedback.queue_wait`, `ronnia.feedback.send_time` | Millisecond distributions separating queue/pacing delay from logical send time |
@@ -283,6 +284,26 @@ Trace sampling defaults to 10%, independently of native metric/error capture. Me
 | `ronnia.provider.retries`, `ronnia.provider.retry_delay` | Scheduled retry counts and sleep durations, including token refresh retries where no delay is scheduled |
 
 Use Sentry's Traces view to inspect a sampled `request` and its provider children. In Metrics, compare osu! delivery outcomes with Twitch feedback outcomes, inspect latency percentiles, and group queue drops/retries by their bounded reasons. Use Railway's `message_id` span context to inspect unsampled requests; sampling does not remove their JSON logs. `/ready` remains a database-readiness probe, not an upstream-provider availability check.
+
+#### Continuous business and adoption metrics
+
+With Sentry configured, `serve` emits these gauges immediately and every 60 seconds, including when the bot is waiting for authorization or running API-only. They are read from durable SQLite state, independent of trace sampling and incoming request volume. Every fixed series includes explicit zero samples; collection errors skip the sample rather than inventing zero. The historical imported-request baseline is read once per process, avoiding a scan of historical statistics on each tick; a restart reloads it.
+
+| Gauge | Group by | Meaning |
+|---|---|---|
+| `ronnia.channels.live` | `bot`: `rust`, `legacy` | Public live osu! channels: Rust's derived live flag, plus enabled never-migrated legacy channels with presence refreshed within 180 seconds |
+| `ronnia.channels.online` | `bot`: `rust` | Currently monitored enabled, authorized Rust channels online in any category, past the migration grace window |
+| `ronnia.accounts.total` | `cohort`: `legacy`, `new` | Retained complete registrations; preserved import documents distinguish the legacy cohort from new signups |
+| `ronnia.accounts.enabled` | none | Registered accounts with the bot enabled |
+| `ronnia.accounts.migration` | `state`: `pending`, `authorized`, `revoked` | Legacy cohort only: never reauthorized, currently authorized, or previously migrated with revoked consent; new signups never inflate migration progress |
+| `ronnia.channels.authorization` | `state`: `pending`, `authorized`, `revoked` | Consent state across all registered accounts |
+| `ronnia.channels.chat_banned` | none | Currently authorized accounts with a persisted chat ban |
+| `ronnia.requests.total` | `source`: `imported`, `rust`, `legacy` | Historical imported request records plus confirmed successful deliveries from each bot since cutover; includes link-only successes without a beatmap-statistics row, never send attempts or warning PMs |
+| `ronnia.channels.active` | `window`: `24h`, `7d` | Distinct streamer osu! accounts receiving at least one confirmed request in the rolling window, across both bots; not unique requesters |
+
+In Sentry **Explore → Metrics**, select `ronnia-v2`, filter production, choose a gauge above, and group by its documented attribute. Add these as ongoing panels to [Ronnia Metrics](https://ronnia.sentry.io/dashboard/10774807/) without replacing the existing technical widgets. Use the latest sample when available for a current-value card, or average samples per supported time bucket for a trend (one-minute buckets match the publication interval). **Never sum repeated gauge samples over time**: that multiplies registered-account and lifetime-request totals. Separate cohort/source series can be combined at the same observation time. Retained account gauges can decrease after deletion; lifetime request totals survive process restarts. Migration completion includes authorized plus revoked legacy accounts, while currently usable migration counts only authorized.
+
+For recent Rust request volume, continue using `ronnia.osu.deliveries` with `outcome:sent` and a sum over the selected time range. `ronnia.requests.processed` with `outcome:ok` includes policy skips and is not a sent-request counter. Request/provider latency, feedback outcomes, queue drops, and retries remain available in the existing dashboard. Successful follower warnings also log `Followers-only osu! warning delivered` at INFO with channel, stream, and recipient IDs for Railway inspection; repeated/ineligible warnings remain DEBUG.
 
 ## HTTP compatibility
 
