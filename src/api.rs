@@ -8,6 +8,7 @@ mod tests;
 use crate::{
     config::Config,
     domain::{RequestEvent, Settings},
+    providers::Providers,
     storage::{ClaimOutcome, DeliveryOutcome, Store},
 };
 use axum::{
@@ -31,6 +32,7 @@ struct ApiState {
     config: Arc<Config>,
     store: Store,
     http: reqwest::Client,
+    providers: Providers,
 }
 
 pub fn router(config: Arc<Config>, store: Store) -> Router {
@@ -52,6 +54,8 @@ pub fn router(config: Arc<Config>, store: Store) -> Router {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("HTTP client initialization");
+    let providers = Providers::new(config.clone(), tokio_util::sync::CancellationToken::new())
+        .expect("provider HTTP client initialization");
     let app = Router::new()
         .route("/oauth2/osu-login", get(oauth::osu_login))
         .route("/oauth2/osu-redirect", get(oauth::osu_redirect))
@@ -98,6 +102,7 @@ pub fn router(config: Arc<Config>, store: Store) -> Router {
             config,
             store,
             http,
+            providers,
         })
 }
 
@@ -159,10 +164,37 @@ async fn me(
                 [twitch_id], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
             ).optional()?.unwrap_or((false, false)))
         }).await?;
+        // Optional chat configuration must not turn a Twitch outage into a
+        // failed login. Reuse the provider's app-token cache, but bound the
+        // whole lookup (including token refresh and retries) to two seconds.
+        let chat_settings = if authorized && !chat_banned {
+            match tokio::time::timeout(
+                Duration::from_secs(2),
+                state.providers.twitch_chat_settings(twitch_id),
+            )
+            .await
+            {
+                Ok(Ok(settings)) => Some(settings),
+                Ok(Err(error)) => {
+                    tracing::warn!(channel_id = twitch_id, error = %error, "Could not check Twitch chat settings");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        channel_id = twitch_id,
+                        "Twitch chat settings lookup timed out"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         return Ok(Json(docs::MeResponse::User(docs::UserResponse::new(
             user,
             authorized,
             chat_banned,
+            chat_settings,
         ))));
     }
     if let Some(pending) = security::pending(&state, &headers).await? {

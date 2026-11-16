@@ -677,6 +677,13 @@ class Providers:
                             owner.subscription_creates[key] += 1
                             return self.send_json(202, {"data": [row], "total": len(owner.subscriptions),
                                                        "total_cost": 0, "max_total_cost": 10000})
+                if path == "/twitch/helix/chat/settings" and method == "GET":
+                    check(auth.startswith("app-twitch:"), "Chat settings request lacks app bearer")
+                    check(set(query) == {"broadcaster_id"}, "Chat settings requested moderator-only fields")
+                    return self.send_json(200, {"data": [{
+                        "broadcaster_id": query["broadcaster_id"][0],
+                        "follower_mode": False, "follower_mode_duration": None,
+                    }]})
                 if path == "/twitch/helix/chat/messages" and method == "POST":
                     owner.chat_auth = auth
                     check(auth in owner.bot_tokens,

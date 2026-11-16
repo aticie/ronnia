@@ -16,6 +16,7 @@ use tower::ServiceExt;
 struct Fixture {
     state: ApiState,
     provider: tokio::task::JoinHandle<()>,
+    chat_settings: Arc<std::sync::Mutex<(StatusCode, Value, Duration)>>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -45,6 +46,19 @@ impl Fixture {
             State(provider): State<&'static str>,
             Form(form): Form<BTreeMap<String, String>>,
         ) -> Response {
+            if form.get("grant_type").map(String::as_str) == Some("client_credentials") {
+                assert_eq!(provider, "twitch");
+                assert_eq!(
+                    form.get("client_id").map(String::as_str),
+                    Some("test-twitch-client")
+                );
+                assert_eq!(
+                    form.get("client_secret").map(String::as_str),
+                    Some("test-twitch-secret")
+                );
+                return Json(json!({"access_token":"chat-settings-app-token","expires_in":3600}))
+                    .into_response();
+            }
             assert_eq!(
                 form.get("grant_type").map(String::as_str),
                 Some("authorization_code")
@@ -116,6 +130,29 @@ impl Fixture {
                 )
             }
         }
+        async fn chat_settings(
+            State(settings): State<Arc<std::sync::Mutex<(StatusCode, Value, Duration)>>>,
+            Query(query): Query<BTreeMap<String, String>>,
+            headers: HeaderMap,
+        ) -> Response {
+            assert_eq!(
+                &headers[header::AUTHORIZATION],
+                "Bearer chat-settings-app-token"
+            );
+            assert_eq!(&headers["Client-Id"], "test-twitch-client");
+            assert_eq!(query.len(), 1);
+            let (status, mut row, delay) = settings.lock().unwrap().clone();
+            if row.get("broadcaster_id").is_none() {
+                row["broadcaster_id"] = json!(query["broadcaster_id"]);
+            }
+            tokio::time::sleep(delay).await;
+            (status, Json(json!({"data":[row]}))).into_response()
+        }
+        let chat_settings_state = Arc::new(std::sync::Mutex::new((
+            StatusCode::OK,
+            json!({"follower_mode":false,"follower_mode_duration":null}),
+            Duration::ZERO,
+        )));
         let providers = Router::new()
             .merge(
                 Router::new()
@@ -123,6 +160,11 @@ impl Fixture {
                     .with_state("twitch"),
             )
             .route("/twitch/oauth/validate", get(validate))
+            .merge(
+                Router::new()
+                    .route("/twitch/api/chat/settings", get(chat_settings))
+                    .with_state(chat_settings_state.clone()),
+            )
             .merge(
                 Router::new()
                     .route("/osu/oauth/token", post(token))
@@ -185,13 +227,17 @@ impl Fixture {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap();
+        let providers =
+            Providers::new(config.clone(), tokio_util::sync::CancellationToken::new()).unwrap();
         Self {
             state: ApiState {
                 config,
                 store,
                 http,
+                providers,
             },
             provider,
+            chat_settings: chat_settings_state,
         }
     }
     fn browser(&self) -> Browser {
@@ -368,6 +414,8 @@ impl Browser {
         assert_eq!(user.json["twitchId"], twitch_id);
         assert_eq!(user.json["twitchBotAuthorized"], true);
         assert_eq!(user.json["twitchBotBanned"], false);
+        assert_eq!(user.json["twitchChatFollowerMode"], false);
+        assert_eq!(user.json["twitchChatFollowerModeDuration"], Value::Null);
         assert!(user.json.get("settings").is_none());
     }
 }
@@ -394,6 +442,101 @@ async fn me_distinguishes_chat_ban_from_missing_channel_consent() {
     let recovered = browser.get("/user/me").await;
     assert_eq!(recovered.json["twitchBotAuthorized"], true);
     assert_eq!(recovered.json["twitchBotBanned"], false);
+}
+
+#[tokio::test]
+async fn me_reports_current_follower_mode_without_claiming_a_chat_ban() {
+    let fixture = Fixture::new().await;
+    let mut browser = fixture.browser();
+    browser.signup("twitch", 10, 20).await;
+    for (mode, duration, expected_duration) in [
+        (true, 10, json!(10)),
+        (true, 0, json!(0)),
+        (false, 10, Value::Null),
+    ] {
+        fixture.chat_settings.lock().unwrap().1 =
+            json!({"follower_mode":mode,"follower_mode_duration":duration});
+        let reply = browser.get("/user/me").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json["twitchBotAuthorized"], true);
+        assert_eq!(reply.json["twitchBotBanned"], false);
+        assert_eq!(reply.json["twitchChatFollowerMode"], mode);
+        assert_eq!(
+            reply.json["twitchChatFollowerModeDuration"],
+            expected_duration
+        );
+    }
+}
+
+#[tokio::test]
+async fn me_does_not_mistake_unavailable_chat_settings_for_disabled_follower_mode() {
+    let fixture = Fixture::new().await;
+    let mut browser = fixture.browser();
+    browser.signup("twitch", 10, 20).await;
+    for (status, row) in [
+        (StatusCode::FORBIDDEN, json!({})),
+        (StatusCode::OK, json!({})),
+        (
+            StatusCode::OK,
+            json!({"broadcaster_id":"21","follower_mode":true,"follower_mode_duration":0}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"follower_mode":true,"follower_mode_duration":null}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"follower_mode":true,"follower_mode_duration":-1}),
+        ),
+    ] {
+        *fixture.chat_settings.lock().unwrap() = (status, row, Duration::ZERO);
+        let reply = browser.get("/user/me").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json["twitchBotAuthorized"], true);
+        assert_eq!(reply.json["twitchChatFollowerMode"], Value::Null);
+        assert_eq!(reply.json["twitchChatFollowerModeDuration"], Value::Null);
+    }
+    fixture.chat_settings.lock().unwrap().0 = StatusCode::OK;
+    fixture.chat_settings.lock().unwrap().2 = Duration::from_secs(5);
+    let reply = tokio::time::timeout(Duration::from_secs(3), browser.get("/user/me"))
+        .await
+        .expect("optional chat settings must not stall login");
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json["twitchChatFollowerMode"], Value::Null);
+    assert_eq!(reply.json["twitchChatFollowerModeDuration"], Value::Null);
+}
+
+#[tokio::test]
+async fn me_prioritizes_missing_consent_and_chat_bans_over_follower_mode() {
+    let fixture = Fixture::new().await;
+    let mut browser = fixture.browser();
+    browser.signup("twitch", 10, 20).await;
+    fixture.chat_settings.lock().unwrap().1 =
+        json!({"follower_mode":true,"follower_mode_duration":10});
+    fixture
+        .state
+        .store
+        .mark_twitch_chat_banned(20)
+        .await
+        .unwrap();
+    let banned = browser.get("/user/me").await;
+    assert_eq!(banned.json["twitchBotBanned"], true);
+    assert_eq!(banned.json["twitchChatFollowerMode"], Value::Null);
+    fixture
+        .state
+        .store
+        .call(|db| {
+            db.execute(
+                "UPDATE twitch_channel_grants SET status='revoked' WHERE twitch_id=20",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let revoked = browser.get("/user/me").await;
+    assert_eq!(revoked.json["twitchBotAuthorized"], false);
+    assert_eq!(revoked.json["twitchChatFollowerMode"], Value::Null);
 }
 
 #[tokio::test]
@@ -1509,7 +1652,7 @@ async fn debug_documentation_describes_real_routes_payloads_and_cookie_security(
     let properties = spec["components"]["schemas"]["UserResponse"]["properties"]
         .as_object()
         .unwrap();
-    assert_eq!(properties.len(), 10);
+    assert_eq!(properties.len(), 12);
     assert_eq!(properties["twitchBotAuthorized"]["type"], "boolean");
     assert_eq!(properties["twitchBotBanned"]["type"], "boolean");
     assert!(properties.get("settings").is_none());

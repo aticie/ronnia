@@ -466,10 +466,13 @@ def exercise_api(service):
     check(user["osuId"] == 201 and user["twitchId"] == 101, "Existing fixture account login failed")
     check(set(user) == {"osuId", "osuUsername", "osuAvatarUrl", "twitchId", "twitchUsername",
                         "twitchAvatarUrl", "excludedUsers", "isLive", "twitchBotAuthorized",
-                        "twitchBotBanned"},
+                        "twitchBotBanned", "twitchChatFollowerMode",
+                        "twitchChatFollowerModeDuration"},
           f"Public UserResponse fields changed: {sorted(user)}")
     check(user["twitchBotAuthorized"] is True, "Verified channel:bot consent not exposed")
     check(user["twitchBotBanned"] is False, "Healthy chat access must not be reported as banned")
+    check(user["twitchChatFollowerMode"] is False and user["twitchChatFollowerModeDuration"] is None,
+          "Unrestricted fixture chat must not be reported as followers-only")
     check(service.scalar("SELECT status FROM twitch_channel_grants WHERE twitch_id=101") == "granted",
           "Twitch login did not persist verified channel:bot grant")
     metadata = browser.ok("/user/settings")
