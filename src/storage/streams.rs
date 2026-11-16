@@ -45,7 +45,7 @@ impl Store {
             let mut changed = false;
             for snapshot in snapshots {
                 ensure_row(tx, snapshot.twitch_id)?;
-                let applied = tx.execute("UPDATE channel_stream_state SET online=?1,category_id=?2,revision=revision+1 WHERE twitch_id=?3 AND revision=?4", params![snapshot.online, snapshot.category_id, snapshot.twitch_id, snapshot.expected_revision])? > 0;
+                let applied = tx.execute("UPDATE channel_stream_state SET online=?1,category_id=?2,stream_id=?3,revision=revision+1 WHERE twitch_id=?4 AND revision=?5", params![snapshot.online, snapshot.category_id, snapshot.stream_id, snapshot.twitch_id, snapshot.expected_revision])? > 0;
                 if applied { refresh(tx, snapshot.twitch_id, snapshot.login.as_deref())?; changed = true; }
             }
             Ok(changed)
@@ -65,7 +65,7 @@ impl Store {
         let applied = self.write(move |tx| {
             ensure_row(tx, twitch_id)?;
             let applied = match event {
-                StreamEvent::Online => tx.execute("UPDATE channel_stream_state SET online=1,category_id=CASE WHEN category_event_at<=?1 THEN '' ELSE category_id END,online_event_at=?1,revision=revision+1 WHERE twitch_id=?2 AND online_event_at<?1", params![at, twitch_id])?,
+                StreamEvent::Online(stream_id) => tx.execute("UPDATE channel_stream_state SET online=1,stream_id=?1,category_id=CASE WHEN category_event_at<=?2 THEN '' ELSE category_id END,online_event_at=?2,revision=revision+1 WHERE twitch_id=?3 AND online_event_at<?2", params![stream_id, at, twitch_id])?,
                 StreamEvent::Offline => tx.execute("UPDATE channel_stream_state SET online=0,online_event_at=?1,revision=revision+1 WHERE twitch_id=?2 AND online_event_at<?1", params![at, twitch_id])?,
                 StreamEvent::Category(category) => tx.execute("UPDATE channel_stream_state SET category_id=?1,category_event_at=?2,revision=revision+1 WHERE twitch_id=?3 AND category_event_at<?2 AND (online=0 OR online_event_at<?2)", params![category, at, twitch_id])?,
             } > 0;

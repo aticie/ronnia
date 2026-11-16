@@ -488,10 +488,22 @@ impl Runtime {
                 }
             }
             "stream.online" => {
+                let Some(stream_id) = event["id"].as_str().filter(|id| !id.is_empty()) else {
+                    tracing::warn!(
+                        broadcaster,
+                        "ignoring stream.online without a stream identity"
+                    );
+                    return Ok(());
+                };
                 let login = event_login(event);
                 if self
                     .store
-                    .apply_stream_event(broadcaster, login, StreamEvent::Online, at)
+                    .apply_stream_event(
+                        broadcaster,
+                        login,
+                        StreamEvent::Online(stream_id.to_owned()),
+                        at,
+                    )
                     .await?
                 {
                     tracing::info!(

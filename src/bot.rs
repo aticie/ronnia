@@ -23,6 +23,7 @@ mod backoff;
 mod conduit;
 mod delivery;
 mod dispatch;
+mod follower_warnings;
 mod maintenance;
 mod requests;
 mod transport;
@@ -77,6 +78,7 @@ pub async fn run(
         ),
         send_feedback(
             config.clone(),
+            store.clone(),
             providers.clone(),
             auth.clone(),
             echo_rx,
@@ -262,6 +264,7 @@ async fn wait_for_identity(auth: &TwitchAuth, shutdown: &CancellationToken) -> O
 
 async fn send_feedback(
     config: Arc<Config>,
+    store: Store,
     providers: Providers,
     auth: TwitchAuth,
     mut echoes: mpsc::Receiver<Echo>,
@@ -327,16 +330,24 @@ async fn send_feedback(
                     elapsed_ms,
                     "Twitch chat feedback delivered"
                 ),
-                Err(error) => tracing::warn!(
-                    channel_id = echo.channel_id,
-                    sender_id = %sender,
-                    http_status = error.status,
-                    uncertain = error.uncertain,
-                    queue_wait_ms,
-                    elapsed_ms,
-                    error = %error,
-                    "Twitch chat feedback was not delivered"
-                ),
+                Err(error) => {
+                    tracing::warn!(
+                        channel_id = echo.channel_id,
+                        sender_id = %sender,
+                        http_status = error.status,
+                        uncertain = error.uncertain,
+                        queue_wait_ms,
+                        elapsed_ms,
+                        error = %error,
+                        "Twitch chat feedback was not delivered"
+                    );
+                    if error.drop_reason.as_deref() == Some("followers_only_mode")
+                        && let Err(error) =
+                            follower_warnings::send(&config, &store, &providers, echo.channel_id).await
+                    {
+                        tracing::warn!(channel_id = echo.channel_id, error = %error, "Could not deliver followers-only osu! warning");
+                    }
+                }
             }
         }
         .instrument(span)
