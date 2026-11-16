@@ -33,12 +33,17 @@ pub(super) struct UserResponse {
     twitch_bot_authorized: bool,
     /// Whether Twitch revoked chat access because the bot is banned in chat.
     twitch_bot_banned: bool,
+    /// Current followers-only setting; null when unavailable or chat access takes precedence.
+    twitch_chat_follower_mode: Option<bool>,
+    /// Minimum follow duration in minutes; null when disabled or unavailable.
+    twitch_chat_follower_mode_duration: Option<u32>,
 }
 impl UserResponse {
     pub(super) fn new(
         user: crate::domain::User,
         twitch_bot_authorized: bool,
         twitch_bot_banned: bool,
+        chat_settings: Option<crate::providers::TwitchChatSettings>,
     ) -> Self {
         Self {
             osu_id: user.osu_id,
@@ -51,6 +56,9 @@ impl UserResponse {
             is_live: user.is_live,
             twitch_bot_authorized,
             twitch_bot_banned,
+            twitch_chat_follower_mode: chat_settings.map(|settings| settings.follower_mode),
+            twitch_chat_follower_mode_duration: chat_settings
+                .and_then(|settings| settings.follower_mode_duration),
         }
     }
 }

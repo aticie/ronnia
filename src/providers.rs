@@ -30,6 +30,13 @@ pub struct LiveStream {
     pub category_id: String,
 }
 
+/// Public channel configuration, not a verdict on the bot's ability to speak.
+#[derive(Clone, Copy)]
+pub struct TwitchChatSettings {
+    pub follower_mode: bool,
+    pub follower_mode_duration: Option<u32>,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Scope {
     Twitch,
@@ -747,6 +754,39 @@ impl Providers {
         let mutation = method != Method::GET && method != Method::DELETE;
         self.request(Scope::Twitch, method, endpoint, query, data, mutation)
             .await
+    }
+
+    pub async fn twitch_chat_settings(&self, broadcaster: i64) -> Result<TwitchChatSettings> {
+        let query = [("broadcaster_id".into(), broadcaster.to_string())];
+        let value = self
+            .twitch_request(Method::GET, "chat/settings", &query, None)
+            .await?;
+        let rows = value["data"]
+            .as_array()
+            .filter(|rows| rows.len() == 1)
+            .context("Twitch omitted channel chat settings")?;
+        let row = &rows[0];
+        if row["broadcaster_id"].as_str() != Some(query[0].1.as_str()) {
+            bail!("Twitch returned chat settings for another channel");
+        }
+        let follower_mode = row["follower_mode"]
+            .as_bool()
+            .context("Twitch omitted follower mode")?;
+        let follower_mode_duration = if follower_mode {
+            Some(
+                row["follower_mode_duration"]
+                    .as_u64()
+                    .filter(|minutes| *minutes <= 129600)
+                    .context("Twitch returned invalid follower mode duration")?
+                    as u32,
+            )
+        } else {
+            None
+        };
+        Ok(TwitchChatSettings {
+            follower_mode,
+            follower_mode_duration,
+        })
     }
 
     /// Send chat as the managed bot account. This is the one Twitch call that
