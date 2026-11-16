@@ -16,10 +16,21 @@ pub(super) async fn send(
         return Ok(());
     }
     let Some(claim) = store.claim_follower_warning(channel_id).await? else {
+        tracing::debug!(
+            channel_id,
+            "Followers-only osu! warning not eligible or already attempted this stream"
+        );
         return Ok(());
     };
     match providers.send_message(claim.osu_id, TEXT, false).await {
         Ok(()) => {
+            super::record_outcome("ronnia.follower_warnings", "sent");
+            tracing::info!(
+                channel_id,
+                target_osu_id = claim.osu_id,
+                stream_id = %claim.stream_id,
+                "Followers-only osu! warning delivered"
+            );
             store
                 .finish_follower_warning(channel_id, claim.stream_id, "sent", None)
                 .await?;
@@ -31,6 +42,7 @@ pub(super) async fn send(
             } else {
                 "failed"
             };
+            super::record_outcome("ronnia.follower_warnings", status);
             let finished = store
                 .finish_follower_warning(
                     channel_id,

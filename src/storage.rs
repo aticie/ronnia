@@ -5,6 +5,7 @@
 //! every method keeps the signature it had before the split.
 
 mod actor;
+mod business_metrics;
 mod cache;
 mod deliveries;
 mod follower_warnings;
@@ -15,6 +16,7 @@ mod streams;
 mod users;
 
 pub use actor::Store;
+pub(crate) use business_metrics::BusinessMetrics;
 pub use deliveries::{ClaimOutcome, DeliveryOutcome};
 pub use follower_warnings::FollowerWarning;
 pub use users::ChannelGrant;
