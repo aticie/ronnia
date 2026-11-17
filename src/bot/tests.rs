@@ -4981,6 +4981,36 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
     .unwrap();
     let auth = TwitchAuth::new(config.clone(), store.clone()).unwrap();
     let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let feedback_outcomes = Arc::new(StdMutex::new(Vec::new()));
+    let captured_outcomes = feedback_outcomes.clone();
+    #[derive(Default)]
+    struct Captured(StdMutex<Vec<sentry::Envelope>>);
+    impl sentry::Transport for Captured {
+        fn send_envelope(&self, envelope: sentry::Envelope) {
+            self.0.lock().unwrap().push(envelope);
+        }
+    }
+    let transport = Arc::new(Captured::default());
+    let mut options = sentry::ClientOptions::default();
+    options.dsn = Some("https://test@example.invalid/1".parse().unwrap());
+    options.default_integrations = false;
+    options.transport = Some(Arc::new(transport));
+    options.before_send_metric = Some(Arc::new(move |metric| {
+        if metric.name == "ronnia.twitch.feedback" {
+            let metric = serde_json::to_value(metric).unwrap();
+            captured_outcomes
+                .lock()
+                .unwrap()
+                .push(metric["attributes"]["outcome"]["value"].clone());
+        }
+        // Observe metrics locally without sending anything over the network.
+        None
+    }));
+    let client = sentry::Client::from_config(options);
+    let hub = Arc::new(sentry::Hub::new(
+        Some(Arc::new(client)),
+        Arc::new(sentry::Scope::default()),
+    ));
     flush(
         config.clone(),
         store.clone(),
@@ -4988,10 +5018,16 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
         auth.clone(),
         &["duplicate"],
     )
+    .bind_hub(hub.clone())
     .await;
     assert!(
         warnings.try_recv().is_err(),
         "duplicate-message rejection must not warn about follower mode"
+    );
+    assert_eq!(
+        *feedback_outcomes.lock().unwrap(),
+        vec![json!("skipped")],
+        "a duplicate acknowledgement must not count as a delivery failure or success"
     );
     flush(
         config.clone(),
@@ -5000,7 +5036,13 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
         auth.clone(),
         &["first", "repeat"],
     )
+    .bind_hub(hub)
     .await;
+    assert_eq!(
+        *feedback_outcomes.lock().unwrap(),
+        vec![json!("skipped"), json!("failed"), json!("failed")],
+        "real chat restrictions must still count as delivery failures"
+    );
     let warning = warnings
         .try_recv()
         .expect("streamer must receive the follower-mode explanation");

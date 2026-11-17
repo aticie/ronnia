@@ -319,6 +319,7 @@ async fn send_feedback(
             let outcome = match &result {
                 Ok(()) => "sent",
                 Err(error) if error.uncertain => "uncertain",
+                Err(error) if error.drop_reason.as_deref() == Some("msg_duplicate") => "skipped",
                 Err(_) => "failed",
             };
             record_outcome("ronnia.twitch.feedback", outcome);
@@ -329,6 +330,17 @@ async fn send_feedback(
                     queue_wait_ms,
                     elapsed_ms,
                     "Twitch chat feedback delivered"
+                ),
+                Err(error) if outcome == "skipped" => tracing::info!(
+                    channel_id = echo.channel_id,
+                    sender_id = %sender,
+                    http_status = error.status,
+                    reason = "duplicate_message",
+                    drop_reason = error.drop_reason.as_deref(),
+                    outcome,
+                    queue_wait_ms,
+                    elapsed_ms,
+                    "Twitch chat feedback skipped"
                 ),
                 Err(error) => {
                     tracing::warn!(
