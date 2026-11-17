@@ -229,6 +229,146 @@ fn retry_after_accepts_http_dates_and_retains_bounds_and_fallbacks() {
     }
 }
 
+fn helix_quota_response(
+    status: StatusCode,
+    remaining: u64,
+    reset: i64,
+    retry_after: Option<&str>,
+) -> Response {
+    let mut response = axum::http::Response::builder()
+        .status(status)
+        .header("ratelimit-limit", "800")
+        .header("ratelimit-remaining", remaining.to_string())
+        .header("ratelimit-reset", reset.to_string());
+    if let Some(retry_after) = retry_after {
+        response = response.header("retry-after", retry_after);
+    }
+    response.body("").unwrap().into()
+}
+
+#[test]
+fn twitch_quota_does_not_reopen_an_exhausted_window_for_late_responses() {
+    let now = Instant::now();
+    let epoch = chrono::Utc::now().timestamp();
+    let mut quota = TwitchQuota::default();
+    assert_eq!(
+        quota.observe(
+            &helix_quota_response(StatusCode::OK, 1, epoch + 120, None),
+            0,
+            now
+        ),
+        None
+    );
+    assert_eq!(quota.reserve(now), None);
+    for reset in [epoch + 119, epoch + 120, epoch + 121] {
+        quota.observe(
+            &helix_quota_response(StatusCode::OK, 2, reset, None),
+            0,
+            now,
+        );
+    }
+    assert!(
+        quota
+            .reserve(now)
+            .is_some_and(|wait| wait > Duration::from_secs(60))
+    );
+    assert_eq!(quota.reserve(now + Duration::from_secs(121)), None);
+}
+
+#[test]
+fn twitch_quota_shares_bucket_429_but_not_endpoint_429() {
+    let now = Instant::now();
+    let epoch = chrono::Utc::now().timestamp();
+    let mut quota = TwitchQuota::default();
+    let status = StatusCode::TOO_MANY_REQUESTS;
+    // The endpoint can throttle even when its general API bucket has points.
+    assert_eq!(
+        quota.observe(
+            &helix_quota_response(status, 2, epoch + 120, Some("4")),
+            0,
+            now
+        ),
+        Some(Duration::from_secs(4))
+    );
+    assert_eq!(quota.reserve(now), None);
+
+    // The last failed attempt still blocks sibling calls. A shorter Retry-After
+    // must not cut short Twitch's bucket reset deadline.
+    let delay = quota
+        .observe(
+            &helix_quota_response(status, 0, epoch + 120, Some("4")),
+            2,
+            now,
+        )
+        .unwrap();
+    assert!(delay > Duration::from_secs(60));
+    assert_eq!(quota.reserve(now), Some(delay));
+    assert_eq!(quota.reserve(now + delay), None);
+}
+
+#[tokio::test]
+async fn twitch_helix_calls_share_remaining_points_and_cancel_while_waiting() {
+    use axum::{
+        Router,
+        routing::{get, post},
+    };
+    let epoch = chrono::Utc::now().timestamp() + 120;
+    let router = Router::new()
+        .route(
+            "/oauth/token",
+            post(|| async { axum::Json(json!({"access_token":"test","expires_in":3600})) }),
+        )
+        .route(
+            "/helix/streams",
+            get(move || async move {
+                (
+                    [
+                        ("ratelimit-limit", "800".to_owned()),
+                        ("ratelimit-remaining", "1".to_owned()),
+                        ("ratelimit-reset", epoch.to_string()),
+                    ],
+                    axum::Json(json!({"route":"streams"})),
+                )
+            }),
+        )
+        .route(
+            "/helix/eventsub/subscriptions",
+            get(|| async { axum::Json(json!({"route":"subscriptions"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut config = Config::from_env().unwrap();
+    config.twitch_api_base = format!("http://{address}/helix");
+    config.twitch_oauth_base = format!("http://{address}/oauth");
+    config.twitch_client_id = "test".into();
+    config.twitch_client_secret = "test".into();
+    let shutdown = CancellationToken::new();
+    let providers = Providers::new(Arc::new(config), shutdown.clone()).unwrap();
+    assert_eq!(
+        providers
+            .twitch_request(Method::GET, "streams", &[], None)
+            .await
+            .unwrap()["route"],
+        "streams"
+    );
+    let sibling = providers.clone();
+    let subscriptions = || sibling.twitch_request(Method::GET, "eventsub/subscriptions", &[], None);
+    assert_eq!(subscriptions().await.unwrap()["route"], "subscriptions");
+    let waiting = subscriptions();
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err()
+    );
+    shutdown.cancel();
+    let error = waiting.await.unwrap_err();
+    assert!(!error.uncertain);
+    assert!(error.message.contains("cancelled"));
+    server.abort();
+}
+
 #[tokio::test]
 async fn username_path_encoding_preserves_the_actual_request_target() {
     use axum::{
