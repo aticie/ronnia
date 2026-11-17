@@ -729,7 +729,8 @@ def exercise_bot(service, browser):
     deliver("https://osu.ppy.sh/beatmaps/1001", author="inclusive_boundary")
     browser.ok("/user/settings", "POST", settings(cooldown=60))
     deliver("https://osu.ppy.sh/beatmaps/1001", author="cooldownviewer", user_id=401)
-    reject("https://osu.ppy.sh/beatmaps/1001", author="cooldownviewer", user_id=401)
+    # A different map isolates the per-requester cooldown from same-map deduplication.
+    reject("https://osu.ppy.sh/beatmaps/1002", author="cooldownviewer", user_id=401)
     deliver("https://osu.ppy.sh/beatmaps/1001", author="other_cooldownviewer", user_id=402)
     browser.ok("/user/settings", "POST", settings(test=True, sr=[9, 9], **{"sub-only": True, "points-only": True}))
     deliver("https://osu.ppy.sh/beatmaps/1001", author="streamer", user_id=101)

@@ -344,6 +344,8 @@ python3 scripts/scale.py --binary target/release/ronnia --channels 100 --request
 
 Smoke runs the actual executable against isolated local Twitch EventSub WebSocket/Helix/OAuth/osu HTTP simulators and a fresh SQLite database. It exercises the real device-code bot authorization, streamer consent, conduit/subscription lifecycle, reconnect handoff, hybrid live tracking, token refresh, and ambiguous delivery handling. On Linux with `cc`, a process-local resolver shim injects two DNS failures and later successful resolution into the same running service. It does not change host DNS or `/etc/hosts`. This is not a live-provider certification.
 
+Synthetic Twitch logins get stable, distinct chatter IDs. The cooldown case changes the map while keeping the requester ID fixed, so same-map deduplication cannot satisfy it.
+
 The scale scenario uses Python's standard library and temporary local fixtures/SQLite. It exercises growth and persisted topology, isolated shard recovery, slow maintenance HTTP, revision races, cross-channel request progress, bounded admission, drain/restart, and shutdown. Initial 400-subscription convergence allows 180 seconds at the unchanged 200 ms creation pace. Results include request accounting, API latency, and Linux peak RSS; they are synthetic evidence, not production channel or throughput guarantees. Private Rust tests assert worker/permit/channel cleanup and reader joining. The binary harness does not prove container bot-mode load.
 
 The Rust relay/API code retains the original Apache-2.0 license. Frontend source attribution and its unchanged upstream licensing status are documented in the [separate frontend README](https://github.com/aticie/ronnia-web#readme).
