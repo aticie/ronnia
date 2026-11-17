@@ -25,7 +25,20 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: cargo build --locked --release
-      - run: python3 scripts/smoke.py --binary target/release/ronnia
-      - run: docker build -f Dockerfile.docker -t ronnia:check .
+      - uses: docker/setup-buildx-action@v4
+      - name: Build release image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.docker
+          tags: ronnia:check
+          load: true
+          cache-from: type=gha,scope=ronnia-docker
+          cache-to: type=gha,scope=ronnia-docker,mode=max,ignore-error=true,timeout=2m
         timeout-minutes: 12
+      - name: Smoke-test the packaged binary
+        run: |
+          container="$(docker create ronnia:check)"
+          trap 'docker rm "$container" >/dev/null' EXIT
+          docker cp "$container:/usr/local/bin/ronnia" "$RUNNER_TEMP/ronnia"
+          python3 scripts/smoke.py --binary "$RUNNER_TEMP/ronnia"
