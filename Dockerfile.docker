@@ -1,5 +1,16 @@
-FROM rust:1-bookworm AS build
+FROM lukemathwalker/cargo-chef:0.1.78-rust-1-bookworm AS chef
 WORKDIR /src
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS dependencies
+COPY --from=planner /src/recipe.json ./
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+
+FROM dependencies AS build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
