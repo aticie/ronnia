@@ -1564,7 +1564,13 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
         ..clock
     };
     process_one(
-        &config, &store, &providers, &echoes, &request, &beatmap, cache_clock,
+        &config,
+        &store,
+        &providers,
+        &echoes,
+        &request,
+        &beatmap,
+        cache_clock,
     )
     .await
     .unwrap();
