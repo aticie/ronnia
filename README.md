@@ -267,6 +267,8 @@ At `INFO`, successful Twitch feedback is recorded alongside request outcomes; wa
 
 For detailed latency/retry investigation, use `RUST_LOG=info,ronnia=debug` rather than enabling global HTTP protocol logging. Worker start/finish events report request queue wait and processing time; provider attempt events include `provider`, controlled operation path, method, 1-based attempt number, elapsed time to response headers (or transport failure), and HTTP status or timeout/connect flags. Retry events include the reason and applicable delay. Attempts do not log query strings, headers, request bodies, or raw response bodies.
 
+The bot's Twitch Helix client reads `Ratelimit-Limit`, `Ratelimit-Remaining`, and `Ratelimit-Reset`. It reserves known remaining points before sending and pauses an exhausted bucket until Twitch's reset time. Stream lookups and EventSub management share the app-token bucket; Send Chat Message uses a separate bucket. HTTP 429 with points still available backs off only the affected call. Bucket state is shared within one process, not across replicas.
+
 ### Sentry traces and metrics
 
 Railway remains the JSON-log destination. The existing Sentry integration captures error issues with source chains, INFO/WARN breadcrumbs, sampled request/provider traces, and native metrics. No separate collector, metrics endpoint, or telemetry service is required. Sentry initializes before Tokio and flushes after the runtime stops. Without `SENTRY_DSN`, no Sentry data is sent and the periodic business-metric worker is not started.

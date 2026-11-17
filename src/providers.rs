@@ -93,6 +93,96 @@ pub struct Providers {
     public: Arc<Tokens>,
     delegate: Arc<Tokens>,
     osu_next: Arc<Mutex<Instant>>,
+    twitch_limits: Arc<TwitchLimits>,
+}
+
+#[derive(Default)]
+struct TwitchLimits {
+    app: Mutex<TwitchQuota>,
+    chat: Mutex<TwitchQuota>,
+}
+
+#[derive(Default)]
+struct TwitchQuota {
+    window: Option<TwitchWindow>,
+    blocked_until: Option<Instant>,
+}
+
+struct TwitchWindow {
+    reset: i64,
+    until: Instant,
+    remaining: u64,
+}
+
+impl TwitchQuota {
+    fn reserve(&mut self, now: Instant) -> Option<Duration> {
+        if let Some(until) = self.blocked_until.filter(|&until| until > now) {
+            return Some(until - now);
+        }
+        if let Some(window) = self.window.as_mut().filter(|window| window.until > now) {
+            if window.remaining == 0 {
+                return Some(window.until - now);
+            }
+            window.remaining -= 1;
+        }
+        None
+    }
+
+    fn observe(&mut self, response: &Response, retries: u32, now: Instant) -> Option<Duration> {
+        let points = |name| {
+            response
+                .headers()
+                .get(name)?
+                .to_str()
+                .ok()?
+                .parse::<u64>()
+                .ok()
+        };
+        let limit = points("ratelimit-limit").filter(|&limit| limit > 0);
+        let remaining = points("ratelimit-remaining")
+            .map(|remaining| remaining.min(limit.unwrap_or(remaining)));
+        let reset = rate_limit_reset(response);
+        let reset_delay = reset
+            .map(|epoch| epoch.saturating_sub(chrono::Utc::now().timestamp()))
+            .filter(|&seconds| seconds > 0)
+            .map(|seconds| Duration::from_secs(seconds as u64))
+            .filter(|&delay| now.checked_add(delay).is_some());
+        if let (Some(reset), Some(delay), Some(mut remaining)) = (reset, reset_delay, remaining) {
+            let mut until = now + delay;
+            let current = self.window.as_ref().filter(|window| window.until > now);
+            // Responses can arrive out of order. Never restore spent points for the
+            // same reset or reopen an exhausted window before its deadline.
+            if current.is_none_or(|window| {
+                reset >= window.reset && (window.remaining > 0 || remaining == 0)
+            }) {
+                if let Some(window) = current.filter(|window| reset == window.reset) {
+                    remaining = remaining.min(window.remaining);
+                    until = window.until;
+                }
+                self.window = Some(TwitchWindow {
+                    reset,
+                    until,
+                    remaining,
+                });
+            }
+        }
+        if response.status() != StatusCode::TOO_MANY_REQUESTS {
+            return None;
+        }
+        // With points still available, this 429 is an endpoint-specific limit.
+        // Back off the affected call without stalling unrelated Helix operations.
+        let bucket_exhausted = remaining.is_none_or(|remaining| remaining == 0);
+        let retry_after =
+            retry_after_header(response).filter(|&delay| now.checked_add(delay).is_some());
+        let delay = retry_after
+            .max(if bucket_exhausted { reset_delay } else { None })
+            .unwrap_or_else(|| Duration::from_secs(1 << retries.min(5)))
+            .max(Duration::from_secs(1));
+        if bucket_exhausted {
+            self.blocked_until = self.blocked_until.max(Some(now + delay));
+        }
+        Some(delay)
+    }
 }
 
 /// The credentials for one authenticated call: an app token scope or the
@@ -253,6 +343,7 @@ impl Providers {
             public: tokens(Scope::Public),
             delegate: tokens(Scope::Delegate),
             osu_next: Arc::new(Mutex::new(Instant::now())),
+            twitch_limits: Arc::default(),
         })
     }
 
@@ -421,6 +512,12 @@ impl Providers {
             Auth::Bot { .. } => None,
         };
         let is_twitch = scope.is_none_or(Scope::is_twitch);
+        let quota = match scope {
+            Some(Scope::Twitch) => Some(&self.twitch_limits.app),
+            // Send Chat Message uses a separate Twitch API quota.
+            None => Some(&self.twitch_limits.chat),
+            _ => None,
+        };
         let base = scope.map_or(self.config.twitch_api_base.as_str(), |s| {
             s.base(&self.config)
         });
@@ -434,6 +531,13 @@ impl Providers {
             let access = auth.token(self).await?;
             if !is_twitch {
                 self.pace_osu().await.map_err(known_error)?;
+            }
+            if let Some(quota) = quota {
+                loop {
+                    let wait = quota.lock().await.reserve(Instant::now());
+                    let Some(wait) = wait else { break };
+                    self.pause(wait).await.map_err(known_error)?;
+                }
             }
             let mut builder = self
                 .client
@@ -504,6 +608,14 @@ impl Providers {
                 }
             };
             let status = response.status();
+            let twitch_retry_delay = if let Some(quota) = quota {
+                quota
+                    .lock()
+                    .await
+                    .observe(&response, retries, Instant::now())
+            } else {
+                None
+            };
             record_provider_attempt(
                 provider,
                 operation,
@@ -542,7 +654,7 @@ impl Providers {
                 || (!is_twitch && status == StatusCode::FORBIDDEN))
                 && retries < 2
             {
-                let delay = retry_after(&response, retries);
+                let delay = twitch_retry_delay.unwrap_or_else(|| retry_after(&response, retries));
                 let reason = if status == StatusCode::FORBIDDEN {
                     "forbidden"
                 } else {
@@ -931,8 +1043,8 @@ impl Providers {
 fn known_error(error: anyhow::Error) -> ChatError {
     ChatError::new(false, None, format!("{error:#}"))
 }
-fn retry_after(response: &Response, attempt: u32) -> Duration {
-    let seconds = response
+fn retry_after_header(response: &Response) -> Option<Duration> {
+    response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|h| h.to_str().ok())
@@ -949,16 +1061,30 @@ fn retry_after(response: &Response, attempt: u32) -> Duration {
                 })
             })
         })
+        .map(Duration::from_secs)
+}
+
+fn rate_limit_reset(response: &Response) -> Option<i64> {
+    response
+        .headers()
+        .get("ratelimit-reset")?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+fn retry_after(response: &Response, attempt: u32) -> Duration {
+    retry_after_header(response)
         .or_else(|| {
-            response
-                .headers()
-                .get("Ratelimit-Reset")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.parse::<i64>().ok())
-                .map(|epoch| epoch.saturating_sub(chrono::Utc::now().timestamp()).max(1) as u64)
+            rate_limit_reset(response).map(|epoch| {
+                Duration::from_secs(
+                    epoch.saturating_sub(chrono::Utc::now().timestamp()).max(1) as u64
+                )
+            })
         })
-        .unwrap_or(1u64 << attempt.min(5));
-    Duration::from_secs(seconds.clamp(1, 60))
+        .unwrap_or_else(|| Duration::from_secs(1 << attempt.min(5)))
+        .clamp(Duration::from_secs(1), Duration::from_secs(60))
 }
 
 pub(crate) fn valid_login(login: &str) -> bool {
