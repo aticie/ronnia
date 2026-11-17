@@ -2117,6 +2117,172 @@ async fn delivery_fixture(
     (config, store, providers, sends, server)
 }
 
+#[tokio::test]
+async fn request_duplicates_skip_pm_and_feedback_without_blocking_distinct_requests() {
+    let (config, fixture, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("requests.sqlite");
+    let mut store = Store::open(&path).await.unwrap();
+    let mut user = fixture.user_by_twitch(1).await.unwrap().unwrap();
+    user.settings.cooldown = 0.0;
+    user.settings.echo = true;
+    store.save_user(user.clone()).await.unwrap();
+    grant_and_go_live(&store, 1, "streamer").await;
+    user.osu_id = 2;
+    user.osu_username = "b".into();
+    user.twitch_id = 2;
+    user.twitch_username = "other_streamer".into();
+    store.save_user(user).await.unwrap();
+    grant_and_go_live(&store, 2, "other_streamer").await;
+    let mut map = fixture.cache_get(42).await.unwrap().unwrap();
+    store.cache_put(map.clone()).await.unwrap();
+    map["id"] = json!(43);
+    store.cache_put(map).await.unwrap();
+    let (echoes, mut replies) = mpsc::channel(8);
+    let baseline = Clock::new();
+    for (index, (channel, requester, map, mods, seconds, expected)) in [
+        (1, "77", 42, "", 0.0, 1),
+        (1, "77", 42, "", 0.0, 1),
+        (1, "88", 42, "", 0.0, 2),
+        (1, "77", 42, "", 0.0, 2),
+        (1, "77", 42, "+HD", 0.0, 3),
+        (1, "77", 42, "", 0.0, 3),
+        (1, "77", 43, "", 0.0, 4),
+        (2, "77", 42, "", 0.0, 5),
+        (1, "77", 42, "", 20.0, 5),
+        (1, "77", 42, "", 31.0, 6),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = sends.load(Ordering::SeqCst);
+        let mut message = request_message();
+        message.id = format!("repeat-{index}");
+        message.author_id = requester.into();
+        message.channel_id = channel;
+        message.channel = if channel == 1 {
+            "streamer"
+        } else {
+            "other_streamer"
+        }
+        .into();
+        let beatmap = Beatmap {
+            id: map,
+            kind: BeatmapKind::Map,
+            mods: mods.into(),
+        };
+        let clock = Clock {
+            epoch: baseline.epoch + seconds,
+            started: baseline.started,
+        };
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sends.load(Ordering::SeqCst), expected, "case {index}");
+        if expected > before {
+            replies
+                .try_recv()
+                .expect("a distinct request must get feedback");
+        }
+        assert!(
+            replies.try_recv().is_err(),
+            "duplicate case {index} must stay quiet"
+        );
+        if index == 0 {
+            store = Store::open(&path).await.unwrap();
+        }
+    }
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM deliveries", [], |row| row
+                    .get::<_, i64>(0))?,
+                6
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                    .get::<_, i64>(0))?,
+                6
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn request_duplicates_reserve_distinct_chat_ids_atomically() {
+    let (config, store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let mut settings = store.user_by_twitch(1).await.unwrap().unwrap().settings;
+    settings.cooldown = 0.0;
+    settings.echo = true;
+    store.set_settings(1, settings).await.unwrap();
+    let (echoes, mut replies) = mpsc::channel(4);
+    let first = request_message();
+    let mut second = first.clone();
+    second.id = "concurrent-repeat".into();
+    let beatmap = Beatmap {
+        id: 42,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    let clock = Clock::new();
+    let (a, b) = tokio::join!(
+        process_one(
+            &config, &store, &providers, &echoes, &first, &beatmap, clock
+        ),
+        process_one(
+            &config, &store, &providers, &echoes, &second, &beatmap, clock
+        ),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    replies.try_recv().unwrap();
+    assert!(replies.try_recv().is_err());
+    server.abort();
+}
+
+#[tokio::test]
+async fn request_duplicates_allow_definite_failures_but_not_uncertain_sends() {
+    use axum::http::StatusCode;
+    for (status, expected) in [
+        (StatusCode::BAD_REQUEST, 2),
+        (StatusCode::INTERNAL_SERVER_ERROR, 1),
+    ] {
+        let (config, store, providers, sends, server) = delivery_fixture(status).await;
+        let (echoes, mut replies) = mpsc::channel(4);
+        let mut message = request_message();
+        let beatmap = Beatmap {
+            id: 42,
+            kind: BeatmapKind::Map,
+            mods: String::new(),
+        };
+        let clock = Clock::new();
+        assert!(
+            process_one(
+                &config, &store, &providers, &echoes, &message, &beatmap, clock,
+            )
+            .await
+            .is_err()
+        );
+        message.id = "retry-new-chat-message".into();
+        let result = process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await;
+        assert_eq!(result.is_err(), status == StatusCode::BAD_REQUEST);
+        assert_eq!(sends.load(Ordering::SeqCst), expected);
+        assert!(replies.try_recv().is_err());
+        server.abort();
+    }
+}
+
 #[derive(Default)]
 struct LinkFallbackState {
     lookups: AtomicUsize,
