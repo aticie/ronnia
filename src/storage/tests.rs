@@ -554,7 +554,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let user = store.user_by_twitch(20).await.unwrap().unwrap();
     assert!(!user.is_live, "legacy live activity is not consent");
     assert_eq!(user.osu_username, "osu");
@@ -595,7 +595,7 @@ async fn version_one_database_upgrades_transactionally_without_losing_data() {
     let future = directory.path().join("future.sqlite");
     {
         let connection = rusqlite::Connection::open(&future).unwrap();
-        connection.pragma_update(None, "user_version", 8).unwrap();
+        connection.pragma_update(None, "user_version", 9).unwrap();
     }
     assert!(Store::open(&future).await.is_err());
 }
@@ -1042,7 +1042,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let active_at: i64 = scalar(
         &store,
         "SELECT active_at FROM twitch_channel_grants WHERE twitch_id=20",
@@ -1079,7 +1079,7 @@ async fn migration_three_preserves_existing_grants_and_deliveries() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 }
 
 #[tokio::test]
@@ -1107,7 +1107,7 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .unwrap();
     let legacy_count: i64 = scalar(&store, "SELECT COUNT(*) FROM legacy_live").await;
     let user_count: i64 = scalar(&store, "SELECT COUNT(*) FROM users").await;
-    assert_eq!((version, legacy_count, user_count), (7, 0, 1));
+    assert_eq!((version, legacy_count, user_count), (8, 0, 1));
     assert_eq!(
         store
             .replace_legacy_live(vec![(20, "alpha".into())])
@@ -1125,6 +1125,6 @@ async fn migration_four_adds_legacy_live_without_losing_data() {
         .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert_eq!(reopened.live_users(100, 0).await.unwrap(), vec!["alpha"]);
 }

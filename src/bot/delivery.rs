@@ -11,9 +11,11 @@ use crate::{
     storage::Store,
 };
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde_json::Value;
 use tokio::{sync::mpsc, time::Instant};
+
+const REQUEST_DUPLICATE_SECONDS: f64 = 30.0;
 
 pub(super) struct Echo {
     pub(super) channel_id: i64,
@@ -148,6 +150,45 @@ pub(super) async fn process_one(
         tracing::info!(channel = %message.channel, requester = %message.author, reason, "request rejected");
         return Ok(());
     }
+    let channel_id = user.twitch_id;
+    let kind = match beatmap.kind {
+        parser::BeatmapKind::Map => "map",
+        parser::BeatmapKind::Mapset => "mapset",
+    };
+    let last = if user.settings.test {
+        None
+    } else {
+        let requester = message.author_id.clone();
+        let map_id = beatmap.id;
+        let mods = beatmap.mods.clone();
+        let cutoff = clock.now() - REQUEST_DUPLICATE_SECONDS;
+        let (duplicate, last): (bool, Option<f64>) = store
+            .call(move |db| {
+                Ok(db.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM deliveries
+                        WHERE channel_id=?1 AND requester_id=?2
+                          AND beatmap_kind=?3 AND beatmap_id=?4 AND mods=?5
+                          AND last_attempt_at>?6 AND source='new'
+                          AND status IN ('pending','sending','sent','uncertain')
+                    ), (SELECT last_success FROM request_cooldowns
+                        WHERE channel_id=?1 AND requester_id=?2)",
+                    params![channel_id, requester, kind, map_id, mods, cutoff],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await?;
+        if duplicate {
+            tracing::info!(
+                channel_id,
+                requester_id = %message.author_id,
+                message_id = %message.id,
+                "duplicate request ignored before osu! delivery or Twitch feedback"
+            );
+            return Ok(());
+        }
+        last
+    };
     let map = match beatmap.kind {
         parser::BeatmapKind::Map => store.cache_get(beatmap.id).await?,
         parser::BeatmapKind::Mapset => store.cache_get_set(beatmap.id).await?,
@@ -214,9 +255,6 @@ pub(super) async fn process_one(
             return Ok(());
         }
     }
-    let author_id = message.author_id.clone();
-    let channel_id = user.twitch_id;
-    let last = store.call(move |db| Ok(db.query_row("SELECT last_success FROM request_cooldowns WHERE channel_id=?1 AND requester_id=?2", params![channel_id, author_id], |row| row.get::<_, f64>(0)).optional()?)).await?;
     if !user.settings.test && last.is_some_and(|last| clock.now() - last < user.settings.cooldown) {
         tracing::info!(channel = %message.channel, requester = %message.author, "request rejected: cooldown");
         return Ok(());
@@ -234,9 +272,42 @@ pub(super) async fn process_one(
     let target = user.osu_id;
     let text = pm.clone();
     let now = chrono::Utc::now().timestamp();
-    let reserved = store.call(move |db| {
-        Ok(db.execute("INSERT INTO deliveries(twitch_message_id,target_osu_id,message,status,created_at) VALUES(?1,?2,?3,'pending',?4) ON CONFLICT(twitch_message_id) DO NOTHING", params![id, target, text, now])? == 1)
-    }).await?;
+    let requester = message.author_id.clone();
+    let request_channel = (!user.settings.test).then_some(channel_id);
+    let map_id = beatmap.id;
+    let mods = beatmap.mods.clone();
+    let attempted_at = clock.now();
+    let cutoff = attempted_at - REQUEST_DUPLICATE_SECONDS;
+    let reserved = store
+        .call(move |db| {
+            Ok(db.execute(
+                "INSERT INTO deliveries(
+                    twitch_message_id,target_osu_id,message,status,created_at,
+                    channel_id,requester_id,beatmap_kind,beatmap_id,mods,last_attempt_at
+                ) SELECT ?1,?2,?3,'pending',?4,?5,?6,?7,?8,?9,?10
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM deliveries
+                    WHERE channel_id=?5 AND requester_id=?6
+                      AND beatmap_kind=?7 AND beatmap_id=?8 AND mods=?9
+                      AND last_attempt_at>?11 AND source='new'
+                      AND status IN ('pending','sending','sent','uncertain')
+                ) ON CONFLICT(twitch_message_id) DO NOTHING",
+                params![
+                    id,
+                    target,
+                    text,
+                    now,
+                    request_channel,
+                    requester,
+                    kind,
+                    map_id,
+                    mods,
+                    attempted_at,
+                    cutoff
+                ],
+            )? == 1)
+        })
+        .await?;
     if !reserved {
         return Ok(());
     }
@@ -277,11 +348,12 @@ pub(super) async fn process_one(
         };
         record_outcome("ronnia.osu.deliveries", status);
         let description = error.to_string();
+        let attempted_at = clock.now();
         store
             .call(move |db| {
                 db.execute(
-                    "UPDATE deliveries SET status=?1,error=?2 WHERE twitch_message_id=?3",
-                    params![status, description, id],
+                    "UPDATE deliveries SET status=?1,error=?2,last_attempt_at=?4 WHERE twitch_message_id=?3",
+                    params![status, description, id, attempted_at],
                 )?;
                 Ok(())
             })
@@ -307,7 +379,7 @@ pub(super) async fn process_one(
     let update_cooldown = !user.settings.test;
     store.call(move |db| {
         let tx = db.transaction()?;
-        tx.execute("UPDATE deliveries SET status='sent',error=NULL WHERE twitch_message_id=?1", [&id])?;
+        tx.execute("UPDATE deliveries SET status='sent',error=NULL,last_attempt_at=?2 WHERE twitch_message_id=?1", params![id, cooldown_now])?;
         if let Some(map_id) = map_id {
             tx.execute("INSERT INTO statistics(source_id,requester_channel_name,requested_beatmap_id,requested_channel_name,mods,timestamp) VALUES(?1,?2,?3,?4,?5,?6)", params![format!("twitch:{id}"), requester, map_id, channel, mods, now])?;
         }

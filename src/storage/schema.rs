@@ -20,8 +20,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
         7,
         include_str!("../../migrations/007_follower_warnings.sql"),
     ),
+    (
+        8,
+        include_str!("../../migrations/008_request_duplicates.sql"),
+    ),
 ];
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub(super) fn connect(path: &Path) -> Result<Connection> {
     if let Some(parent) = path

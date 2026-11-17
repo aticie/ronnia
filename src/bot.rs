@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use sentry::SentryFutureExt;
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, fmt::Write, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, watch},
     time::{Instant, sleep, sleep_until, timeout},
@@ -43,6 +43,8 @@ const RETRY_CAP: Duration = Duration::from_secs(30);
 /// Twitch allows only a small number of chat messages per window; feedback is
 /// paced instead of being retried after a 429.
 const FEEDBACK_PACE: Duration = Duration::from_millis(1500);
+const FEEDBACK_DUPLICATE_WINDOW: Duration = Duration::from_secs(30);
+const FEEDBACK_DUPLICATE_ATTEMPTS: u8 = 3;
 
 /// The bot worker never takes the API down. Transport failures are logged and
 /// retried with capped jitter; a missing grant leaves the process waiting while
@@ -262,6 +264,13 @@ async fn wait_for_identity(auth: &TwitchAuth, shutdown: &CancellationToken) -> O
     }
 }
 
+struct RecentFeedback {
+    channel_id: i64,
+    text: String,
+    number: u64,
+    sent_at: Instant,
+}
+
 async fn send_feedback(
     config: Arc<Config>,
     store: Store,
@@ -272,6 +281,8 @@ async fn send_feedback(
     shutdown: CancellationToken,
 ) {
     let mut next_send = Instant::now();
+    // Global pacing bounds this 30-second history to about 20 channel entries.
+    let mut recent = VecDeque::<RecentFeedback>::new();
     loop {
         let echo = tokio::select! {
             _ = shutdown.cancelled() => return,
@@ -292,7 +303,7 @@ async fn send_feedback(
                 );
                 return;
             };
-            let text = sanitize_chat(&echo.text, 450);
+            let mut text = sanitize_chat(&echo.text, 450);
             if text.is_empty() {
                 record_outcome("ronnia.twitch.feedback", "skipped");
                 tracing::debug!(
@@ -308,17 +319,79 @@ async fn send_feedback(
                 _ = sleep_until(next_send) => {}
             }
             next_send = Instant::now() + FEEDBACK_PACE;
-            let queue_wait_ms = echo.queued_at.elapsed().as_secs_f64() * 1000.0;
+            let now = Instant::now();
+            while recent
+                .front()
+                .is_some_and(|entry| now.duration_since(entry.sent_at) >= FEEDBACK_DUPLICATE_WINDOW)
+            {
+                recent.pop_front();
+            }
+            let previous = recent
+                .iter()
+                .position(|entry| entry.channel_id == echo.channel_id);
+            let mut number = previous
+                .filter(|index| recent[*index].text == text)
+                .map_or(1, |index| recent[index].number.saturating_add(1));
+            let base_len = text.len();
+            if number > 1 {
+                write!(text, " ({number})").unwrap();
+            }
+            let mut queue_wait_ms = echo.queued_at.elapsed().as_secs_f64() * 1000.0;
+            let mut elapsed_ms = 0.0;
+            let mut attempt = 0;
+            let result = loop {
+                attempt += 1;
+                let started = Instant::now();
+                let result = providers
+                    .send_twitch_message(&auth, echo.channel_id, &sender, &text)
+                    .await;
+                elapsed_ms += started.elapsed().as_secs_f64() * 1000.0;
+                if !matches!(&result, Err(error) if !error.uncertain
+                    && error.drop_reason.as_deref() == Some("msg_duplicate"))
+                    || attempt >= FEEDBACK_DUPLICATE_ATTEMPTS
+                {
+                    break result;
+                }
+                number = number.saturating_add(1);
+                text.truncate(base_len);
+                write!(text, " ({number})").unwrap();
+                tracing::info!(
+                    channel_id = echo.channel_id,
+                    attempt,
+                    duplicate_number = number,
+                    "Retrying duplicate Twitch feedback with a numbered suffix"
+                );
+                let waiting = Instant::now();
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = sleep_until(next_send) => {}
+                }
+                queue_wait_ms += waiting.elapsed().as_secs_f64() * 1000.0;
+                next_send = Instant::now() + FEEDBACK_PACE;
+            };
+            // A duplicate rejection proves this text already exists; an uncertain
+            // send may also exist. Remember both without replaying uncertain sends.
+            if result.is_ok()
+                || matches!(&result, Err(error) if error.uncertain
+                    || error.drop_reason.as_deref() == Some("msg_duplicate"))
+            {
+                if let Some(index) = previous {
+                    recent.remove(index);
+                }
+                text.truncate(base_len);
+                recent.push_back(RecentFeedback {
+                    channel_id: echo.channel_id,
+                    text,
+                    number,
+                    sent_at: Instant::now(),
+                });
+            }
             record_duration("ronnia.feedback.queue_wait", queue_wait_ms);
-            let started = Instant::now();
-            let result = providers
-                .send_twitch_message(&auth, echo.channel_id, &sender, &text)
-                .await;
-            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             record_duration("ronnia.feedback.send_time", elapsed_ms);
             let outcome = match &result {
                 Ok(()) => "sent",
                 Err(error) if error.uncertain => "uncertain",
+                Err(error) if error.drop_reason.as_deref() == Some("msg_duplicate") => "skipped",
                 Err(_) => "failed",
             };
             record_outcome("ronnia.twitch.feedback", outcome);
@@ -327,8 +400,21 @@ async fn send_feedback(
                     channel_id = echo.channel_id,
                     sender_id = %sender,
                     queue_wait_ms,
+                    duplicate_number = number,
                     elapsed_ms,
                     "Twitch chat feedback delivered"
+                ),
+                Err(error) if outcome == "skipped" => tracing::info!(
+                    channel_id = echo.channel_id,
+                    sender_id = %sender,
+                    http_status = error.status,
+                    reason = "duplicate_message",
+                    drop_reason = error.drop_reason.as_deref(),
+                    outcome,
+                    duplicate_number = number,
+                    queue_wait_ms,
+                    elapsed_ms,
+                    "Twitch chat feedback skipped"
                 ),
                 Err(error) => {
                     tracing::warn!(

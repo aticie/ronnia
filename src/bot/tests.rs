@@ -1559,8 +1559,18 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
     .await
     .unwrap();
     request.id = "readable-logs-cache".into();
+    let cache_clock = Clock {
+        epoch: clock.epoch + 31.0,
+        ..clock
+    };
     process_one(
-        &config, &store, &providers, &echoes, &request, &beatmap, clock,
+        &config,
+        &store,
+        &providers,
+        &echoes,
+        &request,
+        &beatmap,
+        cache_clock,
     )
     .await
     .unwrap();
@@ -2115,6 +2125,172 @@ async fn delivery_fixture(
         .await
         .unwrap();
     (config, store, providers, sends, server)
+}
+
+#[tokio::test]
+async fn request_duplicates_skip_pm_and_feedback_without_blocking_distinct_requests() {
+    let (config, fixture, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("requests.sqlite");
+    let mut store = Store::open(&path).await.unwrap();
+    let mut user = fixture.user_by_twitch(1).await.unwrap().unwrap();
+    user.settings.cooldown = 0.0;
+    user.settings.echo = true;
+    store.save_user(user.clone()).await.unwrap();
+    grant_and_go_live(&store, 1, "streamer").await;
+    user.osu_id = 2;
+    user.osu_username = "b".into();
+    user.twitch_id = 2;
+    user.twitch_username = "other_streamer".into();
+    store.save_user(user).await.unwrap();
+    grant_and_go_live(&store, 2, "other_streamer").await;
+    let mut map = fixture.cache_get(42).await.unwrap().unwrap();
+    store.cache_put(map.clone()).await.unwrap();
+    map["id"] = json!(43);
+    store.cache_put(map).await.unwrap();
+    let (echoes, mut replies) = mpsc::channel(8);
+    let baseline = Clock::new();
+    for (index, (channel, requester, map, mods, seconds, expected)) in [
+        (1, "77", 42, "", 0.0, 1),
+        (1, "77", 42, "", 0.0, 1),
+        (1, "88", 42, "", 0.0, 2),
+        (1, "77", 42, "", 0.0, 2),
+        (1, "77", 42, "+HD", 0.0, 3),
+        (1, "77", 42, "", 0.0, 3),
+        (1, "77", 43, "", 0.0, 4),
+        (2, "77", 42, "", 0.0, 5),
+        (1, "77", 42, "", 20.0, 5),
+        (1, "77", 42, "", 31.0, 6),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = sends.load(Ordering::SeqCst);
+        let mut message = request_message();
+        message.id = format!("repeat-{index}");
+        message.author_id = requester.into();
+        message.channel_id = channel;
+        message.channel = if channel == 1 {
+            "streamer"
+        } else {
+            "other_streamer"
+        }
+        .into();
+        let beatmap = Beatmap {
+            id: map,
+            kind: BeatmapKind::Map,
+            mods: mods.into(),
+        };
+        let clock = Clock {
+            epoch: baseline.epoch + seconds,
+            started: baseline.started,
+        };
+        process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sends.load(Ordering::SeqCst), expected, "case {index}");
+        if expected > before {
+            replies
+                .try_recv()
+                .expect("a distinct request must get feedback");
+        }
+        assert!(
+            replies.try_recv().is_err(),
+            "duplicate case {index} must stay quiet"
+        );
+        if index == 0 {
+            store = Store::open(&path).await.unwrap();
+        }
+    }
+    store
+        .call(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM deliveries", [], |row| row
+                    .get::<_, i64>(0))?,
+                6
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM statistics", [], |row| row
+                    .get::<_, i64>(0))?,
+                6
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn request_duplicates_reserve_distinct_chat_ids_atomically() {
+    let (config, store, providers, sends, server) =
+        delivery_fixture(axum::http::StatusCode::OK).await;
+    let mut settings = store.user_by_twitch(1).await.unwrap().unwrap().settings;
+    settings.cooldown = 0.0;
+    settings.echo = true;
+    store.set_settings(1, settings).await.unwrap();
+    let (echoes, mut replies) = mpsc::channel(4);
+    let first = request_message();
+    let mut second = first.clone();
+    second.id = "concurrent-repeat".into();
+    let beatmap = Beatmap {
+        id: 42,
+        kind: BeatmapKind::Map,
+        mods: String::new(),
+    };
+    let clock = Clock::new();
+    let (a, b) = tokio::join!(
+        process_one(
+            &config, &store, &providers, &echoes, &first, &beatmap, clock
+        ),
+        process_one(
+            &config, &store, &providers, &echoes, &second, &beatmap, clock
+        ),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    replies.try_recv().unwrap();
+    assert!(replies.try_recv().is_err());
+    server.abort();
+}
+
+#[tokio::test]
+async fn request_duplicates_allow_definite_failures_but_not_uncertain_sends() {
+    use axum::http::StatusCode;
+    for (status, expected) in [
+        (StatusCode::BAD_REQUEST, 2),
+        (StatusCode::INTERNAL_SERVER_ERROR, 1),
+    ] {
+        let (config, store, providers, sends, server) = delivery_fixture(status).await;
+        let (echoes, mut replies) = mpsc::channel(4);
+        let mut message = request_message();
+        let beatmap = Beatmap {
+            id: 42,
+            kind: BeatmapKind::Map,
+            mods: String::new(),
+        };
+        let clock = Clock::new();
+        assert!(
+            process_one(
+                &config, &store, &providers, &echoes, &message, &beatmap, clock,
+            )
+            .await
+            .is_err()
+        );
+        message.id = "retry-new-chat-message".into();
+        let result = process_one(
+            &config, &store, &providers, &echoes, &message, &beatmap, clock,
+        )
+        .await;
+        assert_eq!(result.is_err(), status == StatusCode::BAD_REQUEST);
+        assert_eq!(sends.load(Ordering::SeqCst), expected);
+        assert!(replies.try_recv().is_err());
+        server.abort();
+    }
 }
 
 #[derive(Default)]
@@ -4885,9 +5061,25 @@ async fn revocation_action_overflow_rescans_every_supported_grant_without_losing
 async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_stream() {
     struct FeedbackState {
         warnings: mpsc::UnboundedSender<Value>,
+        messages: StdMutex<Vec<(String, String)>>,
     }
-    async fn twitch_feedback(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
-        let code = if body["message"] == "duplicate" {
+    async fn twitch_feedback(
+        State(state): State<Arc<FeedbackState>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        let text = body["message"].as_str().unwrap();
+        assert!(text.chars().count() <= 500);
+        state.messages.lock().unwrap().push((
+            body["broadcaster_id"].as_str().unwrap().to_owned(),
+            text.to_owned(),
+        ));
+        if matches!(text, "duplicate (3)" | "duplicate (4)") {
+            return axum::Json(json!({"data":[{"is_sent":true}]}));
+        }
+        if text == "uncertain" {
+            return axum::Json(json!({"data":[{}]}));
+        }
+        let code = if text.starts_with("duplicate") || text.starts_with("always-duplicate") {
             "msg_duplicate"
         } else {
             "followers_only_mode"
@@ -4909,12 +5101,12 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
         store: Store,
         providers: Providers,
         auth: TwitchAuth,
-        texts: &[&str],
+        texts: &[(i64, &str)],
     ) {
         let (tx, rx) = mpsc::channel(8);
-        for text in texts {
+        for (channel_id, text) in texts {
             tx.send(Echo {
-                channel_id: 1,
+                channel_id: *channel_id,
                 text: (*text).into(),
                 span: tracing::Span::none(),
                 queued_at: Instant::now(),
@@ -4925,7 +5117,7 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
         drop(tx);
         let (_identity, identities) = watch::channel(Some("bot".to_owned()));
         tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(20),
             send_feedback(
                 config,
                 store,
@@ -4942,6 +5134,10 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
 
     let (_helix, address, auth_server) = helix_server().await;
     let (warning_tx, mut warnings) = mpsc::unbounded_channel();
+    let state = Arc::new(FeedbackState {
+        warnings: warning_tx,
+        messages: StdMutex::new(Vec::new()),
+    });
     let router = Router::new()
         .route("/helix/chat/messages", post(twitch_feedback))
         .route("/osu/chat/new", post(osu_warning))
@@ -4949,9 +5145,7 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
             "/osu/oauth/token",
             post(|| async { axum::Json(json!({"access_token":"osu-token","expires_in":3600})) }),
         )
-        .with_state(Arc::new(FeedbackState {
-            warnings: warning_tx,
-        }));
+        .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let feedback_base = format!("http://{}", listener.local_addr().unwrap());
     let feedback_server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -4981,26 +5175,110 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
     .unwrap();
     let auth = TwitchAuth::new(config.clone(), store.clone()).unwrap();
     let providers = Providers::new(config.clone(), CancellationToken::new()).unwrap();
+    let feedback_outcomes = Arc::new(StdMutex::new(Vec::new()));
+    let captured_outcomes = feedback_outcomes.clone();
+    #[derive(Default)]
+    struct Captured(StdMutex<Vec<sentry::Envelope>>);
+    impl sentry::Transport for Captured {
+        fn send_envelope(&self, envelope: sentry::Envelope) {
+            self.0.lock().unwrap().push(envelope);
+        }
+    }
+    let transport = Arc::new(Captured::default());
+    let mut options = sentry::ClientOptions::default();
+    options.dsn = Some("https://test@example.invalid/1".parse().unwrap());
+    options.default_integrations = false;
+    options.transport = Some(Arc::new(transport));
+    options.before_send_metric = Some(Arc::new(move |metric| {
+        if metric.name == "ronnia.twitch.feedback" {
+            let metric = serde_json::to_value(metric).unwrap();
+            captured_outcomes
+                .lock()
+                .unwrap()
+                .push(metric["attributes"]["outcome"]["value"].clone());
+        }
+        // Observe metrics locally without sending anything over the network.
+        None
+    }));
+    let client = sentry::Client::from_config(options);
+    let hub = Arc::new(sentry::Hub::new(
+        Some(Arc::new(client)),
+        Arc::new(sentry::Scope::default()),
+    ));
     flush(
         config.clone(),
         store.clone(),
         providers.clone(),
         auth.clone(),
-        &["duplicate"],
+        &[(1, "duplicate"), (1, "duplicate"), (2, "duplicate")],
     )
+    .bind_hub(hub.clone())
     .await;
     assert!(
         warnings.try_recv().is_err(),
         "duplicate-message rejection must not warn about follower mode"
+    );
+    assert_eq!(
+        *feedback_outcomes.lock().unwrap(),
+        vec![json!("sent"), json!("sent"), json!("sent")],
+        "numbered retries count only the final acknowledgement outcome"
+    );
+    assert_eq!(
+        *state.messages.lock().unwrap(),
+        [
+            ("1", "duplicate"),
+            ("1", "duplicate (2)"),
+            ("1", "duplicate (3)"),
+            ("1", "duplicate (4)"),
+            ("2", "duplicate"),
+            ("2", "duplicate (2)"),
+            ("2", "duplicate (3)"),
+        ]
+        .map(|(channel, text)| (channel.to_owned(), text.to_owned()))
+    );
+    state.messages.lock().unwrap().clear();
+    flush(
+        config.clone(),
+        store.clone(),
+        providers.clone(),
+        auth.clone(),
+        &[(1, "always-duplicate"), (1, "uncertain")],
+    )
+    .bind_hub(hub.clone())
+    .await;
+    assert_eq!(
+        *state.messages.lock().unwrap(),
+        [
+            ("1", "always-duplicate"),
+            ("1", "always-duplicate (2)"),
+            ("1", "always-duplicate (3)"),
+            ("1", "uncertain"),
+        ]
+        .map(|(channel, text)| (channel.to_owned(), text.to_owned())),
+        "duplicate retries are bounded and uncertain sends must not be replayed"
     );
     flush(
         config.clone(),
         store.clone(),
         providers.clone(),
         auth.clone(),
-        &["first", "repeat"],
+        &[(1, "first"), (1, "repeat")],
     )
+    .bind_hub(hub)
     .await;
+    assert_eq!(
+        *feedback_outcomes.lock().unwrap(),
+        vec![
+            json!("sent"),
+            json!("sent"),
+            json!("sent"),
+            json!("skipped"),
+            json!("uncertain"),
+            json!("failed"),
+            json!("failed"),
+        ],
+        "real chat restrictions must still count as delivery failures"
+    );
     let warning = warnings
         .try_recv()
         .expect("streamer must receive the follower-mode explanation");
@@ -5024,7 +5302,7 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
         )
         .await
         .unwrap();
-    flush(config, store, providers, auth, &["next-stream"]).await;
+    flush(config, store, providers, auth, &[(1, "next-stream")]).await;
     assert_eq!(warnings.try_recv().unwrap()["target_id"], 1);
     assert!(warnings.try_recv().is_err());
     feedback_server.abort();

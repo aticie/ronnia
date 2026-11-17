@@ -122,6 +122,7 @@ class EventSub:
         self.providers = providers
         self.lock = threading.RLock()
         self.clients = {}
+        self.chatter_ids = {}
         self.connections = 0
         self.attaches = []
         self.shards = {}  # shard ID -> session ID, never socket number -> shard ID
@@ -299,7 +300,10 @@ class EventSub:
                       subscription, at, message_id)
 
     def inject(self, message_id, text, author="viewer", subscriber=False, moderator=False,
-               vip=False, points=False, user_id=301, number=None, uid=101):
+               vip=False, points=False, user_id=None, number=None, uid=101):
+        if user_id is None:
+            with self.lock:
+                user_id = self.chatter_ids.setdefault(author.lower(), 10000 + len(self.chatter_ids))
         badges = [{"set_id": name, "id": "1", "info": ""} for name, enabled in
                   [("subscriber", subscriber), ("moderator", moderator), ("vip", vip),
                    ("broadcaster", user_id == uid)] if enabled]
