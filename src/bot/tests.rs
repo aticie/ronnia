@@ -1559,8 +1559,12 @@ async fn repeated_set_requests_cache_the_first_api_map_not_an_arbitrary_cached_m
     .await
     .unwrap();
     request.id = "readable-logs-cache".into();
+    let cache_clock = Clock {
+        epoch: clock.epoch + 31.0,
+        ..clock
+    };
     process_one(
-        &config, &store, &providers, &echoes, &request, &beatmap, clock,
+        &config, &store, &providers, &echoes, &request, &beatmap, cache_clock,
     )
     .await
     .unwrap();
