@@ -800,6 +800,7 @@ impl Providers {
         broadcaster: i64,
         sender: &str,
         message: &str,
+        reply_parent_message_id: &str,
     ) -> std::result::Result<(), ChatError> {
         if self.config.dry_run {
             return Ok(());
@@ -808,8 +809,12 @@ impl Providers {
             .bot_access_token(&self.shutdown)
             .await
             .map_err(known_error)?;
-        let body =
-            json!({"broadcaster_id":broadcaster.to_string(),"sender_id":sender,"message":message});
+        let body = json!({
+            "broadcaster_id": broadcaster.to_string(),
+            "sender_id": sender,
+            "message": message,
+            "reply_parent_message_id": reply_parent_message_id,
+        });
         let (value, status) = self
             .execute(
                 Auth::Bot { auth, token },

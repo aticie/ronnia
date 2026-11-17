@@ -343,7 +343,13 @@ async fn send_feedback(
                 attempt += 1;
                 let started = Instant::now();
                 let result = providers
-                    .send_twitch_message(&auth, echo.channel_id, &sender, &text)
+                    .send_twitch_message(
+                        &auth,
+                        echo.channel_id,
+                        &sender,
+                        &text,
+                        &echo.reply_parent_message_id,
+                    )
                     .await;
                 elapsed_ms += started.elapsed().as_secs_f64() * 1000.0;
                 if !matches!(&result, Err(error) if !error.uncertain
