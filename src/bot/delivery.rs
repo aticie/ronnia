@@ -19,6 +19,7 @@ const REQUEST_DUPLICATE_SECONDS: f64 = 30.0;
 
 pub(super) struct Echo {
     pub(super) channel_id: i64,
+    pub(super) reply_parent_message_id: String,
     pub(super) text: String,
     pub(super) span: tracing::Span,
     pub(super) queued_at: Instant,
@@ -46,6 +47,7 @@ impl Clock {
 pub(super) fn queue_echo(echoes: &mpsc::Sender<Echo>, message: &Message, text: String) {
     if let Err(error) = echoes.try_send(Echo {
         channel_id: message.channel_id,
+        reply_parent_message_id: message.id.clone(),
         text,
         span: tracing::Span::current(),
         queued_at: Instant::now(),
@@ -255,8 +257,35 @@ pub(super) async fn process_one(
             return Ok(());
         }
     }
-    if !user.settings.test && last.is_some_and(|last| clock.now() - last < user.settings.cooldown) {
-        tracing::info!(channel = %message.channel, requester = %message.author, "request rejected: cooldown");
+    if !user.settings.test
+        && let Some(remaining) = last
+            .map(|last| user.settings.cooldown - (clock.now() - last))
+            .filter(|remaining| *remaining > 0.0)
+    {
+        if !config.dry_run {
+            let id = message.id.clone();
+            let is_new = store
+                .call(move |db| {
+                    Ok(db.query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM deliveries WHERE twitch_message_id=?1)",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )?)
+                })
+                .await?;
+            if is_new {
+                queue_echo(
+                    echoes,
+                    message,
+                    format!(
+                        "@{} Please wait {:.0}s before requesting another map.",
+                        message.author,
+                        remaining.ceil()
+                    ),
+                );
+            }
+        }
+        tracing::info!(channel = %message.channel, requester = %message.author, remaining_seconds = remaining, "request rejected: cooldown");
         return Ok(());
     }
     let mut link_only = metadata.is_none();

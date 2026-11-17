@@ -1304,7 +1304,7 @@ async fn test_mode_receipts_do_not_consume_production_cooldowns_and_dryrun_never
     );
     store.cache_put(serde_json::json!({"id":42,"beatmapset_id":7,"version":"Hard","status":"ranked","bpm":180,"difficulty_rating":5.0,"hit_length":125,"beatmapset":{"id":7,"artist":"Artist","title":"Title"}})).await.unwrap();
     let (echoes, mut echo_rx) = mpsc::channel(4);
-    let beatmap = Beatmap {
+    let mut beatmap = Beatmap {
         id: 42,
         kind: BeatmapKind::Map,
         mods: String::new(),
@@ -1396,6 +1396,14 @@ async fn test_mode_receipts_do_not_consume_production_cooldowns_and_dryrun_never
     .await
     .unwrap();
     assert_eq!(sends.load(Ordering::SeqCst), 2);
+    assert_eq!(echo_rx.try_recv().unwrap().reply_parent_message_id, "evt-1");
+    assert_eq!(
+        echo_rx.try_recv().unwrap().reply_parent_message_id,
+        production.id
+    );
+    user.settings.echo = false;
+    store.set_settings(1, user.settings.clone()).await.unwrap();
+    beatmap.mods = "+HD".into();
     production.id = "production-within-cooldown".into();
     process_one(
         &config,
@@ -1413,6 +1421,16 @@ async fn test_mode_receipts_do_not_consume_production_cooldowns_and_dryrun_never
         2,
         "the successful production transaction must gate the next same-requester request"
     );
+    let reply = echo_rx
+        .try_recv()
+        .expect("a distinct request on cooldown must explain the wait");
+    assert_eq!(reply.reply_parent_message_id, production.id);
+    let remaining = reply
+        .text
+        .split_whitespace()
+        .find_map(|word| word.strip_suffix('s')?.parse::<u64>().ok())
+        .expect("cooldown reply must include the remaining seconds");
+    assert!((1..=30).contains(&remaining));
     store
         .call(|db| {
             assert_eq!(
@@ -1426,9 +1444,14 @@ async fn test_mode_receipts_do_not_consume_production_cooldowns_and_dryrun_never
         .unwrap();
     while echo_rx.try_recv().is_ok() {}
     config.dry_run = true;
+    let mut dry = request_message();
+    dry.id = "dry-cooldown".into();
+    process_one(&config, &store, &providers, &echoes, &dry, &beatmap, clock)
+        .await
+        .unwrap();
+    assert!(echo_rx.try_recv().is_err());
     user.settings.test = true;
     store.set_settings(1, user.settings.clone()).await.unwrap();
-    let mut dry = request_message();
     dry.id = "dry-accepted".into();
     process_one(&config, &store, &providers, &echoes, &dry, &beatmap, clock)
         .await
@@ -2382,7 +2405,7 @@ async fn metadata_forbidden_link_fallback_preserves_identity_mods_cooldown_and_d
         let mut message = request_message();
         message.vip = true;
         message.points = true;
-        let beatmap = Beatmap {
+        let mut beatmap = Beatmap {
             id: 42,
             kind,
             mods: "+HDDT".into(),
@@ -2403,8 +2426,10 @@ async fn metadata_forbidden_link_fallback_preserves_identity_mods_cooldown_and_d
                 "[VIP] viewer -> [https://osu.ppy.sh/{path}/42 Beatmap link] +HDDT + USED POINTS (metadata unavailable; difficulty unverified)"
             )
         );
+        let confirmation = rx.try_recv().unwrap();
+        assert_eq!(confirmation.reply_parent_message_id, message.id);
         assert_eq!(
-            rx.try_recv().unwrap().text,
+            confirmation.text,
             format!(
                 "https://osu.ppy.sh/{path}/42 - Request sent! (link only; metadata unavailable)"
             )
@@ -2444,6 +2469,11 @@ async fn metadata_forbidden_link_fallback_preserves_identity_mods_cooldown_and_d
         )
         .await
         .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "replaying an already delivered message must not produce a cooldown reply"
+        );
+        beatmap.mods = "+DT".into();
         message.id = "within-cooldown".into();
         process_one(
             &config, &store, &providers, &echoes, &message, &beatmap, clock,
@@ -2451,7 +2481,14 @@ async fn metadata_forbidden_link_fallback_preserves_identity_mods_cooldown_and_d
         .await
         .unwrap();
         assert_eq!(state.messages.lock().unwrap().len(), 1);
-        assert!(rx.try_recv().is_err());
+        let cooldown = rx.try_recv().unwrap();
+        assert_eq!(cooldown.reply_parent_message_id, message.id);
+        let remaining = cooldown
+            .text
+            .split_whitespace()
+            .find_map(|word| word.strip_suffix('s')?.parse::<u64>().ok())
+            .unwrap();
+        assert!((1..=3600).contains(&remaining));
         config.dry_run = true;
         message.author_id = "another-viewer".into();
         message.id = "dry-link-fallback".into();
@@ -5062,6 +5099,7 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
     struct FeedbackState {
         warnings: mpsc::UnboundedSender<Value>,
         messages: StdMutex<Vec<(String, String)>>,
+        reply_parents: StdMutex<Vec<String>>,
     }
     async fn twitch_feedback(
         State(state): State<Arc<FeedbackState>>,
@@ -5073,6 +5111,12 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
             body["broadcaster_id"].as_str().unwrap().to_owned(),
             text.to_owned(),
         ));
+        state.reply_parents.lock().unwrap().push(
+            body["reply_parent_message_id"]
+                .as_str()
+                .expect("feedback must reply to the originating chat message")
+                .to_owned(),
+        );
         if matches!(text, "duplicate (3)" | "duplicate (4)") {
             return axum::Json(json!({"data":[{"is_sent":true}]}));
         }
@@ -5104,15 +5148,11 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
         texts: &[(i64, &str)],
     ) {
         let (tx, rx) = mpsc::channel(8);
-        for (channel_id, text) in texts {
-            tx.send(Echo {
-                channel_id: *channel_id,
-                text: (*text).into(),
-                span: tracing::Span::none(),
-                queued_at: Instant::now(),
-            })
-            .await
-            .unwrap();
+        for (index, (channel_id, text)) in texts.iter().enumerate() {
+            let mut message = request_message();
+            message.channel_id = *channel_id;
+            message.id = format!("request-{channel_id}-{index}");
+            delivery::queue_echo(&tx, &message, (*text).into());
         }
         drop(tx);
         let (_identity, identities) = watch::channel(Some("bot".to_owned()));
@@ -5137,6 +5177,7 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
     let state = Arc::new(FeedbackState {
         warnings: warning_tx,
         messages: StdMutex::new(Vec::new()),
+        reply_parents: StdMutex::new(Vec::new()),
     });
     let router = Router::new()
         .route("/helix/chat/messages", post(twitch_feedback))
@@ -5235,6 +5276,20 @@ async fn feedback_warns_the_streamer_only_for_follower_rejections_once_per_strea
             ("2", "duplicate (3)"),
         ]
         .map(|(channel, text)| (channel.to_owned(), text.to_owned()))
+    );
+    assert_eq!(
+        *state.reply_parents.lock().unwrap(),
+        [
+            "request-1-0",
+            "request-1-0",
+            "request-1-0",
+            "request-1-1",
+            "request-2-2",
+            "request-2-2",
+            "request-2-2",
+        ]
+        .map(str::to_owned),
+        "numbered retries must keep the parent of the original request"
     );
     state.messages.lock().unwrap().clear();
     flush(
