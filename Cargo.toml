@@ -40,6 +40,9 @@ aws-sdk-s3 = "1"
 flate2 = "1"
 tempfile = "3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
