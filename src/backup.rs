@@ -111,6 +111,14 @@ async fn backup_once(
         .send()
         .await
         .context("Uploading SQLite backup")?;
+    #[cfg(target_os = "linux")]
+    if let Err(error) = release_source_cache(store).await {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            "Could not release SQLite source file cache"
+        );
+    }
+
     let expired = delete_expired(client, config).await?;
     Ok(BackupReport {
         key,
@@ -118,6 +126,22 @@ async fn backup_once(
         uploaded_bytes,
         expired,
     })
+}
+
+#[cfg(target_os = "linux")]
+async fn release_source_cache(store: &Store) -> Result<()> {
+    store
+        .call(|conn| {
+            // The snapshot scan warms the live database's file pages. Advise only
+            // on the main file; do not checkpoint or touch its WAL/SHM files.
+            let path = conn
+                .path()
+                .context("SQLite main database path unavailable")?;
+            let source = File::open(path).context("Opening SQLite source for cache advice")?;
+            rustix::fs::fadvise(&source, 0, None, rustix::fs::Advice::DontNeed)
+                .context("Advising Linux to release SQLite source file cache")
+        })
+        .await
 }
 
 fn prepare_upload(snapshot: &Path, compressed: &Path) -> Result<(u64, u64)> {
